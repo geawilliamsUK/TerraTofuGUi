@@ -3,22 +3,241 @@
 //! Every tool forwards an [`AgentCommand`] to the UI thread and waits for the reply.
 //! The server itself holds no project state, so any number of sessions can share it.
 
-use super::{AgentCommand, AgentReply};
+use super::{AgentCommand, AgentReply, ServerEvent, Started};
 use rmcp::{
     handler::server::{router::tool::ToolRouter, wrapper::Parameters},
-    model::{CallToolResult, ContentBlock as Content, ServerCapabilities, ServerInfo},
-    schemars, tool, tool_handler, tool_router, ServerHandler,
+    model::{
+        CallToolResult, ContentBlock as Content, ErrorData as McpError, ListResourceTemplatesResult,
+        ListResourcesResult, PaginatedRequestParams, ReadResourceRequestParams, ReadResourceResponse,
+        ReadResourceResult, Resource, ResourceContents, ResourceTemplate, ResourceUpdatedNotification,
+        ResourceUpdatedNotificationParam, ServerCapabilities, ServerInfo, ServerNotification,
+        SubscribeRequestParams, UnsubscribeRequestParams,
+    },
+    schemars,
+    service::{Peer, RequestContext},
+    tool, tool_handler, tool_router, RoleServer, ServerHandler,
 };
-use std::sync::mpsc;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{mpsc, Arc, Mutex};
 use std::time::Duration;
+
+/// `(session, peer, uri)` for every `resources/subscribe` still in force.
+type Subscribers = Arc<Mutex<Vec<(u64, Peer<RoleServer>, String)>>>;
+
+static SESSIONS: AtomicU64 = AtomicU64::new(1);
 
 #[derive(Clone)]
 pub struct TtgServer {
     tx: mpsc::Sender<(AgentCommand, AgentReply)>,
     ctx: egui::Context,
+    subs: Subscribers,
+    /// One `TtgServer` per client session.
+    session: u64,
     /// Read by the `#[tool_handler]`-generated `call_tool` / `list_tools`.
     #[allow(dead_code)]
     tool_router: ToolRouter<Self>,
+}
+
+/// Resources the server exposes alongside its tools.
+const RESOURCES: &[(&str, &str, &str, &str)] = &[
+    (
+        "ttg://project",
+        "project",
+        "The open project as JSON (same shape as the .ttg.json file)",
+        "application/json",
+    ),
+    (
+        "ttg://project/summary",
+        "project summary",
+        "Counts, tool, target provider, path, dirty flag, revision, diagnostics totals",
+        "application/json",
+    ),
+    (
+        "ttg://diagnostics",
+        "diagnostics",
+        "Current diagnostics for the target provider",
+        "application/json",
+    ),
+    (
+        "ttg://catalog",
+        "catalog",
+        "Every abstract resource type with mapping status",
+        "application/json",
+    ),
+    ("ttg://docs/readme", "README", "User guide", "text/markdown"),
+    (
+        "ttg://docs/mapping-format",
+        "mapping format",
+        "How resource definitions (TOML) map abstract types to provider resources",
+        "text/markdown",
+    ),
+    (
+        "ttg://docs/architecture",
+        "architecture",
+        "Crate layout and data flow",
+        "text/markdown",
+    ),
+];
+
+fn doc(uri: &str) -> Option<&'static str> {
+    match uri {
+        "ttg://docs/readme" => Some(include_str!("../../../../README.md")),
+        "ttg://docs/mapping-format" => Some(include_str!("../../../../docs/MAPPING_FORMAT.md")),
+        "ttg://docs/architecture" => Some(include_str!("../../../../docs/ARCHITECTURE.md")),
+        _ => None,
+    }
+}
+
+/// Build a write command from a tool name and its JSON arguments (for `project_apply`).
+pub fn command_from_json(tool: &str, args: serde_json::Value) -> Result<AgentCommand, String> {
+    fn parse<T: serde::de::DeserializeOwned>(v: serde_json::Value) -> Result<T, String> {
+        serde_json::from_value(v).map_err(|e| format!("bad arguments: {e}"))
+    }
+    let args = if args.is_null() {
+        serde_json::Value::Object(Default::default())
+    } else {
+        args
+    };
+    Ok(match tool {
+        "entity_add" => {
+            let a: EntityAddArgs = parse(args)?;
+            AgentCommand::EntityAdd {
+                type_id: a.type_id,
+                name: a.name,
+                parent: a.parent,
+                x: a.x,
+                y: a.y,
+                providers: a.providers,
+            }
+        }
+        "entity_update" => {
+            let a: EntityUpdateArgs = parse(args)?;
+            AgentCommand::EntityUpdate {
+                entity: a.entity,
+                name: a.name,
+                config: a.config,
+                provider_config: a.provider_config,
+                manual: a.manual,
+                providers: a.providers,
+                extra: a.extra,
+                extra_provider: a.extra_provider,
+                extra_block: a.extra_block,
+            }
+        }
+        "entity_move" => {
+            let a: MoveArgs = parse(args)?;
+            AgentCommand::EntityMove {
+                entity: a.entity,
+                x: a.x,
+                y: a.y,
+            }
+        }
+        "entity_resize" => {
+            let a: ResizeArgs = parse(args)?;
+            AgentCommand::EntityResize {
+                entity: a.entity,
+                w: a.w,
+                h: a.h,
+            }
+        }
+        "entity_set_parent" => {
+            let a: SetParentArgs = parse(args)?;
+            AgentCommand::EntitySetParent {
+                entity: a.entity,
+                parent: a.parent,
+            }
+        }
+        "entity_delete" => {
+            let a: EntitiesArgs = parse(args)?;
+            AgentCommand::EntityDelete { entities: a.entities }
+        }
+        "link_add" => {
+            let a: LinkAddArgs = parse(args)?;
+            AgentCommand::LinkAdd {
+                source: a.source,
+                target: a.target,
+                relation: a.relation,
+                providers: a.providers,
+            }
+        }
+        "link_remove" => {
+            let a: LinkRemoveArgs = parse(args)?;
+            AgentCommand::LinkRemove {
+                source: a.source,
+                target: a.target,
+                relation: a.relation,
+            }
+        }
+        "selection_set" => {
+            let a: EntitiesArgs = parse(args)?;
+            AgentCommand::SelectionSet { entities: a.entities }
+        }
+        "view_set" => {
+            let a: ViewSetArgs = parse(args)?;
+            AgentCommand::ViewSet { filter: a.filter }
+        }
+        "view_save" => {
+            let a: NameArgs = parse(args)?;
+            AgentCommand::ViewSave { name: a.name }
+        }
+        "view_activate" => {
+            let a: NameArgs = parse(args)?;
+            AgentCommand::ViewActivate { name: a.name }
+        }
+        "view_group_add" => {
+            let a: GroupAddArgs = parse(args)?;
+            AgentCommand::GroupAdd {
+                label: a.label,
+                x: a.x,
+                y: a.y,
+                w: a.w,
+                h: a.h,
+                color: a.color,
+            }
+        }
+        "view_flow_add" => {
+            let a: FlowAddArgs = parse(args)?;
+            AgentCommand::FlowAdd {
+                from: a.from,
+                to: a.to,
+                label: a.label.unwrap_or_default(),
+                dashed: a.dashed.unwrap_or(false),
+            }
+        }
+        "view_annotation_remove" => {
+            let a: KeyArgs = parse(args)?;
+            AgentCommand::AnnotationRemove { key: a.key }
+        }
+        "layout_tidy" => {
+            let a: TidyArgs = parse(args)?;
+            AgentCommand::LayoutTidy {
+                container: a.container,
+            }
+        }
+        "layout_align" => {
+            let a: AlignArgs = parse(args)?;
+            AgentCommand::LayoutAlign { how: a.how }
+        }
+        "layout_distribute" => {
+            let a: DistributeArgs = parse(args)?;
+            AgentCommand::LayoutDistribute {
+                horizontal: a.horizontal,
+            }
+        }
+        "settings_set" => {
+            let a: SettingsArgs = parse(args)?;
+            AgentCommand::SettingsSet {
+                tool: a.tool,
+                provider: a.provider,
+                provider_settings: a.provider_settings,
+            }
+        }
+        other => {
+            return Err(format!(
+                "`{other}` cannot be used inside project_apply (only diagram writes: entity_*, link_*, view_*, layout_*, selection_set, settings_set)"
+            ))
+        }
+    })
 }
 
 fn ok_json(v: serde_json::Value) -> CallToolResult {
@@ -258,27 +477,65 @@ pub struct NoArgs {}
 // ------------------------------------------------------------------ tools
 
 impl TtgServer {
-    pub fn new(tx: mpsc::Sender<(AgentCommand, AgentReply)>, ctx: egui::Context) -> Self {
+    pub fn new(tx: mpsc::Sender<(AgentCommand, AgentReply)>, ctx: egui::Context, subs: Subscribers) -> Self {
         TtgServer {
             tx,
             ctx,
+            subs,
+            session: SESSIONS.fetch_add(1, Ordering::Relaxed),
             tool_router: Self::tool_router(),
         }
     }
 
-    async fn run(&self, cmd: AgentCommand) -> CallToolResult {
+    /// Queue a command for the UI thread and wait for its answer. Writes get a long
+    /// timeout because the user may be looking at an Allow / Deny prompt.
+    async fn exec(&self, cmd: AgentCommand) -> Result<serde_json::Value, String> {
+        let secs = if cmd.is_write() { 600 } else { 60 };
         let (reply_tx, reply_rx) = tokio::sync::oneshot::channel();
         if self.tx.send((cmd, reply_tx)).is_err() {
-            return fail("the app is shutting down");
+            return Err("the app is shutting down".into());
         }
         self.ctx.request_repaint();
-        match tokio::time::timeout(Duration::from_secs(60), reply_rx).await {
-            Ok(Ok(Ok(v))) => ok_json(v),
-            Ok(Ok(Err(e))) => fail(e),
-            Ok(Err(_)) => fail("the app dropped the request"),
-            Err(_) => fail("timed out waiting for the app (is a dialog open?)"),
+        match tokio::time::timeout(Duration::from_secs(secs), reply_rx).await {
+            Ok(Ok(r)) => r,
+            Ok(Err(_)) => Err("the app dropped the request".into()),
+            Err(_) => Err("timed out waiting for the app (is a dialog or an approval prompt open?)".into()),
         }
     }
+
+    async fn run(&self, cmd: AgentCommand) -> CallToolResult {
+        match self.exec(cmd).await {
+            Ok(v) => ok_json(v),
+            Err(e) => fail(e),
+        }
+    }
+}
+
+#[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
+pub struct ApplyItem {
+    #[schemars(description = "Name of a write tool, e.g. `entity_add`")]
+    pub tool: String,
+    #[schemars(description = "That tool's arguments")]
+    #[serde(default)]
+    pub args: serde_json::Value,
+}
+
+#[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
+pub struct ApplyArgs {
+    pub commands: Vec<ApplyItem>,
+}
+
+#[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
+pub struct DiffArgs {
+    #[schemars(description = "Directory a previous export wrote to")]
+    pub dir: String,
+    pub provider: Option<String>,
+}
+
+#[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
+pub struct ChangesArgs {
+    #[schemars(description = "Revision returned by an earlier project_changes / project_summary call")]
+    pub since: Option<u64>,
 }
 
 #[tool_router]
@@ -630,6 +887,42 @@ impl TtgServer {
         CallToolResult::success(content)
     }
 
+    #[tool(
+        description = "Apply several diagram writes (entity_*, link_*, view_*, layout_*, selection_set, settings_set) as ONE undo step. Stops at the first failure and rolls the whole batch back. Returns each command's result."
+    )]
+    async fn project_apply(&self, Parameters(a): Parameters<ApplyArgs>) -> CallToolResult {
+        let mut cmds = Vec::with_capacity(a.commands.len());
+        for (i, it) in a.commands.into_iter().enumerate() {
+            let name = it.tool.clone();
+            match command_from_json(&it.tool, it.args) {
+                Ok(c) => cmds.push(c),
+                Err(e) => return fail(format!("command {i} ({name}): {e}")),
+            }
+        }
+        if cmds.is_empty() {
+            return fail("no commands");
+        }
+        self.run(AgentCommand::Batch(cmds)).await
+    }
+
+    #[tool(
+        description = "What exporting would change in an existing export directory: per-file added/removed line counts and unified diffs. Nothing is written."
+    )]
+    async fn export_diff(&self, Parameters(a): Parameters<DiffArgs>) -> CallToolResult {
+        self.run(AgentCommand::ExportDiff {
+            dir: a.dir,
+            provider: a.provider,
+        })
+        .await
+    }
+
+    #[tool(
+        description = "Has the diagram changed (by the user or the agent) since a revision? Returns the current revision, who changed it last and how long ago. Poll this between edits, or subscribe to the ttg://project resource for push notifications."
+    )]
+    async fn project_changes(&self, Parameters(a): Parameters<ChangesArgs>) -> CallToolResult {
+        self.run(AgentCommand::Changes { since: a.since }).await
+    }
+
     #[tool(description = "Undo the last change (agent or user).")]
     async fn undo(&self) -> CallToolResult {
         self.run(AgentCommand::Undo).await
@@ -643,14 +936,133 @@ impl TtgServer {
 
 #[tool_handler]
 impl ServerHandler for TtgServer {
+    fn list_resources(
+        &self,
+        _request: Option<PaginatedRequestParams>,
+        _context: RequestContext<RoleServer>,
+    ) -> impl std::future::Future<Output = Result<ListResourcesResult, McpError>> + Send + '_ {
+        let items = RESOURCES
+            .iter()
+            .map(|(uri, name, desc, mime)| {
+                Resource::new(*uri, *name)
+                    .with_description(*desc)
+                    .with_mime_type(*mime)
+            })
+            .collect();
+        std::future::ready(Ok(ListResourcesResult::with_all_items(items)))
+    }
+
+    fn list_resource_templates(
+        &self,
+        _request: Option<PaginatedRequestParams>,
+        _context: RequestContext<RoleServer>,
+    ) -> impl std::future::Future<Output = Result<ListResourceTemplatesResult, McpError>> + Send + '_ {
+        let items = vec![
+            ResourceTemplate::new("ttg://catalog/{type_id}", "catalog type")
+                .with_description(
+                    "Full definition of one abstract type (fields, relations, per-provider mapping)",
+                )
+                .with_mime_type("application/json"),
+            ResourceTemplate::new("ttg://reach/{entity}", "reachability from an entity")
+                .with_description("What one resource can reach, with paths and reasons")
+                .with_mime_type("application/json"),
+        ];
+        std::future::ready(Ok(ListResourceTemplatesResult::with_all_items(items)))
+    }
+
+    async fn read_resource(
+        &self,
+        request: ReadResourceRequestParams,
+        _context: RequestContext<RoleServer>,
+    ) -> Result<ReadResourceResponse, McpError> {
+        {
+            let uri = request.uri;
+            if let Some(text) = doc(&uri) {
+                return Ok(ReadResourceResult::new(vec![
+                    ResourceContents::text(text, uri).with_mime_type("text/markdown")
+                ])
+                .into());
+            }
+            let cmd = match uri.as_str() {
+                "ttg://project" => AgentCommand::ProjectGet,
+                "ttg://project/summary" => AgentCommand::ProjectSummary,
+                "ttg://diagnostics" => AgentCommand::Diagnostics,
+                "ttg://catalog" => AgentCommand::CatalogTypes,
+                u if u.starts_with("ttg://catalog/") => AgentCommand::CatalogType {
+                    type_id: u["ttg://catalog/".len()..].to_string(),
+                },
+                u if u.starts_with("ttg://reach/") => AgentCommand::ReachFrom {
+                    entity: u["ttg://reach/".len()..].to_string(),
+                },
+                _ => {
+                    return Err(McpError::resource_not_found(
+                        format!("unknown resource {uri}"),
+                        None,
+                    ))
+                }
+            };
+            match self.exec(cmd).await {
+                Ok(v) => {
+                    let text = serde_json::to_string_pretty(&v).unwrap_or_else(|_| v.to_string());
+                    Ok(ReadResourceResult::new(vec![
+                        ResourceContents::text(text, uri).with_mime_type("application/json")
+                    ])
+                    .into())
+                }
+                Err(e) => Err(McpError::internal_error(e, None)),
+            }
+        }
+    }
+
+    fn subscribe(
+        &self,
+        request: SubscribeRequestParams,
+        context: RequestContext<RoleServer>,
+    ) -> impl std::future::Future<Output = Result<(), McpError>> + Send + '_ {
+        let known = RESOURCES.iter().any(|(u, ..)| *u == request.uri)
+            || request.uri.starts_with("ttg://catalog/")
+            || request.uri.starts_with("ttg://reach/");
+        let res = if known {
+            let mut subs = self.subs.lock().unwrap();
+            subs.retain(|(s, _, u)| !(*s == self.session && *u == request.uri));
+            subs.push((self.session, context.peer.clone(), request.uri));
+            Ok(())
+        } else {
+            Err(McpError::resource_not_found(
+                format!("unknown resource {}", request.uri),
+                None,
+            ))
+        };
+        std::future::ready(res)
+    }
+
+    fn unsubscribe(
+        &self,
+        request: UnsubscribeRequestParams,
+        _context: RequestContext<RoleServer>,
+    ) -> impl std::future::Future<Output = Result<(), McpError>> + Send + '_ {
+        self.subs
+            .lock()
+            .unwrap()
+            .retain(|(s, _, u)| !(*s == self.session && *u == request.uri));
+        std::future::ready(Ok(()))
+    }
+
     fn get_info(&self) -> ServerInfo {
-        ServerInfo::new(ServerCapabilities::builder().enable_tools().build()).with_instructions(
+        ServerInfo::new(
+            ServerCapabilities::builder()
+                .enable_tools()
+                .enable_resources()
+                .enable_resources_subscribe()
+                .build(),
+        )
+        .with_instructions(
             "TerraTofu GUI: a visual cloud-architecture editor that generates Terraform/OpenTofu. \
              You are editing the diagram the user has open right now; they see every change as \
              you make it and every write is one undo step. Start with project_summary and \
              catalog_types. Entities can be addressed by id or by display name. Never call \
              project_save without the user asking. Prefer entity_set_parent over explicit \
-             network_membership links to containers: containment implies membership. One              diagram serves every provider: tag an entity or link with `providers` to keep it              out of the other provider's export (provider-only types are tagged automatically).              Curated types cover the portable concepts; for anything else use schema_search and add              a native resource (`native:<provider>:<type>`), setting its arguments via              entity_update.extra. Extra arguments on curated types add or override provider              arguments and are validated against the schema.",
+             network_membership links to containers: containment implies membership. One              diagram serves every provider: tag an entity or link with `providers` to keep it              out of the other provider's export (provider-only types are tagged automatically).              Curated types cover the portable concepts; for anything else use schema_search and add              a native resource (`native:<provider>:<type>`), setting its arguments via              entity_update.extra. Extra arguments on curated types add or override provider              arguments and are validated against the schema. Use project_apply to make several              writes as one undo step, project_changes (or a subscription to ttg://project) to notice              the user's own edits, and export_diff before export_run to show what would change. Some              writes (saving, opening, exporting, deleting) may wait for the user's approval.",
         )
     }
 }
@@ -663,7 +1075,7 @@ pub fn run(
     token: String,
     tx: mpsc::Sender<(AgentCommand, AgentReply)>,
     ctx: egui::Context,
-    started: mpsc::Sender<Result<tokio_util::sync::CancellationToken, String>>,
+    started: mpsc::Sender<Result<Started, String>>,
 ) {
     use rmcp::transport::streamable_http_server::{
         session::local::LocalSessionManager, StreamableHttpServerConfig, StreamableHttpService,
@@ -696,11 +1108,38 @@ pub fn run(
         };
         let config = StreamableHttpServerConfig::default();
         let cancel = config.cancellation_token.clone();
+        let subs: Subscribers = Arc::new(Mutex::new(Vec::new()));
+        let subs_for_service = subs.clone();
         let service = StreamableHttpService::new(
-            move || Ok(TtgServer::new(tx.clone(), ctx.clone())),
+            move || Ok(TtgServer::new(tx.clone(), ctx.clone(), subs_for_service.clone())),
             std::sync::Arc::new(LocalSessionManager::default()),
             config,
         );
+        // Fan project changes out to subscribed clients, coalescing bursts (drags).
+        let (ev_tx, mut ev_rx) = tokio::sync::mpsc::unbounded_channel::<ServerEvent>();
+        tokio::spawn(async move {
+            while let Some(ev) = ev_rx.recv().await {
+                let ServerEvent::ProjectChanged = ev;
+                tokio::time::sleep(Duration::from_millis(250)).await;
+                while ev_rx.try_recv().is_ok() {}
+                let targets: Vec<(u64, Peer<RoleServer>, String)> = subs.lock().unwrap().clone();
+                let mut dead = Vec::new();
+                for (sid, peer, uri) in targets {
+                    if uri.starts_with("ttg://docs/") || uri.starts_with("ttg://catalog") {
+                        continue;
+                    }
+                    let n = ServerNotification::ResourceUpdatedNotification(ResourceUpdatedNotification::new(
+                        ResourceUpdatedNotificationParam::new(uri.clone()),
+                    ));
+                    if peer.send_notification(n).await.is_err() {
+                        dead.push(sid);
+                    }
+                }
+                if !dead.is_empty() {
+                    subs.lock().unwrap().retain(|(s, _, _)| !dead.contains(s));
+                }
+            }
+        });
         let expected = format!("Bearer {token}");
         let auth = axum::middleware::from_fn(move |req: axum::extract::Request, next: axum::middleware::Next| {
             let ok = req
@@ -721,7 +1160,7 @@ pub fn run(
             }
         });
         let router = axum::Router::new().nest_service("/mcp", service).layer(auth);
-        let _ = started.send(Ok(cancel.clone()));
+        let _ = started.send(Ok((cancel.clone(), ev_tx)));
         let shutdown = cancel.clone();
         let _ = axum::serve(listener, router)
             .with_graceful_shutdown(async move { shutdown.cancelled().await })

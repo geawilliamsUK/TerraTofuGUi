@@ -137,7 +137,18 @@ pub struct TtgApp {
 
 impl TtgApp {
     pub fn new(cc: &eframe::CreationContext<'_>, open: Option<PathBuf>, defs: Option<PathBuf>) -> Self {
-        cc.egui_ctx.set_visuals(egui::Visuals::light());
+        Self::build(&cc.egui_ctx, cc.storage, open, defs)
+    }
+
+    /// Construct the app around any egui context: eframe's on the desktop, a bare
+    /// `egui::Context::default()` for the headless `--serve` mode.
+    pub fn build(
+        egui_ctx: &egui::Context,
+        storage: Option<&dyn eframe::Storage>,
+        open: Option<PathBuf>,
+        defs: Option<PathBuf>,
+    ) -> Self {
+        egui_ctx.set_visuals(egui::Visuals::light());
         let defs_dir = defs.clone();
         let (catalog, mut status) = match defs {
             Some(d) => match Catalog::load_dir(&d) {
@@ -198,7 +209,7 @@ impl TtgApp {
             #[cfg(feature = "mcp")]
             mcp: crate::mcp::McpState::default(),
         };
-        if let Some(storage) = cc.storage {
+        if let Some(storage) = storage {
             if let Some(json) = storage.get_string("recent_files") {
                 if let Ok(v) = serde_json::from_str::<Vec<PathBuf>>(&json) {
                     app.recent = v.into_iter().filter(|p| p.exists()).collect();
@@ -243,7 +254,7 @@ impl TtgApp {
                 app.mcp.settings.autostart = false;
             }
             if app.mcp.settings.autostart || forced {
-                match app.mcp.start(cc.egui_ctx.clone()) {
+                match app.mcp.start(egui_ctx.clone()) {
                     Err(e) => {
                         eprintln!("[mcp] failed to start: {e}");
                         status = format!("MCP server failed to start: {e}");
@@ -300,6 +311,8 @@ impl TtgApp {
             self.history.push(before);
             self.dirty = true;
             self.diag_dirty = true;
+            #[cfg(feature = "mcp")]
+            self.mcp.note_change();
         }
     }
 
@@ -1110,6 +1123,8 @@ impl TtgApp {
     }
 
     fn windows(&mut self, ctx: &egui::Context) {
+        #[cfg(feature = "mcp")]
+        self.confirm_window(ctx);
         // Unsaved changes prompt
         if let Some(action) = self.confirm.clone() {
             let mut decision: Option<bool> = None; // Some(true)=save, Some(false)=discard

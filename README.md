@@ -213,11 +213,20 @@ watch it happen. It is off until you switch it on:
    shows what the agent did. Saving to disk only happens when a tool is explicitly asked
    to, and opening another file goes through the same unsaved-changes prompt as the menu.
 
-The 31 tools cover reading (project, catalog, diagnostics, reachability, export preview,
-screenshot) and editing (add/update/move/resize/reparent/delete entities, links,
-selection, views, tidy/align/distribute, settings, save/open/new, export with optional
-validate, undo/redo). Only localhost can connect and every request needs the bearer
-token. The feature is the `mcp` cargo feature of `ttg-app` (on by default; build with
+The 34 tools cover reading (project, catalog, diagnostics, reachability, export preview,
+export diff, screenshot) and editing (add/update/move/resize/reparent/delete entities,
+links, selection, views, tidy/align/distribute, settings, save/open/new, export with
+optional validate, undo/redo). `project_apply` runs a list of diagram writes as **one**
+undo step and rolls all of them back if any fails; `project_changes` (or a subscription
+to the `ttg://project` resource) tells the agent when *you* changed something. The
+project, its summary, diagnostics, the catalog and the docs are also exposed as MCP
+resources (`ttg://project`, `ttg://catalog/<type>`, `ttg://docs/mapping-format`, …).
+In *Agent ▸ Settings & activity* you choose which actions must be approved first: by
+default saving, opening, starting a new project and writing an export pop an
+Allow / Deny prompt; deletions can be added. Only localhost can connect and every
+request needs the bearer token. `terratofu-gui --serve --port N --token T [project]`
+runs the same server without a window (no screenshots, no prompts) for CI and scripted
+editing; the headless integration test in `crates/ttg-app/tests` drives it that way. The feature is the `mcp` cargo feature of `ttg-app` (on by default; build with
 `--no-default-features` to leave it out). Windows note: ports in the 6xxx-7xxx block are
 often reserved by Hyper-V, which is why the default is 9337.
 

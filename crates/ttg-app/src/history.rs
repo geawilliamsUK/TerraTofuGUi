@@ -58,6 +58,18 @@ impl History {
         self.undo.pop();
     }
 
+    /// Number of undo steps (used to collapse a batch into one).
+    #[cfg_attr(not(feature = "mcp"), allow(dead_code))]
+    pub fn len(&self) -> usize {
+        self.undo.len()
+    }
+
+    /// Drop every undo step recorded after the first `n`.
+    #[cfg_attr(not(feature = "mcp"), allow(dead_code))]
+    pub fn truncate(&mut self, n: usize) {
+        self.undo.truncate(n);
+    }
+
     pub fn can_undo(&self) -> bool {
         !self.undo.is_empty()
     }

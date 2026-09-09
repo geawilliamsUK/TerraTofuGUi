@@ -334,6 +334,19 @@ pub fn mcp_window(app: &mut TtgApp, ui: &mut Ui) {
         "Start the server when the app starts",
     )
     .on_hover_text("Off by default: the runtime only exists while the server is enabled.");
+    ui.label(
+        RichText::new("Ask before the agent…")
+            .small()
+            .color(Color32::from_gray(110)),
+    );
+    ui.checkbox(
+        &mut app.mcp.settings.confirm_disk,
+        "saves, opens, starts a new project or writes an export",
+    );
+    ui.checkbox(
+        &mut app.mcp.settings.confirm_delete,
+        "deletes resources, links or annotations",
+    );
     ui.add_enabled_ui(!running, |ui| {
         ui.horizontal(|ui| {
             ui.label("Port");

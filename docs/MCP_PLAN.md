@@ -51,27 +51,51 @@ when it has one), `schema_search`, `schema_show` (the provider schema index), `e
 `layout_distribute`, `settings_set`, `project_save`, `project_open`, `project_new`,
 `export_run` (validate runs off the UI thread), `undo`, `redo`.
 
+Added 2026-09-09: `project_apply` (a list of `{tool, args}` diagram writes executed as
+one undo step; `AgentCommand::Batch` snapshots first, runs each sub-command through the
+normal path, then truncates the history back and pushes one step; any failure restores
+the snapshot and reports which command failed), `export_diff` (`ttg_codegen::diff`
+against an export directory, nothing written) and `project_changes` (a revision counter
+bumped in `finish()` for user and agent edits alike, with who changed it last).
+
+### Resources and notifications
+
+`resources/list` exposes `ttg://project`, `ttg://project/summary`, `ttg://diagnostics`,
+`ttg://catalog` and the docs (`ttg://docs/readme`, `mapping-format`, `architecture`,
+embedded at build time); templates `ttg://catalog/{type_id}` and `ttg://reach/{entity}`.
+Reads go through the same command queue as tools. `resources/subscribe` is accepted for
+the live resources; every committed change sends `notifications/resources/updated` to
+each subscriber, coalesced over 250 ms so a drag is one notification. Subscriptions are
+kept per session in a shared list; a peer that fails to receive is dropped.
+
 Entities can be addressed by id or by display name (case-insensitive; ambiguous names
 are rejected). Writes are refused while a modal dialog is open, naming the dialog.
 
 ## 3. Settings and persistence
 
-`autostart`, `port` (default 9337) and `token` (uuid, regenerable) persist in eframe
-storage. `TTG_MCP=1` (+ `TTG_MCP_PORT`, `TTG_MCP_TOKEN`) force the server on for one run
+`autostart`, `port` (default 9337), `token` (uuid, regenerable), `confirm_disk`
+(default on: save / open / new / export wait for an Allow / Deny prompt) and
+`confirm_delete` (default off: entity, link and annotation removal) persist in eframe
+storage. A command that needs approval parks in `McpState::pending_confirm`; the queue
+behind it waits, the prompt is a centred window, and the tool call's timeout is ten
+minutes for writes so the user has time to answer. `TTG_MCP=1` (+ `TTG_MCP_PORT`, `TTG_MCP_TOKEN`) force the server on for one run
 without touching the stored autostart flag; `TTG_MCP_AUTOSTART=off` clears a stored
 autostart. Used by the smoke test.
 
 ## 4. Testing
 
-A python Streamable-HTTP client (`initialize` → `notifications/initialized` →
-`tools/list` → `tools/call`) exercised every tool group against the running app:
-add/update/link/tidy/screenshot/undo, plus the negative cases (bad field, disallowed
-relation, missing token → 401). Not yet in CI because it needs a display; a headless
-harness (egui `--screenshot`-style frame loop with the server on) is the next step.
+`terratofu-gui --serve [--port N] [--token T] [project]` runs the server without a
+window: `TtgApp::build` around a bare `egui::Context`, then a loop of
+`drain_agent_commands` + `refresh_diagnostics`. Screenshots are refused and approval
+prompts are skipped in this mode. `crates/ttg-app/tests/mcp_headless.rs` spawns it on a
+free port and speaks Streamable HTTP with a ~60-line client (`ureq`, SSE `data:` lines):
+initialize, tools/list, a write and the revision counter, a four-command batch undone
+by one `undo`, a failing batch rolled back, `export_diff` against an empty directory,
+resources list/read/templates/subscribe, a 401 and the headless screenshot refusal. It
+runs in CI on the same job as the rest of the workspace.
 
 ## 5. Open ideas
 
-- Resources (`ttg://project`, `ttg://catalog/<type>`, docs) alongside tools.
-- A batch tool (`project_apply` with a list of commands) as one undo step.
-- Notifications to the client when the user edits (MCP `resources/updated`).
-- Per-tool confirmation setting ("ask before the agent deletes / saves").
+- Prompts (`prompts/list`): canned "review this diagram" / "make it Azure-ready" starters.
+- Progress notifications for long `export_run --validate` calls.
+- A `tasks`-style handle for validate so the tool returns immediately.

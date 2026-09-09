@@ -629,6 +629,86 @@ impl TtgApp {
                     "warnings": rep.warnings.iter().map(|d| d.message.clone()).collect::<Vec<_>>(),
                 }))
             }
+            AgentCommand::Batch(cmds) => {
+                let before = self.snapshot();
+                let start = self.history.len();
+                let mut results = Vec::new();
+                for (i, c) in cmds.into_iter().enumerate() {
+                    if matches!(
+                        c,
+                        AgentCommand::Batch(_)
+                            | AgentCommand::Undo
+                            | AgentCommand::Redo
+                            | AgentCommand::ProjectOpen { .. }
+                            | AgentCommand::ProjectNew { .. }
+                            | AgentCommand::ProjectSave { .. }
+                            | AgentCommand::ExportRun { .. }
+                    ) {
+                        self.project = before;
+                        self.history.truncate(start);
+                        self.diag_dirty = true;
+                        return Err(format!(
+                            "command {i} ({}) is not allowed inside a batch; the batch was rolled back",
+                            c.label()
+                        ));
+                    }
+                    let label = c.label();
+                    match self.agent_exec(c) {
+                        Ok(v) => results.push(json!({ "tool": label, "result": v })),
+                        Err(e) => {
+                            self.project = before;
+                            self.history.truncate(start);
+                            self.diag_dirty = true;
+                            return Err(format!(
+                                "command {i} ({label}) failed: {e}; the batch was rolled back"
+                            ));
+                        }
+                    }
+                }
+                // Collapse the steps the sub-commands pushed into one.
+                self.history.truncate(start);
+                self.finish(before);
+                Ok(json!({ "status": "applied", "count": results.len(), "results": results }))
+            }
+            AgentCommand::ExportDiff { dir, provider } => {
+                let provider = provider.unwrap_or(self.project.settings.target_provider.clone());
+                let g = ttg_codegen::generate(
+                    &self.project,
+                    &self.catalog,
+                    &provider,
+                    self.project.settings.tool,
+                )
+                .map_err(|e| e.to_string())?;
+                let diffs = ttg_codegen::diff::against_dir(&g, std::path::Path::new(&dir));
+                Ok(json!({
+                    "provider": provider,
+                    "dir": dir,
+                    "summary": ttg_codegen::diff::summary(&diffs),
+                    "changed": diffs.iter().any(|d| d.changed()),
+                    "files": diffs.iter().map(|d| json!({
+                        "name": d.name,
+                        "status": format!("{:?}", d.status).to_lowercase(),
+                        "added": d.added,
+                        "removed": d.removed,
+                        "diff": if d.changed() { ttg_codegen::diff::render(d, 2) } else { String::new() },
+                    })).collect::<Vec<_>>(),
+                }))
+            }
+            AgentCommand::Changes { since } => {
+                let (ago, by) = match self.mcp.last_change {
+                    Some((t, by)) => (Some(t.elapsed().as_secs_f64()), Some(by)),
+                    None => (None, None),
+                };
+                Ok(json!({
+                    "revision": self.mcp.revision,
+                    "changed": since.is_none_or(|s| self.mcp.revision > s),
+                    "last_change_by": by,
+                    "last_change_secs_ago": ago,
+                    "dirty": self.dirty,
+                    "path": self.path,
+                    "selection": self.selection.iter().cloned().collect::<Vec<_>>(),
+                }))
+            }
             AgentCommand::Undo => {
                 if !self.history.can_undo() {
                     return Err("nothing to undo".into());
@@ -896,6 +976,7 @@ impl TtgApp {
             "name": self.project.name,
             "path": self.path,
             "dirty": self.dirty,
+            "revision": self.mcp.revision,
             "tool": self.project.settings.tool,
             "target_provider": self.project.settings.target_provider,
             "providers": self.catalog.provider_ids(),

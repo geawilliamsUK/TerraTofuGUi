@@ -34,6 +34,10 @@ pub struct McpSettings {
     /// Bearer token every request must carry. Persistent so the client config
     /// survives restarts; regenerable from the settings window.
     pub token: String,
+    /// Ask before the agent saves, opens, starts a new project or writes an export.
+    pub confirm_disk: bool,
+    /// Ask before the agent deletes resources, links or annotations.
+    pub confirm_delete: bool,
 }
 
 impl Default for McpSettings {
@@ -42,6 +46,8 @@ impl Default for McpSettings {
             autostart: false,
             port: DEFAULT_PORT,
             token: new_token(),
+            confirm_disk: true,
+            confirm_delete: false,
         }
     }
 }
@@ -184,6 +190,17 @@ pub enum AgentCommand {
         dir: String,
         provider: Option<String>,
     },
+    /// What an export would change in an existing directory (nothing is written).
+    ExportDiff {
+        dir: String,
+        provider: Option<String>,
+    },
+    /// Has the project changed since revision `since` (user or agent edits)?
+    Changes {
+        since: Option<u64>,
+    },
+    /// Several write commands as one undo step; any failure rolls all of them back.
+    Batch(Vec<AgentCommand>),
     Undo,
     Redo,
 }
@@ -191,8 +208,50 @@ pub enum AgentCommand {
 impl AgentCommand {
     /// Short label for the activity log.
     pub fn label(&self) -> String {
+        if let AgentCommand::Batch(cmds) = self {
+            return format!("Batch({})", cmds.len());
+        }
         let s = format!("{self:?}");
         s.split([' ', '{']).next().unwrap_or("?").to_string()
+    }
+
+    /// Why this command needs the user's approval under the current settings, if it does.
+    pub fn confirm_reason(&self, s: &McpSettings) -> Option<String> {
+        match self {
+            AgentCommand::ProjectSave { path } if s.confirm_disk => Some(format!(
+                "save the project{}",
+                path.as_ref().map(|p| format!(" to {p}")).unwrap_or_default()
+            )),
+            AgentCommand::ProjectOpen { path } if s.confirm_disk => {
+                Some(format!("open {path}, replacing the current project"))
+            }
+            AgentCommand::ProjectNew { .. } if s.confirm_disk => Some("start a new project".into()),
+            AgentCommand::ExportRun { dir, .. } if s.confirm_disk => {
+                Some(format!("write an export into {dir}"))
+            }
+            AgentCommand::EntityDelete { entities } if s.confirm_delete => {
+                Some(format!("delete {}", entities.join(", ")))
+            }
+            AgentCommand::LinkRemove { source, target, .. } if s.confirm_delete => {
+                Some(format!("remove the link {source} \u{2192} {target}"))
+            }
+            AgentCommand::AnnotationRemove { key } if s.confirm_delete => {
+                Some(format!("remove the annotation {key}"))
+            }
+            AgentCommand::Batch(cmds) => {
+                let reasons: Vec<String> = cmds.iter().filter_map(|c| c.confirm_reason(s)).collect();
+                if reasons.is_empty() {
+                    None
+                } else {
+                    Some(format!(
+                        "apply a batch of {} commands that would: {}",
+                        cmds.len(),
+                        reasons.join("; ")
+                    ))
+                }
+            }
+            _ => None,
+        }
     }
     pub fn is_write(&self) -> bool {
         !matches!(
@@ -209,8 +268,25 @@ impl AgentCommand {
                 | AgentCommand::Screenshot
                 | AgentCommand::SchemaSearch { .. }
                 | AgentCommand::SchemaShow { .. }
+                | AgentCommand::ExportDiff { .. }
+                | AgentCommand::Changes { .. }
         )
     }
+}
+
+/// Events pushed from the UI thread to the server runtime (fan-out to subscribed
+/// clients as `notifications/resources/updated`).
+#[derive(Debug, Clone)]
+pub enum ServerEvent {
+    ProjectChanged,
+}
+
+/// A write the agent asked for that waits for the user's Allow / Deny.
+pub struct PendingConfirm {
+    pub cmd: AgentCommand,
+    pub reply: AgentReply,
+    pub reason: String,
+    pub at: Instant,
 }
 
 pub type AgentReply = tokio::sync::oneshot::Sender<Result<serde_json::Value, String>>;
@@ -218,7 +294,14 @@ pub type AgentReply = tokio::sync::oneshot::Sender<Result<serde_json::Value, Str
 /// A running server.
 pub struct Running {
     cancel: tokio_util::sync::CancellationToken,
+    events: tokio::sync::mpsc::UnboundedSender<ServerEvent>,
 }
+
+/// What the server thread hands back once it is listening.
+pub type Started = (
+    tokio_util::sync::CancellationToken,
+    tokio::sync::mpsc::UnboundedSender<ServerEvent>,
+);
 
 /// One log line per agent command.
 #[derive(Debug, Clone)]
@@ -243,6 +326,15 @@ pub struct McpState {
     pub flash: Vec<(Id, Instant)>,
     pub last_error: Option<String>,
     pub show_window: bool,
+    /// A write waiting for the user's approval; nothing else is executed meanwhile.
+    pub pending_confirm: Option<PendingConfirm>,
+    /// Bumped on every committed change (user or agent); `project_changes` reports it.
+    pub revision: u64,
+    pub last_change: Option<(Instant, &'static str)>,
+    /// Set while an agent command runs, so `finish()` can attribute the change.
+    pub in_agent: bool,
+    /// `--serve` mode: no window, no screenshots, no confirmation prompts.
+    pub headless: bool,
 }
 
 impl Default for McpState {
@@ -258,6 +350,11 @@ impl Default for McpState {
             flash: Vec::new(),
             last_error: None,
             show_window: false,
+            pending_confirm: None,
+            revision: 0,
+            last_change: None,
+            in_agent: false,
+            headless: false,
         }
     }
 }
@@ -288,14 +385,14 @@ impl McpState {
         let port = self.settings.port;
         let token = self.settings.token.clone();
         let tx = self.tx.clone();
-        let (started_tx, started_rx) = mpsc::channel::<Result<tokio_util::sync::CancellationToken, String>>();
+        let (started_tx, started_rx) = mpsc::channel::<Result<Started, String>>();
         std::thread::Builder::new()
             .name("ttg-mcp".into())
             .spawn(move || server::run(port, token, tx, ctx, started_tx))
             .map_err(|e| e.to_string())?;
         match started_rx.recv_timeout(std::time::Duration::from_secs(5)) {
-            Ok(Ok(cancel)) => {
-                self.running = Some(Running { cancel });
+            Ok(Ok((cancel, events))) => {
+                self.running = Some(Running { cancel, events });
                 self.last_error = None;
                 Ok(())
             }
@@ -315,6 +412,15 @@ impl McpState {
     pub fn stop(&mut self) {
         if let Some(r) = self.running.take() {
             r.cancel.cancel();
+        }
+    }
+
+    /// Record a committed change to the project and tell subscribed clients.
+    pub fn note_change(&mut self) {
+        self.revision += 1;
+        self.last_change = Some((Instant::now(), if self.in_agent { "agent" } else { "user" }));
+        if let Some(r) = &self.running {
+            let _ = r.events.send(ServerEvent::ProjectChanged);
         }
     }
 
@@ -363,9 +469,16 @@ impl TtgApp {
     /// Apply queued agent commands on the UI thread (called once per frame).
     pub fn drain_agent_commands(&mut self, ctx: &egui::Context) {
         loop {
+            if self.mcp.pending_confirm.is_some() {
+                break; // the user has not answered yet; keep the queue in order
+            }
             let next = self.mcp.rx.try_recv();
             let Ok((cmd, reply)) = next else { break };
             if matches!(cmd, AgentCommand::Screenshot) {
+                if self.mcp.headless {
+                    let _ = reply.send(Err("no display in --serve mode".into()));
+                    continue;
+                }
                 self.mcp.pending_screenshots.push(reply);
                 ctx.send_viewport_cmd(egui::ViewportCommand::Screenshot(Default::default()));
                 self.mcp.push_log(
@@ -374,17 +487,19 @@ impl TtgApp {
                 );
                 continue;
             }
-            let label = cmd.label();
-            let is_write = cmd.is_write();
-            let result = self.agent_exec(cmd);
-            if is_write {
-                self.status = match &result {
-                    Ok(_) => format!("Agent: {label}"),
-                    Err(e) => format!("Agent: {label} failed ({e})"),
-                };
+            if !self.mcp.headless {
+                if let Some(reason) = cmd.confirm_reason(&self.mcp.settings) {
+                    self.status = "Agent: waiting for your approval".into();
+                    self.mcp.pending_confirm = Some(PendingConfirm {
+                        cmd,
+                        reply,
+                        reason,
+                        at: Instant::now(),
+                    });
+                    break;
+                }
             }
-            self.mcp.push_log(label, &result);
-            let _ = reply.send(result);
+            self.run_agent(cmd, reply);
         }
         // Deliver screenshots.
         if !self.mcp.pending_screenshots.is_empty() {
@@ -421,6 +536,72 @@ impl TtgApp {
         }
     }
 
+    /// Execute one agent command now, log it and answer the server.
+    fn run_agent(&mut self, cmd: AgentCommand, reply: AgentReply) {
+        let label = cmd.label();
+        let is_write = cmd.is_write();
+        self.mcp.in_agent = true;
+        let result = self.agent_exec(cmd);
+        self.mcp.in_agent = false;
+        if is_write {
+            self.status = match &result {
+                Ok(_) => format!("Agent: {label}"),
+                Err(e) => format!("Agent: {label} failed ({e})"),
+            };
+        }
+        self.mcp.push_log(label, &result);
+        let _ = reply.send(result);
+    }
+
+    /// The Allow / Deny prompt for a write that the settings say must be confirmed.
+    pub fn confirm_window(&mut self, ctx: &egui::Context) {
+        let Some(p) = self.mcp.pending_confirm.as_ref() else {
+            return;
+        };
+        let reason = p.reason.clone();
+        let label = p.cmd.label();
+        let waited = p.at.elapsed().as_secs();
+        let mut decision: Option<bool> = None;
+        egui::Window::new("Agent request")
+            .collapsible(false)
+            .resizable(false)
+            .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
+            .show(ctx, |ui| {
+                ui.set_min_width(360.0);
+                ui.label(egui::RichText::new(format!("The agent wants to {reason}.")).strong());
+                ui.label(
+                    egui::RichText::new(format!(
+                        "Tool: {label}. Waiting {waited}s. Agent \u{25b8} settings chooses which actions ask."
+                    ))
+                    .small()
+                    .color(egui::Color32::from_gray(110)),
+                );
+                ui.add_space(6.0);
+                ui.horizontal(|ui| {
+                    if ui.button("Allow").clicked() {
+                        decision = Some(true);
+                    }
+                    if ui.button("Deny").clicked() {
+                        decision = Some(false);
+                    }
+                });
+            });
+        match decision {
+            Some(true) => {
+                let p = self.mcp.pending_confirm.take().unwrap();
+                self.run_agent(p.cmd, p.reply);
+            }
+            Some(false) => {
+                let p = self.mcp.pending_confirm.take().unwrap();
+                let result = Err("denied by the user".to_string());
+                self.status = format!("Agent: {} denied", p.cmd.label());
+                self.mcp.push_log(p.cmd.label(), &result);
+                let _ = p.reply.send(result);
+            }
+            None => ctx.request_repaint_after(std::time::Duration::from_millis(250)),
+        }
+    }
+
     /// 0..1 intensity of the agent flash on an entity, if any.
     pub fn agent_flash(&self, id: &str) -> Option<f32> {
         let now = Instant::now();
@@ -437,6 +618,8 @@ impl TtgApp {
         storage.set_string("mcp_autostart", s.autostart.to_string());
         storage.set_string("mcp_port", s.port.to_string());
         storage.set_string("mcp_token", s.token.clone());
+        storage.set_string("mcp_confirm_disk", s.confirm_disk.to_string());
+        storage.set_string("mcp_confirm_delete", s.confirm_delete.to_string());
     }
 
     pub fn mcp_restore(&mut self, storage: &dyn eframe::Storage) {
@@ -448,6 +631,12 @@ impl TtgApp {
         }
         if let Some(t) = storage.get_string("mcp_token").filter(|t| !t.is_empty()) {
             self.mcp.settings.token = t;
+        }
+        if let Some(v) = storage.get_string("mcp_confirm_disk") {
+            self.mcp.settings.confirm_disk = v == "true";
+        }
+        if let Some(v) = storage.get_string("mcp_confirm_delete") {
+            self.mcp.settings.confirm_delete = v == "true";
         }
     }
 }
