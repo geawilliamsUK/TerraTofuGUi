@@ -1,0 +1,40 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/ttg-core",
+    "crates/ttg-catalog",
+    "crates/ttg-codegen",
+    "crates/ttg-cli",
+    "crates/ttg-app",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/terratofu-gui/terratofu-gui"
+rust-version = "1.88"
+
+[workspace.dependencies]
+serde = { version = "1", features = ["derive"] }
+serde_json = { version = "1", features = ["preserve_order"] }
+toml = { version = "1.1", features = ["preserve_order"] }
+thiserror = "2"
+anyhow = "1"
+petgraph = "0.8"
+hcl-rs = "0.19"
+indexmap = { version = "2", features = ["serde"] }
+regex = "1"
+uuid = { version = "1", features = ["v4"] }
+# egui/eframe pinned to 0.33: newest release whose MSRV (1.88) matches the workspace rust-version.
+egui = "=0.33.3"
+eframe = { version = "=0.33.3", default-features = false, features = ["default_fonts", "glow", "persistence"] }
+rfd = "0.17"
+zip = { version = "8", default-features = false, features = ["deflate"] }
+clap = { version = "4", features = ["derive"] }
+
+[profile.dev]
+opt-level = 1
+
+[profile.dev.package."*"]
+opt-level = 2

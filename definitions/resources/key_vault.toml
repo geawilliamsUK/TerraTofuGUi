@@ -1,0 +1,66 @@
+# Abstract type: Key Vault (container)  (schema_version 2)
+#
+# A vault that Secrets are drawn inside.
+# AWS: LOGICAL — Secrets Manager has no vault object; secrets are top-level resources.
+# Azure: azurerm_key_vault with RBAC authorisation; the tenant id comes from the
+#      azurerm_client_config data source. PARTIAL: whoever runs `apply` needs the
+#      "Key Vault Secrets Officer" role on the vault before secrets can be written.
+
+schema_version = 2
+
+[resource]
+type = "key_vault"
+category = "secrets"
+display_name = "Key Vault"
+description = "A container for Secrets. Logical on AWS; a real vault on Azure."
+kind = "container"
+allowed_parents = ["resource_group"]
+icon = "KV"
+
+# ---------------------------------------------------------------- AWS
+[providers.aws]
+status = "logical"
+notes = "AWS Secrets Manager has no vault resource; secrets inside are emitted at top level."
+
+# ---------------------------------------------------------------- Azure
+[providers.azure]
+status = "partial"
+
+[[providers.azure.fields]]
+name = "vault_name"
+label = "Vault name"
+type = "string"
+required = true
+pattern = "^[a-zA-Z][a-zA-Z0-9-]{1,22}[a-zA-Z0-9]$"
+pattern_hint = "3-24 letters, digits and hyphens, starting with a letter; globally unique"
+unique_scope = "key_vault"
+
+[[providers.azure.data]]
+key = "current"
+resource = "azurerm_client_config"
+
+[[providers.azure.blocks]]
+key = "main"
+resource = "azurerm_key_vault"
+
+[providers.azure.blocks.args]
+name                       = { provider_field = "vault_name" }
+location                   = { var = "location" }
+resource_group_name        = { ancestor = "resource_group", attr = "name" }
+tenant_id                  = { self_data = "current", attr = "tenant_id" }
+sku_name                   = { value = "standard" }
+rbac_authorization_enabled = { value = true }
+purge_protection_enabled   = { value = false }
+
+[providers.azure.outputs]
+uri = { attr = "vault_uri", description = "Vault URI" }
+
+[[providers.azure.manual_steps]]
+title = "Grant the deploying identity rights on the vault"
+body = """
+The vault uses RBAC authorisation. Assign **Key Vault Secrets Officer** on the vault to the
+identity that runs `apply` (an `azurerm_role_assignment` with
+`role_definition_name = "Key Vault Secrets Officer"` and `principal_id =
+data.azurerm_client_config.<slug>_current.object_id`) before applying the secrets inside
+it, or the secret resources will fail with a 403.
+"""

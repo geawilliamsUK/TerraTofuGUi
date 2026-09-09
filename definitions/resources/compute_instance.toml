@@ -1,0 +1,203 @@
+# Abstract type: Compute Instance  (schema_version 2)
+#
+# A single virtual machine. Demonstrates:
+#   * an abstract `size` translated per provider with a lookup table (`map`),
+#   * one abstract type becoming TWO blocks on Azure (NIC + VM) linked with `self_block`,
+#   * nested blocks, one of them conditional on an `iam_binding` edge,
+#   * a mapping-level variable (`ssh_public_key`) that is only emitted when used,
+#   * (v2) a `data "aws_ami"` lookup used as the `fallback` when no AMI id is given,
+#   * (v2) `target_type` filtering so a 'Uses' link to a Security Group attaches it while a
+#     'Uses' link to Object Storage still becomes depends_on + a manual step.
+
+schema_version = 2
+
+[resource]
+type = "compute_instance"
+category = "compute"
+display_name = "Compute Instance"
+description = "A virtual machine attached to a subnet."
+kind = "node"
+allowed_parents = ["virtual_network", "resource_group"]
+icon = "VM"
+
+[[fields]]
+name = "size"
+label = "Size class"
+type = "enum"
+required = true
+options = ["small", "medium", "large"]
+default = "small"
+description = "Abstract size; translated to a provider instance type."
+
+[[relations]]
+kind = "network_membership"
+label = "Attached to subnet"
+targets = ["subnet"]
+cardinality = "one"
+
+[[relations]]
+kind = "iam_binding"
+label = "Assumes role / identity"
+targets = ["iam_role"]
+cardinality = "optional"
+
+[[relations]]
+kind = "attribute_reference"
+label = "Uses"
+targets = ["security_group", "object_storage"]
+cardinality = "many"
+
+# ---------------------------------------------------------------- AWS
+[providers.aws]
+status = "full"
+
+[[providers.aws.fields]]
+name = "ami"
+label = "AMI id"
+type = "string"
+pattern = "^ami-[0-9a-f]{8,17}$"
+pattern_hint = "must look like ami-0123456789abcdef0"
+description = "Machine image id in the target region. Leave empty to look up the latest Ubuntu 22.04 LTS image."
+
+[[providers.aws.fields]]
+name = "key_name"
+label = "SSH key pair name"
+type = "string"
+description = "Existing EC2 key pair. Optional."
+
+# Looked up only when no AMI id was entered.
+[[providers.aws.data]]
+key = "ubuntu"
+resource = "aws_ami"
+when = { provider_field = "ami", equals = "" }
+
+[providers.aws.data.args]
+most_recent = { value = true }
+owners      = { value = ["099720109477"] }
+
+[[providers.aws.data.nested]]
+block = "filter"
+
+[providers.aws.data.nested.args]
+name   = { value = "name" }
+values = { value = ["ubuntu/images/hvm-ssd/ubuntu-jammy-22.04-amd64-server-*"] }
+
+[[providers.aws.blocks]]
+key = "main"
+resource = "aws_instance"
+
+[providers.aws.blocks.args]
+ami                    = { provider_field = "ami", fallback = { self_data = "ubuntu", attr = "id" } }
+instance_type          = { map = "size", table = { small = "t3.micro", medium = "t3.medium", large = "t3.large" } }
+subnet_id              = { relation = "network_membership", attr = "id" }
+vpc_security_group_ids = { relation = "attribute_reference", target_type = "security_group", attr = "id", wrap = "list", optional = true }
+iam_instance_profile   = { relation = "iam_binding", block = "profile", attr = "name", optional = true }
+key_name               = { provider_field = "key_name", optional = true }
+tags                   = { object = { Name = { field = "name" } } }
+
+[providers.aws.outputs]
+id         = { attr = "id", description = "Instance id" }
+private_ip = { attr = "private_ip", description = "Private IPv4 address" }
+
+# ---------------------------------------------------------------- Azure
+[providers.azure]
+status = "full"
+
+[[providers.azure.fields]]
+name = "admin_username"
+label = "Admin username"
+type = "string"
+required = true
+default = "azureuser"
+pattern = "^[a-z_][a-z0-9_-]{0,31}$"
+pattern_hint = "lowercase, starts with a letter or underscore, max 32 chars"
+
+[[providers.azure.fields]]
+name = "image"
+label = "OS image"
+type = "enum"
+required = true
+options = ["ubuntu-22.04", "ubuntu-24.04", "debian-12"]
+default = "ubuntu-22.04"
+
+[[providers.azure.variables]]
+name = "ssh_public_key"
+type = "string"
+description = "SSH public key installed for the VM admin user (e.g. contents of ~/.ssh/id_ed25519.pub)."
+
+# Block 1: the network interface. Emitted first for readability; Terraform orders by reference.
+[[providers.azure.blocks]]
+key = "nic"
+resource = "azurerm_network_interface"
+
+[providers.azure.blocks.args]
+name                = { template = "{name}-nic", transform = "kebab" }
+location            = { var = "location" }
+resource_group_name = { ancestor = "resource_group", attr = "name" }
+
+[[providers.azure.blocks.nested]]
+block = "ip_configuration"
+
+[providers.azure.blocks.nested.args]
+name                          = { value = "internal" }
+subnet_id                     = { relation = "network_membership", attr = "id" }
+private_ip_address_allocation = { value = "Dynamic" }
+
+# Block 2: the VM itself. `main` is the primary block other resources reference.
+[[providers.azure.blocks]]
+key = "main"
+resource = "azurerm_linux_virtual_machine"
+
+[providers.azure.blocks.args]
+name                  = { field = "name", transform = "kebab" }
+location              = { var = "location" }
+resource_group_name   = { ancestor = "resource_group", attr = "name" }
+size                  = { map = "size", table = { small = "Standard_B1s", medium = "Standard_B2s", large = "Standard_D2s_v3" } }
+admin_username        = { provider_field = "admin_username" }
+network_interface_ids = { self_block = "nic", attr = "id", wrap = "list" }
+
+[[providers.azure.blocks.nested]]
+block = "admin_ssh_key"
+
+[providers.azure.blocks.nested.args]
+username   = { provider_field = "admin_username" }
+public_key = { var = "ssh_public_key" }
+
+[[providers.azure.blocks.nested]]
+block = "os_disk"
+
+[providers.azure.blocks.nested.args]
+caching              = { value = "ReadWrite" }
+storage_account_type = { value = "Standard_LRS" }
+
+[[providers.azure.blocks.nested]]
+block = "source_image_reference"
+
+[providers.azure.blocks.nested.args]
+publisher = { map = "image", table = { "ubuntu-22.04" = "Canonical", "ubuntu-24.04" = "Canonical", "debian-12" = "Debian" } }
+offer     = { map = "image", table = { "ubuntu-22.04" = "0001-com-ubuntu-server-jammy", "ubuntu-24.04" = "ubuntu-24_04-lts", "debian-12" = "debian-12" } }
+sku       = { map = "image", table = { "ubuntu-22.04" = "22_04-lts-gen2", "ubuntu-24.04" = "server", "debian-12" = "12-gen2" } }
+version   = { value = "latest" }
+
+# Only emitted when the instance has an iam_binding edge to an IAM role.
+[[providers.azure.blocks.nested]]
+block = "identity"
+when = { relation = "iam_binding" }
+
+[providers.azure.blocks.nested.args]
+type         = { value = "UserAssigned" }
+identity_ids = { relation = "iam_binding", attr = "id", wrap = "list" }
+
+# Block 3: attach a Security Group (NSG) to the NIC when a 'Uses' link to one exists.
+[[providers.azure.blocks]]
+key = "nsg"
+resource = "azurerm_network_interface_security_group_association"
+when = { relation = "attribute_reference", target_type = "security_group" }
+
+[providers.azure.blocks.args]
+network_interface_id      = { self_block = "nic", attr = "id" }
+network_security_group_id = { relation = "attribute_reference", target_type = "security_group", attr = "id" }
+
+[providers.azure.outputs]
+id         = { attr = "id", description = "Virtual machine id" }
+private_ip = { attr = "private_ip_address", description = "Private IPv4 address" }

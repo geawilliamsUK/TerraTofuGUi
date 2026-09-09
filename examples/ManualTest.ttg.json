@@ -1,0 +1,227 @@
+{
+  "schema_version": 1,
+  "name": "untitled",
+  "settings": {
+    "tool": "terraform",
+    "target_provider": "azure",
+    "provider_settings": {
+      "aws": {
+        "region": "eu-west-2"
+      },
+      "azure": {
+        "location": "uksouth",
+        "subscription_id": ""
+      }
+    },
+    "backend": null,
+    "state_encryption": false
+  },
+  "containers": {
+    "rg-9d6c9a63": {
+      "id": "rg-9d6c9a63",
+      "name": "resource group",
+      "container_type": "resource_group",
+      "config": {},
+      "provider_config": {
+        "aws": {},
+        "azure": {}
+      },
+      "position": {
+        "x": 272,
+        "y": 1
+      },
+      "size": {
+        "w": 1051,
+        "h": 530
+      },
+      "parent": null,
+      "manual": false
+    },
+    "vnet-205d91f7": {
+      "id": "vnet-205d91f7",
+      "name": "virtual network",
+      "container_type": "virtual_network",
+      "config": {
+        "cidr_block": "10.0.0.0/16"
+      },
+      "provider_config": {
+        "aws": {
+          "enable_dns_hostnames": true
+        },
+        "azure": {}
+      },
+      "position": {
+        "x": 294,
+        "y": 109
+      },
+      "size": {
+        "w": 967,
+        "h": 394
+      },
+      "parent": "rg-9d6c9a63",
+      "manual": false
+    }
+  },
+  "nodes": {
+    "obj-d0d4dd4e": {
+      "id": "obj-d0d4dd4e",
+      "name": "DIskImageBin",
+      "resource_type": "object_storage",
+      "config": {
+        "versioning": false
+      },
+      "provider_config": {
+        "aws": {},
+        "azure": {
+          "account_name": "diskimagebin",
+          "container_name": "data",
+          "replication": "LRS"
+        }
+      },
+      "position": {
+        "x": 676,
+        "y": 346
+      },
+      "parent": "rg-9d6c9a63",
+      "manual": false
+    },
+    "role-e2629062": {
+      "id": "role-e2629062",
+      "name": "VMIAM",
+      "resource_type": "iam_role",
+      "config": {
+        "permissions": "admin",
+        "trusted_service": "compute"
+      },
+      "provider_config": {
+        "aws": {},
+        "azure": {}
+      },
+      "position": {
+        "x": 992,
+        "y": 36
+      },
+      "parent": "rg-9d6c9a63",
+      "manual": false
+    },
+    "subnet-20afb87a": {
+      "id": "subnet-20afb87a",
+      "name": "subnet",
+      "resource_type": "subnet",
+      "config": {
+        "cidr_block": "10.0.1.0/24"
+      },
+      "provider_config": {
+        "aws": {
+          "map_public_ip": false
+        },
+        "azure": {}
+      },
+      "position": {
+        "x": 333,
+        "y": 244
+      },
+      "parent": "vnet-205d91f7",
+      "manual": false
+    },
+    "vm-36bcf1e5": {
+      "id": "vm-36bcf1e5",
+      "name": "compute instance",
+      "resource_type": "compute_instance",
+      "config": {
+        "size": "small"
+      },
+      "provider_config": {
+        "aws": {},
+        "azure": {
+          "admin_username": "azureuser",
+          "image": "ubuntu-22.04"
+        }
+      },
+      "position": {
+        "x": 671,
+        "y": 161
+      },
+      "parent": "vnet-205d91f7",
+      "manual": false
+    },
+    "vm-53866df2": {
+      "id": "vm-53866df2",
+      "name": "compute instance 2",
+      "resource_type": "compute_instance",
+      "config": {
+        "size": "small"
+      },
+      "provider_config": {
+        "aws": {},
+        "azure": {
+          "admin_username": "azureuser",
+          "image": "ubuntu-22.04"
+        }
+      },
+      "position": {
+        "x": 673,
+        "y": 255
+      },
+      "parent": "vnet-205d91f7",
+      "manual": false
+    }
+  },
+  "edges": [
+    {
+      "source": "subnet-20afb87a",
+      "target": "vnet-205d91f7",
+      "relation": "network_membership"
+    },
+    {
+      "source": "vm-53866df2",
+      "target": "subnet-20afb87a",
+      "relation": "depends_on"
+    },
+    {
+      "source": "vm-53866df2",
+      "target": "subnet-20afb87a",
+      "relation": "network_membership"
+    },
+    {
+      "source": "vm-36bcf1e5",
+      "target": "subnet-20afb87a",
+      "relation": "depends_on"
+    },
+    {
+      "source": "vm-36bcf1e5",
+      "target": "subnet-20afb87a",
+      "relation": "network_membership"
+    },
+    {
+      "source": "obj-d0d4dd4e",
+      "target": "subnet-20afb87a",
+      "relation": "depends_on"
+    },
+    {
+      "source": "obj-d0d4dd4e",
+      "target": "role-e2629062",
+      "relation": "depends_on"
+    },
+    {
+      "source": "vm-53866df2",
+      "target": "role-e2629062",
+      "relation": "depends_on"
+    },
+    {
+      "source": "vm-36bcf1e5",
+      "target": "role-e2629062",
+      "relation": "depends_on"
+    },
+    {
+      "source": "vm-36bcf1e5",
+      "target": "role-e2629062",
+      "relation": "iam_binding"
+    },
+    {
+      "source": "vm-53866df2",
+      "target": "role-e2629062",
+      "relation": "iam_binding"
+    }
+  ]
+}

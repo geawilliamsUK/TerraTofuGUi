@@ -1,0 +1,210 @@
+# Abstract type: Topic (publish / subscribe fan-out)  (schema_version 2)
+#
+# A message published to the topic is delivered to every linked subscriber
+# ('Delivers to'): Event Queues (queue fan-out) and Functions (push delivery).
+#
+# AWS:   aws_sns_topic + one aws_sns_topic_subscription per subscriber, plus the
+#        aws_sqs_queue_policy / aws_lambda_permission that lets SNS deliver.
+# Azure: azurerm_servicebus_namespace (Standard: topics need it) + azurerm_servicebus_topic
+#        + one azurerm_servicebus_subscription per subscriber. Service Bus can only
+#        auto-forward into a queue of the same namespace and a function consumes a
+#        subscription through its own trigger binding, hence the manual steps.
+
+schema_version = 2
+
+[resource]
+type = "topic"
+category = "serverless"
+display_name = "Topic"
+description = "Publish/subscribe fan-out. Functions 'Send to' it; link the queues and functions that should receive every message with 'Delivers to'."
+kind = "node"
+allowed_parents = ["resource_group", "virtual_network", "servicebus_namespace"]
+network_agnostic = true
+icon = "TP"
+
+[[relations]]
+kind = "sends_to"
+label = "Delivers to (queues, functions)"
+targets = ["event_queue", "function"]
+cardinality = "many"
+
+# ---------------------------------------------------------------- AWS
+[providers.aws]
+status = "full"
+
+[[providers.aws.blocks]]
+key = "main"
+resource = "aws_sns_topic"
+
+[providers.aws.blocks.args]
+name = { field = "name", transform = "kebab" }
+tags = { object = { Name = { field = "name" } } }
+
+# Queue subscribers: subscription + a queue policy that lets this topic deliver.
+[[providers.aws.blocks]]
+key = "sub_queue"
+resource = "aws_sns_topic_subscription"
+for_each_relation = "sends_to"
+for_each_target_type = "event_queue"
+
+[providers.aws.blocks.args]
+topic_arn            = { self_block = "main", attr = "arn" }
+protocol             = { value = "sqs" }
+endpoint             = { target = "arn" }
+raw_message_delivery = { value = true }
+
+[[providers.aws.blocks]]
+key = "queue_policy"
+resource = "aws_sqs_queue_policy"
+for_each_relation = "sends_to"
+for_each_target_type = "event_queue"
+
+[providers.aws.blocks.args]
+queue_url = { target = "url" }
+
+[providers.aws.blocks.args.policy]
+func = "jsonencode"
+
+[[providers.aws.blocks.args.policy.args]]
+[providers.aws.blocks.args.policy.args.object]
+Version = { value = "2012-10-17" }
+
+[[providers.aws.blocks.args.policy.args.object.Statement.list]]
+[providers.aws.blocks.args.policy.args.object.Statement.list.object]
+Sid       = { value = "AllowTopicDelivery" }
+Effect    = { value = "Allow" }
+Principal = { object = { Service = { value = "sns.amazonaws.com" } } }
+Action    = { value = "sqs:SendMessage" }
+Resource  = { target = "arn" }
+Condition = { object = { ArnEquals = { object = { "aws:SourceArn" = { self_block = "main", attr = "arn" } } } } }
+
+# Function subscribers: subscription + invoke permission for SNS.
+[[providers.aws.blocks]]
+key = "sub_fn"
+resource = "aws_sns_topic_subscription"
+for_each_relation = "sends_to"
+for_each_target_type = "function"
+
+[providers.aws.blocks.args]
+topic_arn = { self_block = "main", attr = "arn" }
+protocol  = { value = "lambda" }
+endpoint  = { target = "arn" }
+
+[[providers.aws.blocks]]
+key = "fn_permission"
+resource = "aws_lambda_permission"
+for_each_relation = "sends_to"
+for_each_target_type = "function"
+
+[providers.aws.blocks.args]
+statement_id  = { template = "AllowInvokeFromTopic-{name}", transform = "kebab" }
+action        = { value = "lambda:InvokeFunction" }
+function_name = { target = "function_name" }
+principal     = { value = "sns.amazonaws.com" }
+source_arn    = { self_block = "main", attr = "arn" }
+
+[providers.aws.outputs]
+arn = { attr = "arn", description = "Topic ARN (publish here)" }
+
+# ---------------------------------------------------------------- Azure
+[providers.azure]
+status = "partial"
+
+# A topic drawn inside a Service Bus Namespace container uses that namespace (and can
+# then auto-forward into queues drawn next to it); otherwise it creates its own.
+[[providers.azure.fields]]
+name = "namespace_name"
+label = "Service Bus namespace"
+type = "string"
+pattern = "^[a-zA-Z][a-zA-Z0-9-]{4,48}[a-zA-Z0-9]$"
+pattern_hint = "6-50 letters, digits and hyphens, starting with a letter; globally unique"
+unique_scope = "servicebus_namespace"
+description = "Name of the Standard-tier namespace created for this topic. Not needed inside a Service Bus Namespace container."
+
+[[providers.azure.checks]]
+when = { all = [ { ancestor = "servicebus_namespace", absent = true }, { provider_field = "namespace_name", absent = true } ] }
+severity = "error"
+message = "\"{name}\" needs a Service Bus namespace: set its namespace name, or place it inside a Service Bus Namespace container"
+
+[[providers.azure.blocks]]
+key = "ns"
+resource = "azurerm_servicebus_namespace"
+when = { ancestor = "servicebus_namespace", absent = true }
+
+[providers.azure.blocks.args]
+name                = { provider_field = "namespace_name" }
+location            = { var = "location" }
+resource_group_name = { ancestor = "resource_group", attr = "name" }
+sku                 = { value = "Standard" }
+
+[[providers.azure.blocks]]
+key = "main"
+resource = "azurerm_servicebus_topic"
+
+[providers.azure.blocks.args]
+name         = { field = "name", transform = "kebab" }
+namespace_id = { if = { ancestor = "servicebus_namespace" }, then = { ancestor = "servicebus_namespace", attr = "id", optional = true }, else = { self_block = "ns", attr = "id" } }
+
+# One subscription per subscriber, named after it. Service Bus can only auto-forward a
+# subscription into a queue of the same namespace: inside a Service Bus Namespace
+# container the subscription forwards to the queue; a stand-alone topic gets a plain
+# subscription and a manual step.
+[[providers.azure.blocks]]
+key = "sub_queue"
+resource = "azurerm_servicebus_subscription"
+for_each_relation = "sends_to"
+for_each_target_type = "event_queue"
+when = { ancestor = "servicebus_namespace", absent = true }
+
+[providers.azure.blocks.args]
+name               = { target = "name" }
+topic_id           = { self_block = "main", attr = "id" }
+max_delivery_count = { value = 10 }
+
+[[providers.azure.blocks]]
+key = "sub_queue_fwd"
+resource = "azurerm_servicebus_subscription"
+for_each_relation = "sends_to"
+for_each_target_type = "event_queue"
+when = { ancestor = "servicebus_namespace" }
+
+[providers.azure.blocks.args]
+name               = { target = "name" }
+topic_id           = { self_block = "main", attr = "id" }
+max_delivery_count = { value = 10 }
+forward_to         = { target = "name" }
+
+[[providers.azure.blocks]]
+key = "sub_fn"
+resource = "azurerm_servicebus_subscription"
+for_each_relation = "sends_to"
+for_each_target_type = "function"
+
+[providers.azure.blocks.args]
+name               = { target = "name" }
+topic_id           = { self_block = "main", attr = "id" }
+max_delivery_count = { value = 10 }
+
+[providers.azure.outputs]
+id = { attr = "id", description = "Topic id" }
+
+[[providers.azure.manual_steps]]
+title = "Queue subscribers: read the subscription, or forward by hand"
+when = { all = [ { relation = "sends_to", target_type = "event_queue" }, { ancestor = "servicebus_namespace", absent = true } ] }
+body = """
+Each linked Event Queue gets a subscription on this topic named after the queue, but
+Service Bus can only auto-forward into a queue of the *same* namespace and this topic
+has a namespace of its own. Either point the queue's consumer at that subscription (it
+behaves like a queue), or draw the topic and its queues inside one **Service Bus
+Namespace** container, which makes the generated subscriptions forward automatically.
+"""
+
+[[providers.azure.manual_steps]]
+title = "Bind subscribing functions to their subscription"
+when = { relation = "sends_to", target_type = "function" }
+body = """
+Each linked function has a subscription named after its function app. In the function
+project, declare a Service Bus topic trigger on this topic and that subscription name
+(the `AzureWebJobsServiceBus` connection app setting is not generated for topics: add
+the namespace connection string as an app setting or use identity-based connections).
+"""

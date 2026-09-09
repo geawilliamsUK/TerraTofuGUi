@@ -1,0 +1,134 @@
+# Abstract type: IAM Role
+#
+# An identity that workloads assume. The abstract model expresses WHO may assume it
+# (`trusted_service`) and a coarse permission level (`permissions`).
+#
+# AWS: aws_iam_role (+ aws_iam_instance_profile so EC2 can assume it,
+#      + aws_iam_role_policy_attachment for the permission level).
+# Azure: azurerm_user_assigned_identity (+ azurerm_role_assignment scoped to the
+#      enclosing resource group). Status is PARTIAL on Azure: assignment scope is limited
+#      to the resource group, and role assignment needs Owner / User Access Administrator
+#      on the deploying principal. Both are listed in MANUAL_STEPS.md.
+#
+# Demonstrates the `func` source (jsonencode of a policy document) and block-level `when`.
+
+schema_version = 1
+
+[resource]
+type = "iam_role"
+category = "iam"
+display_name = "IAM Role"
+description = "An identity workloads assume, with a coarse permission level."
+kind = "node"
+allowed_parents = ["resource_group"]
+icon = "IAM"
+
+[[fields]]
+name = "trusted_service"
+label = "Assumable by"
+type = "enum"
+required = true
+options = ["compute", "serverless"]
+default = "compute"
+description = "Which kind of workload may assume this role."
+
+[[fields]]
+name = "permissions"
+label = "Permission level"
+type = "enum"
+required = true
+options = ["none", "read_only", "admin"]
+default = "none"
+description = "Extra built-in permission set. Functions bound to the role generate their own least-privilege policy from their links, so 'none' is the right default."
+
+# ---------------------------------------------------------------- AWS
+[providers.aws]
+status = "full"
+
+[[providers.aws.blocks]]
+key = "main"
+resource = "aws_iam_role"
+
+[providers.aws.blocks.args]
+name = { field = "name", transform = "kebab" }
+tags = { object = { Name = { field = "name" } } }
+
+# assume_role_policy = jsonencode({ Version = "2012-10-17", Statement = [ { ... } ] })
+[providers.aws.blocks.args.assume_role_policy]
+func = "jsonencode"
+
+[[providers.aws.blocks.args.assume_role_policy.args]]
+[providers.aws.blocks.args.assume_role_policy.args.object]
+Version = { value = "2012-10-17" }
+
+[[providers.aws.blocks.args.assume_role_policy.args.object.Statement.list]]
+[providers.aws.blocks.args.assume_role_policy.args.object.Statement.list.object]
+Effect    = { value = "Allow" }
+Action    = { value = "sts:AssumeRole" }
+Principal = { object = { Service = { map = "trusted_service", table = { compute = "ec2.amazonaws.com", serverless = "lambda.amazonaws.com" } } } }
+
+# Instance profile: only needed when EC2 assumes the role.
+[[providers.aws.blocks]]
+key = "profile"
+resource = "aws_iam_instance_profile"
+when = { field = "trusted_service", equals = "compute" }
+
+[providers.aws.blocks.args]
+name = { template = "{name}-profile", transform = "kebab" }
+role = { self_block = "main", attr = "name" }
+
+# Permission level -> managed policy attachment.
+[[providers.aws.blocks]]
+key = "policy"
+resource = "aws_iam_role_policy_attachment"
+when = { field = "permissions", not_equals = "none" }
+
+[providers.aws.blocks.args]
+role       = { self_block = "main", attr = "name" }
+policy_arn = { map = "permissions", table = { read_only = "arn:aws:iam::aws:policy/ReadOnlyAccess", admin = "arn:aws:iam::aws:policy/AdministratorAccess" } }
+
+[providers.aws.outputs]
+arn = { attr = "arn", description = "Role ARN" }
+
+# ---------------------------------------------------------------- Azure
+[providers.azure]
+status = "partial"
+
+[[providers.azure.blocks]]
+key = "main"
+resource = "azurerm_user_assigned_identity"
+
+[providers.azure.blocks.args]
+name                = { field = "name", transform = "kebab" }
+location            = { var = "location" }
+resource_group_name = { ancestor = "resource_group", attr = "name" }
+
+[[providers.azure.blocks]]
+key = "assignment"
+resource = "azurerm_role_assignment"
+when = { field = "permissions", not_equals = "none" }
+
+[providers.azure.blocks.args]
+scope                = { ancestor = "resource_group", attr = "id" }
+role_definition_name = { map = "permissions", table = { read_only = "Reader", admin = "Contributor" } }
+principal_id         = { self_block = "main", attr = "principal_id" }
+
+[providers.azure.outputs]
+id           = { attr = "id", description = "Managed identity id" }
+principal_id = { attr = "principal_id", description = "Service principal object id" }
+
+[[providers.azure.manual_steps]]
+title = "Check the role assignment scope"
+body = """
+The generated `azurerm_role_assignment` is scoped to the enclosing resource group. If the
+identity must reach resources in other resource groups or subscriptions, add further
+`azurerm_role_assignment` blocks with the appropriate `scope` by hand.
+"""
+
+[[providers.azure.manual_steps]]
+title = "Deploying principal needs role-assignment rights"
+body = """
+Creating role assignments requires the identity running `apply` to hold **Owner** or
+**User Access Administrator** on the resource group. A plain Contributor will get a 403 on
+`azurerm_role_assignment`.
+"""

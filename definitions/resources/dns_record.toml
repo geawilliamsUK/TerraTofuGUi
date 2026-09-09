@@ -1,0 +1,123 @@
+# Abstract type: DNS Record  (schema_version 2)
+#
+# Drawn inside a DNS Zone. AWS: one aws_route53_record whatever the type.
+# Azure: record sets are per-type resources, so the A / CNAME / TXT block is chosen with a
+# block-level `when` on the `record_type` field; TXT values become one nested `record`
+# block per entry (`for_each_field` over a string_list).
+
+schema_version = 2
+
+[resource]
+type = "dns_record"
+category = "dns"
+display_name = "DNS Record"
+description = "An A, CNAME or TXT record set inside a DNS Zone."
+kind = "node"
+allowed_parents = ["dns_zone"]
+icon = "REC"
+
+[[fields]]
+name = "record_name"
+label = "Record name"
+type = "string"
+required = true
+default = "www"
+description = "Relative to the zone (\"www\" for www.example.com; \"@\" for the apex on Azure)."
+
+[[fields]]
+name = "record_type"
+label = "Type"
+type = "enum"
+required = true
+options = ["A", "CNAME", "TXT"]
+default = "A"
+
+[[fields]]
+name = "ttl"
+label = "TTL (s)"
+type = "int"
+required = true
+default = 300
+
+[[fields]]
+name = "values"
+label = "Values"
+type = "string_list"
+required = true
+description = "Addresses, the single CNAME target, or TXT strings."
+
+[[relations]]
+kind = "attribute_reference"
+label = "In zone"
+targets = ["dns_zone"]
+cardinality = "one"
+via_parent = true
+
+# ---------------------------------------------------------------- AWS
+[providers.aws]
+status = "full"
+
+[[providers.aws.blocks]]
+key = "main"
+resource = "aws_route53_record"
+
+[providers.aws.blocks.args]
+zone_id = { relation = "attribute_reference", attr = "zone_id" }
+name    = { func = "format", args = [ { value = "%s.%s" }, { field = "record_name" }, { relation = "attribute_reference", attr = "name" } ] }
+type    = { field = "record_type" }
+ttl     = { field = "ttl" }
+records = { field = "values" }
+
+[providers.aws.outputs]
+fqdn = { attr = "fqdn", description = "Fully qualified record name" }
+
+# ---------------------------------------------------------------- Azure
+[providers.azure]
+status = "full"
+
+[[providers.azure.blocks]]
+key = "a"
+resource = "azurerm_dns_a_record"
+when = { field = "record_type", equals = "A" }
+
+[providers.azure.blocks.args]
+name                = { field = "record_name" }
+zone_name           = { relation = "attribute_reference", attr = "name" }
+resource_group_name = { ancestor = "resource_group", attr = "name" }
+ttl                 = { field = "ttl" }
+records             = { field = "values" }
+
+[[providers.azure.blocks]]
+key = "cname"
+resource = "azurerm_dns_cname_record"
+when = { field = "record_type", equals = "CNAME" }
+
+[providers.azure.blocks.args]
+name                = { field = "record_name" }
+zone_name           = { relation = "attribute_reference", attr = "name" }
+resource_group_name = { ancestor = "resource_group", attr = "name" }
+ttl                 = { field = "ttl" }
+record              = { func = "one", args = [ { field = "values" } ] }
+
+[[providers.azure.blocks]]
+key = "txt"
+resource = "azurerm_dns_txt_record"
+when = { field = "record_type", equals = "TXT" }
+
+[providers.azure.blocks.args]
+name                = { field = "record_name" }
+zone_name           = { relation = "attribute_reference", attr = "name" }
+resource_group_name = { ancestor = "resource_group", attr = "name" }
+ttl                 = { field = "ttl" }
+
+[[providers.azure.blocks.nested]]
+block = "record"
+for_each_field = "values"
+
+[providers.azure.blocks.nested.args]
+value = { item = "value" }
+
+[providers.azure.outputs]
+a_fqdn     = { block = "a", attr = "fqdn", description = "Fully qualified record name" }
+cname_fqdn = { block = "cname", attr = "fqdn", description = "Fully qualified record name" }
+txt_fqdn   = { block = "txt", attr = "fqdn", description = "Fully qualified record name" }

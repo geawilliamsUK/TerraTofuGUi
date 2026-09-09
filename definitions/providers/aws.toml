@@ -1,0 +1,27 @@
+# Provider definition: Amazon Web Services
+#
+# Declares how the `aws` provider is wired into generated projects: registry source,
+# version constraint, provider-level input variables and the `provider "aws" {}` block.
+# Resource mappings that target this provider live under definitions/resources/*.toml
+# in their `[providers.aws]` sections.
+
+schema_version = 1
+
+[provider]
+id = "aws"
+display_name = "Amazon Web Services"
+description = "hashicorp/aws provider, 5.x series."
+source_namespace = "hashicorp"
+source_name = "aws"
+version_constraint = "~> 5.0"
+
+# Provider-level variables. Values come from the project's settings.provider_settings.aws
+# map and are emitted into variables.tf with these defaults.
+[[variables]]
+name = "region"
+type = "string"
+description = "AWS region to deploy into."
+default = "eu-west-2"
+
+[provider_block.args]
+region = { var = "region" }

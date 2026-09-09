@@ -1,0 +1,54 @@
+# Abstract type: DNS Zone (container)
+#
+# A hosted zone that DNS Records are drawn inside. AWS: aws_route53_zone.
+# Azure: azurerm_dns_zone (public).
+
+schema_version = 1
+
+[resource]
+type = "dns_zone"
+category = "dns"
+display_name = "DNS Zone"
+description = "A public hosted zone. Draw DNS Records inside it."
+kind = "container"
+allowed_parents = ["resource_group"]
+icon = "DNS"
+
+[[fields]]
+name = "domain"
+label = "Domain"
+type = "string"
+required = true
+default = "example.com"
+pattern = "^([a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?\\.)+[a-z]{2,}$"
+pattern_hint = "a fully qualified domain such as example.com"
+
+# ---------------------------------------------------------------- AWS
+[providers.aws]
+status = "full"
+
+[[providers.aws.blocks]]
+key = "main"
+resource = "aws_route53_zone"
+
+[providers.aws.blocks.args]
+name = { field = "domain" }
+tags = { object = { Name = { field = "name" } } }
+
+[providers.aws.outputs]
+name_servers = { attr = "name_servers", description = "Name servers to delegate the domain to" }
+
+# ---------------------------------------------------------------- Azure
+[providers.azure]
+status = "full"
+
+[[providers.azure.blocks]]
+key = "main"
+resource = "azurerm_dns_zone"
+
+[providers.azure.blocks.args]
+name                = { field = "domain" }
+resource_group_name = { ancestor = "resource_group", attr = "name" }
+
+[providers.azure.outputs]
+name_servers = { attr = "name_servers", description = "Name servers to delegate the domain to" }

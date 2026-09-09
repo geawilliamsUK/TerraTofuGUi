@@ -1,0 +1,59 @@
+# Abstract type: Container Registry
+#
+# AWS: aws_ecr_repository. Azure: azurerm_container_registry (Basic).
+
+schema_version = 2
+
+[resource]
+type = "container_registry"
+category = "container"
+display_name = "Container Registry"
+description = "A private registry for container images."
+kind = "node"
+allowed_parents = ["resource_group", "virtual_network"]
+network_agnostic = true
+icon = "REG"
+
+# ---------------------------------------------------------------- AWS
+[providers.aws]
+status = "full"
+
+[[providers.aws.blocks]]
+key = "main"
+resource = "aws_ecr_repository"
+
+[providers.aws.blocks.args]
+name                 = { field = "name", transform = "kebab" }
+image_tag_mutability = { value = "MUTABLE" }
+force_delete         = { value = true }
+tags                 = { object = { Name = { field = "name" } } }
+
+[providers.aws.outputs]
+url = { attr = "repository_url", description = "Repository URL" }
+
+# ---------------------------------------------------------------- Azure
+[providers.azure]
+status = "full"
+
+[[providers.azure.fields]]
+name = "registry_name"
+label = "Registry name"
+type = "string"
+required = true
+pattern = "^[a-zA-Z0-9]{5,50}$"
+pattern_hint = "5-50 letters and digits; globally unique"
+unique_scope = "container_registry"
+
+[[providers.azure.blocks]]
+key = "main"
+resource = "azurerm_container_registry"
+
+[providers.azure.blocks.args]
+name                = { provider_field = "registry_name" }
+resource_group_name = { ancestor = "resource_group", attr = "name" }
+location            = { var = "location" }
+sku                 = { value = "Basic" }
+admin_enabled       = { value = false }
+
+[providers.azure.outputs]
+url = { attr = "login_server", description = "Registry login server" }

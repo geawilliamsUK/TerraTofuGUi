@@ -1,0 +1,109 @@
+# Abstract type: NoSQL Table
+#
+# AWS: aws_dynamodb_table (on-demand billing). Azure: Cosmos DB account (Core/SQL API)
+# + SQL database + container, partitioned on the same key.
+
+schema_version = 2
+
+[resource]
+type = "nosql_table"
+category = "database"
+display_name = "NoSQL Table"
+description = "A key-value / document table with a partition key."
+kind = "node"
+allowed_parents = ["resource_group", "virtual_network"]
+network_agnostic = true
+icon = "KV"
+
+[[fields]]
+name = "partition_key"
+label = "Partition key"
+type = "string"
+required = true
+default = "id"
+pattern = "^[A-Za-z_][A-Za-z0-9_]{0,254}$"
+pattern_hint = "letters, digits and underscores"
+
+# ---------------------------------------------------------------- AWS
+[providers.aws]
+status = "full"
+
+[[providers.aws.blocks]]
+key = "main"
+resource = "aws_dynamodb_table"
+
+[providers.aws.blocks.args]
+name         = { field = "name", transform = "kebab" }
+billing_mode = { value = "PAY_PER_REQUEST" }
+hash_key     = { field = "partition_key" }
+tags         = { object = { Name = { field = "name" } } }
+
+[[providers.aws.blocks.nested]]
+block = "attribute"
+
+[providers.aws.blocks.nested.args]
+name = { field = "partition_key" }
+type = { value = "S" }
+
+[providers.aws.outputs]
+arn = { attr = "arn", description = "Table ARN" }
+
+# ---------------------------------------------------------------- Azure
+[providers.azure]
+status = "full"
+
+[[providers.azure.fields]]
+name = "account_name"
+label = "Cosmos DB account name"
+type = "string"
+required = true
+pattern = "^[a-z0-9][a-z0-9-]{1,42}[a-z0-9]$"
+pattern_hint = "3-44 lowercase letters, digits and hyphens; globally unique"
+unique_scope = "cosmosdb_account"
+
+[[providers.azure.blocks]]
+key = "acct"
+resource = "azurerm_cosmosdb_account"
+
+[providers.azure.blocks.args]
+name                = { provider_field = "account_name" }
+location            = { var = "location" }
+resource_group_name = { ancestor = "resource_group", attr = "name" }
+offer_type          = { value = "Standard" }
+kind                = { value = "GlobalDocumentDB" }
+
+[[providers.azure.blocks.nested]]
+block = "consistency_policy"
+
+[providers.azure.blocks.nested.args]
+consistency_level = { value = "Session" }
+
+[[providers.azure.blocks.nested]]
+block = "geo_location"
+
+[providers.azure.blocks.nested.args]
+location          = { var = "location" }
+failover_priority = { value = 0 }
+
+[[providers.azure.blocks]]
+key = "db"
+resource = "azurerm_cosmosdb_sql_database"
+
+[providers.azure.blocks.args]
+name                = { field = "name", transform = "kebab" }
+resource_group_name = { ancestor = "resource_group", attr = "name" }
+account_name        = { self_block = "acct", attr = "name" }
+
+[[providers.azure.blocks]]
+key = "main"
+resource = "azurerm_cosmosdb_sql_container"
+
+[providers.azure.blocks.args]
+name                = { field = "name", transform = "kebab" }
+resource_group_name = { ancestor = "resource_group", attr = "name" }
+account_name        = { self_block = "acct", attr = "name" }
+database_name       = { self_block = "db", attr = "name" }
+partition_key_paths = { list = [ { template = "/{partition_key}" } ] }
+
+[providers.azure.outputs]
+endpoint = { block = "acct", attr = "endpoint", description = "Cosmos DB endpoint" }

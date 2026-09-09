@@ -1,0 +1,58 @@
+# Abstract type: Log Group
+#
+# AWS: aws_cloudwatch_log_group. Azure: azurerm_log_analytics_workspace (PerGB2018).
+
+schema_version = 1
+
+[resource]
+type = "log_group"
+category = "monitoring"
+display_name = "Log Group"
+description = "A destination for application logs with a retention period."
+kind = "node"
+allowed_parents = ["resource_group", "virtual_network"]
+network_agnostic = true
+icon = "LOG"
+expects_incoming = true
+
+[[fields]]
+name = "retention_days"
+label = "Retention (days)"
+type = "enum"
+required = true
+options = ["30", "90", "365"]
+default = "30"
+
+# ---------------------------------------------------------------- AWS
+[providers.aws]
+status = "full"
+
+[[providers.aws.blocks]]
+key = "main"
+resource = "aws_cloudwatch_log_group"
+
+[providers.aws.blocks.args]
+name              = { field = "name", transform = "kebab" }
+retention_in_days = { map = "retention_days", table = { "30" = 30, "90" = 90, "365" = 365 } }
+tags              = { object = { Name = { field = "name" } } }
+
+[providers.aws.outputs]
+arn = { attr = "arn", description = "Log group ARN" }
+
+# ---------------------------------------------------------------- Azure
+[providers.azure]
+status = "full"
+
+[[providers.azure.blocks]]
+key = "main"
+resource = "azurerm_log_analytics_workspace"
+
+[providers.azure.blocks.args]
+name                = { field = "name", transform = "kebab" }
+location            = { var = "location" }
+resource_group_name = { ancestor = "resource_group", attr = "name" }
+sku                 = { value = "PerGB2018" }
+retention_in_days   = { map = "retention_days", table = { "30" = 30, "90" = 90, "365" = 365 } }
+
+[providers.azure.outputs]
+id = { attr = "id", description = "Workspace id" }

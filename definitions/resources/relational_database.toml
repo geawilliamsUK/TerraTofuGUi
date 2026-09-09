@@ -1,0 +1,272 @@
+# Abstract type: Relational Database  (schema_version 2)
+#
+# A managed PostgreSQL or MySQL server with one database.
+# AWS: aws_db_subnet_group (link two subnets in different AZs) + aws_db_instance in a
+#      linked Security Group. The password comes from a linked Secret ('Password from')
+#      or, failing that, the `db_password` input variable.
+# Azure: azurerm_postgresql_flexible_server / azurerm_mysql_flexible_server chosen by the
+#      `engine` field. With a linked subnet the server is VNet-integrated (delegated
+#      subnet + private DNS zone + zone link, public access off); without one it is
+#      public with no firewall rules, which is reported as a manual step.
+
+schema_version = 2
+
+[resource]
+type = "relational_database"
+category = "database"
+display_name = "Relational Database"
+description = "A managed PostgreSQL or MySQL server. Link two subnets, a Security Group and optionally a Secret that holds its password."
+kind = "node"
+allowed_parents = ["virtual_network", "resource_group"]
+icon = "DB"
+
+[[fields]]
+name = "engine"
+label = "Engine"
+type = "enum"
+required = true
+options = ["postgres", "mysql"]
+default = "postgres"
+
+[[fields]]
+name = "size"
+label = "Size class"
+type = "enum"
+required = true
+options = ["small", "medium", "large"]
+default = "small"
+
+[[fields]]
+name = "storage"
+label = "Storage (GB)"
+type = "enum"
+required = true
+options = ["32", "64", "128", "256", "512"]
+default = "32"
+
+[[fields]]
+name = "database_name"
+label = "Database name"
+type = "string"
+required = true
+default = "app"
+pattern = "^[A-Za-z][A-Za-z0-9_]{0,62}$"
+pattern_hint = "letters, digits and underscores, starting with a letter"
+
+[[fields]]
+name = "admin_username"
+label = "Admin username"
+type = "string"
+required = true
+default = "dbadmin"
+pattern = "^[a-z][a-z0-9_]{1,15}$"
+pattern_hint = "lowercase, 2-16 chars, starting with a letter"
+
+[[relations]]
+kind = "network_membership"
+label = "Subnets"
+targets = ["subnet"]
+cardinality = "many"
+min_targets = 2
+
+[[relations]]
+kind = "attribute_reference"
+label = "Uses security group"
+targets = ["security_group"]
+cardinality = "optional"
+
+[[relations]]
+kind = "reads"
+label = "Password from secret"
+targets = ["secret"]
+cardinality = "optional"
+
+# ---------------------------------------------------------------- AWS
+[providers.aws]
+status = "full"
+
+[[providers.aws.checks]]
+when = { relation = "network_membership", absent = true }
+severity = "error"
+message = "\"{name}\" needs subnets linked: RDS requires a subnet group with two subnets in different availability zones"
+
+[[providers.aws.checks]]
+when = { relation = "attribute_reference", target_type = "security_group", absent = true }
+message = "\"{name}\" has no security group; it will use the VPC default group"
+
+[[providers.aws.variables]]
+name = "db_password"
+type = "string"
+description = "Administrator password for database servers that are not linked to a Secret."
+sensitive = true
+
+[[providers.aws.blocks]]
+key = "subnets"
+resource = "aws_db_subnet_group"
+
+[providers.aws.blocks.args]
+name       = { template = "{name}-subnets", transform = "kebab" }
+subnet_ids = { relation = "network_membership", attr = "id", wrap = "list" }
+tags       = { object = { Name = { field = "name" } } }
+
+[[providers.aws.blocks]]
+key = "main"
+resource = "aws_db_instance"
+
+[providers.aws.blocks.args]
+identifier             = { field = "name", transform = "kebab" }
+engine                 = { map = "engine", table = { postgres = "postgres", mysql = "mysql" } }
+instance_class         = { map = "size", table = { small = "db.t3.micro", medium = "db.t3.medium", large = "db.m5.large" } }
+allocated_storage      = { map = "storage", table = { "32" = 32, "64" = 64, "128" = 128, "256" = 256, "512" = 512 } }
+db_name                = { field = "database_name" }
+username               = { field = "admin_username" }
+password               = { if = { relation = "reads" }, then = { relation = "reads", block = "version", attr = "secret_string" }, else = { var = "db_password" } }
+db_subnet_group_name   = { self_block = "subnets", attr = "name" }
+vpc_security_group_ids = { relation = "attribute_reference", target_type = "security_group", attr = "id", wrap = "list", optional = true }
+publicly_accessible    = { value = false }
+skip_final_snapshot    = { value = true }
+tags                   = { object = { Name = { field = "name" } } }
+
+[providers.aws.outputs]
+endpoint = { attr = "endpoint", description = "Connection endpoint (host:port)" }
+address  = { attr = "address", description = "Host name" }
+
+# ---------------------------------------------------------------- Azure
+[providers.azure]
+status = "partial"
+
+[[providers.azure.fields]]
+name = "server_name"
+label = "Server name"
+type = "string"
+required = true
+pattern = "^[a-z0-9][a-z0-9-]{1,61}[a-z0-9]$"
+pattern_hint = "3-63 lowercase letters, digits and hyphens; globally unique"
+unique_scope = "database_server"
+
+[[providers.azure.variables]]
+name = "db_password"
+type = "string"
+description = "Administrator password for database servers that are not linked to a Secret."
+sensitive = true
+
+# Private DNS zone + VNet link, only when the server is VNet-integrated.
+[[providers.azure.blocks]]
+key = "dns"
+resource = "azurerm_private_dns_zone"
+when = { relation = "network_membership" }
+
+[providers.azure.blocks.args]
+name                = { if = { field = "engine", equals = "postgres" }, then = { template = "{provider.server_name}.private.postgres.database.azure.com" }, else = { template = "{provider.server_name}.private.mysql.database.azure.com" } }
+resource_group_name = { ancestor = "resource_group", attr = "name" }
+
+[[providers.azure.blocks]]
+key = "dns_link"
+resource = "azurerm_private_dns_zone_virtual_network_link"
+when = { relation = "network_membership" }
+
+[providers.azure.blocks.args]
+name                  = { template = "{name}-dns-link", transform = "kebab" }
+resource_group_name   = { ancestor = "resource_group", attr = "name" }
+private_dns_zone_name = { self_block = "dns", attr = "name" }
+virtual_network_id    = { ancestor = "virtual_network", attr = "id" }
+
+# A linked Security Group becomes the NSG of the delegated subnet(s).
+[[providers.azure.blocks]]
+key = "nsg"
+resource = "azurerm_subnet_network_security_group_association"
+for_each_relation = "network_membership"
+when = { relation = "attribute_reference", target_type = "security_group" }
+
+[providers.azure.blocks.args]
+subnet_id                 = { target = "id" }
+network_security_group_id = { relation = "attribute_reference", target_type = "security_group", attr = "id" }
+
+[[providers.azure.blocks]]
+key = "pg"
+resource = "azurerm_postgresql_flexible_server"
+when = { field = "engine", equals = "postgres" }
+
+[providers.azure.blocks.args]
+name                          = { provider_field = "server_name" }
+resource_group_name           = { ancestor = "resource_group", attr = "name" }
+location                      = { var = "location" }
+version                       = { value = "16" }
+administrator_login           = { field = "admin_username" }
+administrator_password        = { if = { relation = "reads" }, then = { relation = "reads", attr = "value" }, else = { var = "db_password" } }
+sku_name                      = { map = "size", table = { small = "B_Standard_B1ms", medium = "GP_Standard_D2s_v3", large = "GP_Standard_D4s_v3" } }
+storage_mb                    = { map = "storage", table = { "32" = 32768, "64" = 65536, "128" = 131072, "256" = 262144, "512" = 524288 } }
+delegated_subnet_id           = { relation = "network_membership", attr = "id", optional = true }
+private_dns_zone_id           = { self_block = "dns", attr = "id" }
+public_network_access_enabled = { if = { relation = "network_membership" }, then = { value = false }, else = { value = true } }
+depends_on                    = { list = [ { self_block = "dns_link", attr = "" } ] }
+
+[[providers.azure.blocks]]
+key = "pgdb"
+resource = "azurerm_postgresql_flexible_server_database"
+when = { field = "engine", equals = "postgres" }
+
+[providers.azure.blocks.args]
+name      = { field = "database_name" }
+server_id = { self_block = "pg", attr = "id" }
+charset   = { value = "UTF8" }
+collation = { value = "en_US.utf8" }
+
+[[providers.azure.blocks]]
+key = "my"
+resource = "azurerm_mysql_flexible_server"
+when = { field = "engine", equals = "mysql" }
+
+[providers.azure.blocks.args]
+name                   = { provider_field = "server_name" }
+resource_group_name    = { ancestor = "resource_group", attr = "name" }
+location               = { var = "location" }
+version                = { value = "8.0.21" }
+administrator_login    = { field = "admin_username" }
+administrator_password = { if = { relation = "reads" }, then = { relation = "reads", attr = "value" }, else = { var = "db_password" } }
+sku_name               = { map = "size", table = { small = "B_Standard_B1ms", medium = "GP_Standard_D2ds_v4", large = "GP_Standard_D4ds_v4" } }
+delegated_subnet_id    = { relation = "network_membership", attr = "id", optional = true }
+private_dns_zone_id    = { self_block = "dns", attr = "id" }
+depends_on             = { list = [ { self_block = "dns_link", attr = "" } ] }
+
+[[providers.azure.blocks.nested]]
+block = "storage"
+
+[providers.azure.blocks.nested.args]
+size_gb = { map = "storage", table = { "32" = 32, "64" = 64, "128" = 128, "256" = 256, "512" = 512 } }
+
+[[providers.azure.blocks]]
+key = "mydb"
+resource = "azurerm_mysql_flexible_database"
+when = { field = "engine", equals = "mysql" }
+
+[providers.azure.blocks.args]
+name                = { field = "database_name" }
+resource_group_name = { ancestor = "resource_group", attr = "name" }
+server_name         = { self_block = "my", attr = "name" }
+charset             = { value = "utf8mb4" }
+collation           = { value = "utf8mb4_unicode_ci" }
+
+[providers.azure.outputs]
+postgres_fqdn = { block = "pg", attr = "fqdn", description = "PostgreSQL server host name" }
+mysql_fqdn    = { block = "my", attr = "fqdn", description = "MySQL server host name" }
+
+[[providers.azure.manual_steps]]
+title = "Open network access to the database server"
+when = { relation = "network_membership", absent = true }
+body = """
+No subnet is linked, so the flexible server is created with public network access and
+**no** firewall rules; no client can connect yet. Either link a subnet (VNet integration is
+then generated) or add `azurerm_*_flexible_server_firewall_rule` resources for the
+addresses that need access.
+"""
+
+[[providers.azure.manual_steps]]
+title = "Delegate the database subnet"
+when = { relation = "network_membership" }
+body = """
+VNet integration requires the linked subnet to be delegated to the flexible-server
+service and used by nothing else. Set the subnet's Azure **Delegation** field to
+`postgres_flexible` (or `mysql_flexible`), and keep functions and VMs in other subnets.
+Only the first linked subnet is used on Azure.
+"""

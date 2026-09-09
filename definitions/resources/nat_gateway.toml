@@ -1,0 +1,89 @@
+# Abstract type: NAT Gateway
+#
+# Outbound-only internet access for private subnets.
+# AWS: aws_eip + aws_nat_gateway placed in the linked (public) subnet. Private subnets reach
+#      it through a Route Table whose default route points at this node.
+# Azure: azurerm_public_ip + azurerm_nat_gateway + the public-ip association. Azure attaches
+#      NAT gateways directly to subnets; the Route Table mapping emits those associations
+#      for every subnet the table applies to, so the diagram reads the same on both clouds.
+
+schema_version = 1
+
+[resource]
+type = "nat_gateway"
+category = "network"
+display_name = "NAT Gateway"
+description = "Outbound internet access for private subnets. Place it in a public subnet and point a Route Table at it."
+kind = "node"
+allowed_parents = ["virtual_network", "resource_group"]
+icon = "NAT"
+
+[[relations]]
+kind = "network_membership"
+label = "Lives in subnet"
+targets = ["subnet"]
+cardinality = "one"
+
+# ---------------------------------------------------------------- AWS
+[providers.aws]
+status = "full"
+
+[[providers.aws.blocks]]
+key = "eip"
+resource = "aws_eip"
+
+[providers.aws.blocks.args]
+domain = { value = "vpc" }
+tags   = { object = { Name = { template = "{name}-eip" } } }
+
+[[providers.aws.blocks]]
+key = "main"
+resource = "aws_nat_gateway"
+
+[providers.aws.blocks.args]
+allocation_id = { self_block = "eip", attr = "id" }
+subnet_id     = { relation = "network_membership", attr = "id" }
+tags          = { object = { Name = { field = "name" } } }
+
+[providers.aws.outputs]
+id        = { attr = "id", description = "NAT gateway id" }
+public_ip = { block = "eip", attr = "public_ip", description = "Public IPv4 address" }
+
+# ---------------------------------------------------------------- Azure
+[providers.azure]
+status = "full"
+notes = "Subnets are associated with the NAT gateway by the Route Table that routes through it."
+
+[[providers.azure.blocks]]
+key = "pip"
+resource = "azurerm_public_ip"
+
+[providers.azure.blocks.args]
+name                = { template = "{name}-pip", transform = "kebab" }
+location            = { var = "location" }
+resource_group_name = { ancestor = "resource_group", attr = "name" }
+allocation_method   = { value = "Static" }
+sku                 = { value = "Standard" }
+
+[[providers.azure.blocks]]
+key = "main"
+resource = "azurerm_nat_gateway"
+
+[providers.azure.blocks.args]
+name                    = { field = "name", transform = "kebab" }
+location                = { var = "location" }
+resource_group_name     = { ancestor = "resource_group", attr = "name" }
+sku_name                = { value = "Standard" }
+idle_timeout_in_minutes = { value = 10 }
+
+[[providers.azure.blocks]]
+key = "pip_assoc"
+resource = "azurerm_nat_gateway_public_ip_association"
+
+[providers.azure.blocks.args]
+nat_gateway_id       = { self_block = "main", attr = "id" }
+public_ip_address_id = { self_block = "pip", attr = "id" }
+
+[providers.azure.outputs]
+id        = { attr = "id", description = "NAT gateway id" }
+public_ip = { block = "pip", attr = "ip_address", description = "Public IPv4 address" }

@@ -1,0 +1,158 @@
+{
+  "schema_version": 1,
+  "name": "azure-storage-queue",
+  "settings": {
+    "tool": "opentofu",
+    "target_provider": "azure",
+    "provider_settings": {
+      "aws": {
+        "region": "eu-west-2"
+      },
+      "azure": {
+        "location": "uksouth"
+      }
+    },
+    "backend": null,
+    "state_encryption": false
+  },
+  "containers": {
+    "rg-fan00001": {
+      "id": "rg-fan00001",
+      "name": "job system",
+      "container_type": "resource_group",
+      "config": {},
+      "provider_config": {},
+      "position": {
+        "x": 40,
+        "y": 40
+      },
+      "size": {
+        "w": 1000,
+        "h": 420
+      },
+      "parent": null,
+      "manual": false
+    }
+  },
+  "nodes": {
+    "fn-api": {
+      "id": "fn-api",
+      "name": "JobApi",
+      "resource_type": "function",
+      "config": {
+        "runtime": "python3.12",
+        "handler": "app.handler",
+        "memory_mb": 128,
+        "timeout_seconds": 30,
+        "http_trigger": true
+      },
+      "provider_config": {
+        "azure": {
+          "app_name": "jobapi-asq0",
+          "storage_account_name": "jobapisaasq0"
+        }
+      },
+      "position": {
+        "x": 80,
+        "y": 120
+      },
+      "parent": "rg-fan00001",
+      "manual": false
+    },
+    "role-api": {
+      "id": "role-api",
+      "name": "job api role",
+      "resource_type": "iam_role",
+      "config": {
+        "trusted_service": "serverless",
+        "permissions": "none"
+      },
+      "provider_config": {},
+      "position": {
+        "x": 80,
+        "y": 280
+      },
+      "parent": "rg-fan00001",
+      "manual": false
+    },
+    "sq-jobs": {
+      "id": "sq-jobs",
+      "name": "jobs",
+      "resource_type": "storage_queue",
+      "config": {},
+      "provider_config": {
+        "azure": {
+          "account_name": "jobsqueueasq0"
+        }
+      },
+      "position": {
+        "x": 420,
+        "y": 120
+      },
+      "parent": "rg-fan00001",
+      "manual": false
+    },
+    "fn-worker": {
+      "id": "fn-worker",
+      "name": "JobWorker",
+      "resource_type": "function",
+      "config": {
+        "runtime": "python3.12",
+        "handler": "app.handler",
+        "memory_mb": 128,
+        "timeout_seconds": 30,
+        "http_trigger": false
+      },
+      "provider_config": {
+        "azure": {
+          "app_name": "jobworker-asq0",
+          "storage_account_name": "jobworkersaasq0"
+        }
+      },
+      "position": {
+        "x": 760,
+        "y": 120
+      },
+      "parent": "rg-fan00001",
+      "manual": false
+    },
+    "role-worker": {
+      "id": "role-worker",
+      "name": "job worker role",
+      "resource_type": "iam_role",
+      "config": {
+        "trusted_service": "serverless",
+        "permissions": "none"
+      },
+      "provider_config": {},
+      "position": {
+        "x": 760,
+        "y": 280
+      },
+      "parent": "rg-fan00001",
+      "manual": false
+    }
+  },
+  "edges": [
+    {
+      "source": "fn-api",
+      "target": "role-api",
+      "relation": "iam_binding"
+    },
+    {
+      "source": "fn-api",
+      "target": "sq-jobs",
+      "relation": "sends_to"
+    },
+    {
+      "source": "fn-worker",
+      "target": "sq-jobs",
+      "relation": "attribute_reference"
+    },
+    {
+      "source": "fn-worker",
+      "target": "role-worker",
+      "relation": "iam_binding"
+    }
+  ]
+}

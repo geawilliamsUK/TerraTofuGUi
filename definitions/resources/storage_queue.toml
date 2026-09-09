@@ -1,0 +1,60 @@
+# Abstract type: Storage Queue  (schema_version 2)  — Azure only
+#
+# An Azure Storage Account queue: cheaper and simpler than Service Bus, at-least-once,
+# no ordering or sessions. There is no AWS equivalent (SQS is what Event Queue maps to),
+# so this type is scoped to Azure with `providers = ["azure"]`: placing one on the canvas
+# while targeting AWS is an error, not a "no mapping" warning.
+#
+# Functions link to it exactly like an Event Queue: 'Sends to' (output) and
+# 'Uses' (queue trigger).
+
+schema_version = 2
+
+[resource]
+type = "storage_queue"
+category = "serverless"
+display_name = "Storage Queue"
+description = "Azure Storage Account queue (Azure only). Cheap at-least-once queue without ordering; use Event Queue for a portable design or Service Bus features."
+kind = "node"
+allowed_parents = ["resource_group", "virtual_network"]
+network_agnostic = true
+icon = "SQ"
+providers = ["azure"]
+
+# ---------------------------------------------------------------- Azure
+[providers.azure]
+status = "full"
+
+[[providers.azure.fields]]
+name = "account_name"
+label = "Storage account name"
+type = "string"
+required = true
+pattern = "^[a-z0-9]{3,24}$"
+pattern_hint = "3-24 lowercase letters and digits; globally unique"
+unique_scope = "storage_account"
+
+[[providers.azure.blocks]]
+key = "sa"
+resource = "azurerm_storage_account"
+
+[providers.azure.blocks.args]
+name                     = { provider_field = "account_name" }
+resource_group_name      = { ancestor = "resource_group", attr = "name" }
+location                 = { var = "location" }
+account_tier             = { value = "Standard" }
+account_replication_type = { value = "LRS" }
+tags                     = { object = { Name = { field = "name" } } }
+
+[[providers.azure.blocks]]
+key = "main"
+resource = "azurerm_storage_queue"
+
+[providers.azure.blocks.args]
+name                 = { field = "name", transform = "kebab" }
+storage_account_name = { self_block = "sa", attr = "name" }
+
+[providers.azure.outputs]
+id                = { attr = "id", description = "Queue id" }
+name              = { attr = "name", description = "Queue name" }
+connection_string = { block = "sa", attr = "primary_connection_string", description = "Storage account connection string", sensitive = true }

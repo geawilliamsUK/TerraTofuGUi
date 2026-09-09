@@ -1,0 +1,228 @@
+# Abstract type: Autoscaling Group  (schema_version 2)
+#
+# A fleet of identical instances that scales between min and max.
+# AWS: aws_launch_template + aws_autoscaling_group across the linked subnets, optionally
+#      registered with a Load Balancer ('Attached to' -> its target group).
+# Azure: azurerm_linux_virtual_machine_scale_set in the first linked subnet, optionally in
+#      the Load Balancer's backend pool. PARTIAL: Azure scaling rules (min / max) live in a
+#      separate autoscale setting that must be added by hand.
+
+schema_version = 2
+
+[resource]
+type = "autoscaling_group"
+category = "compute"
+display_name = "Autoscaling Group"
+description = "A scaling fleet of instances. Link subnets, optionally a Security Group, and 'Attached to' a Load Balancer."
+kind = "node"
+allowed_parents = ["virtual_network", "resource_group"]
+icon = "ASG"
+
+[[fields]]
+name = "size"
+label = "Instance size"
+type = "enum"
+required = true
+options = ["small", "medium", "large"]
+default = "small"
+
+[[fields]]
+name = "min_instances"
+label = "Min instances"
+type = "int"
+required = true
+default = 1
+
+[[fields]]
+name = "max_instances"
+label = "Max instances"
+type = "int"
+required = true
+default = 3
+
+[[fields]]
+name = "desired_instances"
+label = "Desired instances"
+type = "int"
+required = true
+default = 2
+
+[[relations]]
+kind = "network_membership"
+label = "Subnets"
+targets = ["subnet"]
+cardinality = "many"
+
+[[relations]]
+kind = "attribute_reference"
+label = "Uses security group"
+targets = ["security_group"]
+cardinality = "optional"
+
+[[relations]]
+kind = "attachment"
+label = "Registered with load balancer"
+targets = ["load_balancer"]
+cardinality = "optional"
+
+# ---------------------------------------------------------------- AWS
+[providers.aws]
+status = "full"
+
+[[providers.aws.fields]]
+name = "ami"
+label = "AMI id"
+type = "string"
+pattern = "^ami-[0-9a-f]{8,17}$"
+pattern_hint = "must look like ami-0123456789abcdef0"
+description = "Leave empty to look up the latest Ubuntu 22.04 LTS image."
+
+[[providers.aws.fields]]
+name = "key_name"
+label = "SSH key pair name"
+type = "string"
+
+[[providers.aws.data]]
+key = "ubuntu"
+resource = "aws_ami"
+when = { provider_field = "ami", equals = "" }
+
+[providers.aws.data.args]
+most_recent = { value = true }
+owners      = { value = ["099720109477"] }
+
+[[providers.aws.data.nested]]
+block = "filter"
+
+[providers.aws.data.nested.args]
+name   = { value = "name" }
+values = { value = ["ubuntu/images/hvm-ssd/ubuntu-jammy-22.04-amd64-server-*"] }
+
+[[providers.aws.blocks]]
+key = "lt"
+resource = "aws_launch_template"
+
+[providers.aws.blocks.args]
+name                   = { field = "name", transform = "kebab" }
+image_id               = { provider_field = "ami", fallback = { self_data = "ubuntu", attr = "id" } }
+instance_type          = { map = "size", table = { small = "t3.micro", medium = "t3.medium", large = "t3.large" } }
+vpc_security_group_ids = { relation = "attribute_reference", target_type = "security_group", attr = "id", wrap = "list", optional = true }
+key_name               = { provider_field = "key_name", optional = true }
+
+[[providers.aws.blocks]]
+key = "main"
+resource = "aws_autoscaling_group"
+
+[providers.aws.blocks.args]
+name                = { field = "name", transform = "kebab" }
+min_size            = { field = "min_instances" }
+max_size            = { field = "max_instances" }
+desired_capacity    = { field = "desired_instances" }
+vpc_zone_identifier = { relation = "network_membership", attr = "id", wrap = "list" }
+target_group_arns   = { relation = "attachment", target_type = "load_balancer", block = "tg", attr = "arn", wrap = "list", optional = true }
+
+[[providers.aws.blocks.nested]]
+block = "launch_template"
+
+[providers.aws.blocks.nested.args]
+id      = { self_block = "lt", attr = "id" }
+version = { value = "$Latest" }
+
+[[providers.aws.blocks.nested]]
+block = "tag"
+
+[providers.aws.blocks.nested.args]
+key                 = { value = "Name" }
+value               = { field = "name" }
+propagate_at_launch = { value = true }
+
+[providers.aws.outputs]
+name = { attr = "name", description = "Autoscaling group name" }
+
+# ---------------------------------------------------------------- Azure
+[providers.azure]
+status = "partial"
+
+[[providers.azure.fields]]
+name = "admin_username"
+label = "Admin username"
+type = "string"
+required = true
+default = "azureuser"
+pattern = "^[a-z_][a-z0-9_-]{0,31}$"
+pattern_hint = "lowercase, starts with a letter or underscore, max 32 chars"
+
+[[providers.azure.fields]]
+name = "image"
+label = "OS image"
+type = "enum"
+required = true
+options = ["ubuntu-22.04", "ubuntu-24.04", "debian-12"]
+default = "ubuntu-22.04"
+
+[[providers.azure.variables]]
+name = "ssh_public_key"
+type = "string"
+description = "SSH public key installed for the VM admin user (e.g. contents of ~/.ssh/id_ed25519.pub)."
+
+[[providers.azure.blocks]]
+key = "main"
+resource = "azurerm_linux_virtual_machine_scale_set"
+
+[providers.azure.blocks.args]
+name                = { field = "name", transform = "kebab" }
+location            = { var = "location" }
+resource_group_name = { ancestor = "resource_group", attr = "name" }
+sku                 = { map = "size", table = { small = "Standard_B1s", medium = "Standard_B2s", large = "Standard_D2s_v3" } }
+instances           = { field = "desired_instances" }
+admin_username      = { provider_field = "admin_username" }
+
+[[providers.azure.blocks.nested]]
+block = "admin_ssh_key"
+
+[providers.azure.blocks.nested.args]
+username   = { provider_field = "admin_username" }
+public_key = { var = "ssh_public_key" }
+
+[[providers.azure.blocks.nested]]
+block = "source_image_reference"
+
+[providers.azure.blocks.nested.args]
+publisher = { map = "image", table = { "ubuntu-22.04" = "Canonical", "ubuntu-24.04" = "Canonical", "debian-12" = "Debian" } }
+offer     = { map = "image", table = { "ubuntu-22.04" = "0001-com-ubuntu-server-jammy", "ubuntu-24.04" = "ubuntu-24_04-lts", "debian-12" = "debian-12" } }
+sku       = { map = "image", table = { "ubuntu-22.04" = "22_04-lts-gen2", "ubuntu-24.04" = "server", "debian-12" = "12-gen2" } }
+version   = { value = "latest" }
+
+[[providers.azure.blocks.nested]]
+block = "os_disk"
+
+[providers.azure.blocks.nested.args]
+caching              = { value = "ReadWrite" }
+storage_account_type = { value = "Standard_LRS" }
+
+[[providers.azure.blocks.nested]]
+block = "network_interface"
+
+[providers.azure.blocks.nested.args]
+name    = { value = "primary" }
+primary = { value = true }
+
+[[providers.azure.blocks.nested.nested]]
+block = "ip_configuration"
+
+[providers.azure.blocks.nested.nested.args]
+name                                   = { value = "internal" }
+primary                                = { value = true }
+subnet_id                              = { relation = "network_membership", attr = "id" }
+load_balancer_backend_address_pool_ids = { relation = "attachment", target_type = "load_balancer", block = "pool", attr = "id", wrap = "list", optional = true }
+
+[providers.azure.outputs]
+id = { attr = "id", description = "Scale set id" }
+
+[[providers.azure.manual_steps]]
+title = "Add autoscale rules"
+body = """
+The scale set is created with a fixed instance count. Min / max scaling on Azure lives in
+a separate `azurerm_monitor_autoscale_setting` resource with metric rules; add one that
+targets this scale set with the min / max from the diagram.
+"""

@@ -1,0 +1,828 @@
+{
+  "schema_version": 1,
+  "name": "job-pipeline",
+  "settings": {
+    "tool": "opentofu",
+    "target_provider": "aws",
+    "provider_settings": {
+      "aws": {
+        "region": "eu-west-2"
+      },
+      "azure": {
+        "location": "uksouth"
+      }
+    },
+    "backend": null,
+    "state_encryption": false
+  },
+  "containers": {
+    "rg-11111111": {
+      "id": "rg-11111111",
+      "name": "jobs",
+      "container_type": "resource_group",
+      "config": {},
+      "provider_config": {},
+      "position": {
+        "x": 40,
+        "y": 40
+      },
+      "size": {
+        "w": 1700,
+        "h": 1100
+      },
+      "parent": null,
+      "manual": false
+    },
+    "vnet-22222222": {
+      "id": "vnet-22222222",
+      "name": "core",
+      "container_type": "virtual_network",
+      "config": {
+        "cidr_block": "10.0.0.0/16"
+      },
+      "provider_config": {
+        "aws": {
+          "enable_dns_hostnames": true
+        }
+      },
+      "position": {
+        "x": 80,
+        "y": 100
+      },
+      "size": {
+        "w": 1100,
+        "h": 740
+      },
+      "parent": "rg-11111111",
+      "manual": false
+    },
+    "kv-33333333": {
+      "id": "kv-33333333",
+      "name": "db credentials",
+      "container_type": "key_vault",
+      "config": {},
+      "provider_config": {
+        "azure": {
+          "vault_name": "jobs-kv-x7q2"
+        }
+      },
+      "position": {
+        "x": 80,
+        "y": 880
+      },
+      "size": {
+        "w": 700,
+        "h": 200
+      },
+      "parent": "rg-11111111",
+      "manual": false
+    }
+  },
+  "nodes": {
+    "subnet-a1": {
+      "id": "subnet-a1",
+      "name": "app a",
+      "resource_type": "subnet",
+      "config": {
+        "cidr_block": "10.0.2.0/24"
+      },
+      "provider_config": {
+        "aws": {
+          "availability_zone": "eu-west-2a"
+        },
+        "azure": {
+          "delegation": "web_serverfarms"
+        }
+      },
+      "position": {
+        "x": 120,
+        "y": 260
+      },
+      "parent": "vnet-22222222",
+      "manual": false
+    },
+    "subnet-a2": {
+      "id": "subnet-a2",
+      "name": "app b",
+      "resource_type": "subnet",
+      "config": {
+        "cidr_block": "10.0.3.0/24"
+      },
+      "provider_config": {
+        "aws": {
+          "availability_zone": "eu-west-2b"
+        },
+        "azure": {
+          "delegation": "web_serverfarms"
+        }
+      },
+      "position": {
+        "x": 120,
+        "y": 360
+      },
+      "parent": "vnet-22222222",
+      "manual": false
+    },
+    "subnet-d1": {
+      "id": "subnet-d1",
+      "name": "db a",
+      "resource_type": "subnet",
+      "config": {
+        "cidr_block": "10.0.10.0/24"
+      },
+      "provider_config": {
+        "aws": {
+          "availability_zone": "eu-west-2a"
+        },
+        "azure": {
+          "delegation": "postgres_flexible"
+        }
+      },
+      "position": {
+        "x": 120,
+        "y": 560
+      },
+      "parent": "vnet-22222222",
+      "manual": false
+    },
+    "subnet-d2": {
+      "id": "subnet-d2",
+      "name": "db b",
+      "resource_type": "subnet",
+      "config": {
+        "cidr_block": "10.0.11.0/24"
+      },
+      "provider_config": {
+        "aws": {
+          "availability_zone": "eu-west-2b"
+        },
+        "azure": {
+          "delegation": "postgres_flexible"
+        }
+      },
+      "position": {
+        "x": 120,
+        "y": 660
+      },
+      "parent": "vnet-22222222",
+      "manual": false
+    },
+    "sg-runner": {
+      "id": "sg-runner",
+      "name": "runner sg",
+      "resource_type": "security_group",
+      "config": {
+        "rules": [
+          {
+            "name": "all-out",
+            "direction": "egress",
+            "protocol": "all",
+            "from_port": 0,
+            "to_port": 0,
+            "cidr": "0.0.0.0/0",
+            "source_group": "",
+            "description": "Outbound to queue, secrets and database"
+          }
+        ]
+      },
+      "provider_config": {},
+      "position": {
+        "x": 440,
+        "y": 260
+      },
+      "parent": "vnet-22222222",
+      "manual": false
+    },
+    "sg-db": {
+      "id": "sg-db",
+      "name": "db sg",
+      "resource_type": "security_group",
+      "config": {
+        "rules": [
+          {
+            "name": "postgres-from-runner",
+            "direction": "ingress",
+            "protocol": "tcp",
+            "from_port": 5432,
+            "to_port": 5432,
+            "cidr": "",
+            "source_group": "sg-runner",
+            "description": "PostgreSQL from the job runner only"
+          }
+        ]
+      },
+      "provider_config": {},
+      "position": {
+        "x": 440,
+        "y": 560
+      },
+      "parent": "vnet-22222222",
+      "manual": false
+    },
+    "fn-runner": {
+      "id": "fn-runner",
+      "name": "JobRunner",
+      "resource_type": "function",
+      "config": {
+        "runtime": "python3.12",
+        "handler": "app.handler",
+        "memory_mb": 512,
+        "timeout_seconds": 120,
+        "http_trigger": false
+      },
+      "provider_config": {
+        "azure": {
+          "app_name": "jobrunner-x7q2"
+        }
+      },
+      "position": {
+        "x": 760,
+        "y": 360
+      },
+      "parent": "vnet-22222222",
+      "manual": false
+    },
+    "db-jobs": {
+      "id": "db-jobs",
+      "name": "jobs db",
+      "resource_type": "relational_database",
+      "config": {
+        "engine": "postgres",
+        "size": "small",
+        "storage": "32",
+        "database_name": "jobs",
+        "admin_username": "dbadmin"
+      },
+      "provider_config": {
+        "azure": {
+          "server_name": "jobs-db-x7q2"
+        }
+      },
+      "position": {
+        "x": 760,
+        "y": 610
+      },
+      "parent": "vnet-22222222",
+      "manual": false
+    },
+    "fn-gateway": {
+      "id": "fn-gateway",
+      "name": "JobGateway",
+      "resource_type": "function",
+      "config": {
+        "runtime": "python3.12",
+        "handler": "app.handler",
+        "memory_mb": 128,
+        "timeout_seconds": 30,
+        "http_trigger": true
+      },
+      "provider_config": {
+        "azure": {
+          "app_name": "jobgateway-x7q2"
+        }
+      },
+      "position": {
+        "x": 1260,
+        "y": 160
+      },
+      "parent": "rg-11111111",
+      "manual": false
+    },
+    "q-jobs": {
+      "id": "q-jobs",
+      "name": "jobs queue",
+      "resource_type": "event_queue",
+      "config": {
+        "visibility_timeout_seconds": 120
+      },
+      "provider_config": {
+        "azure": {
+          "namespace_name": "jobs-bus-x7q2"
+        }
+      },
+      "position": {
+        "x": 1260,
+        "y": 300
+      },
+      "parent": "rg-11111111",
+      "manual": false
+    },
+    "role-gateway": {
+      "id": "role-gateway",
+      "name": "gateway role",
+      "resource_type": "iam_role",
+      "config": {
+        "trusted_service": "serverless",
+        "permissions": "none"
+      },
+      "provider_config": {},
+      "position": {
+        "x": 1480,
+        "y": 160
+      },
+      "parent": "rg-11111111",
+      "manual": false
+    },
+    "role-runner": {
+      "id": "role-runner",
+      "name": "runner role",
+      "resource_type": "iam_role",
+      "config": {
+        "trusted_service": "serverless",
+        "permissions": "none"
+      },
+      "provider_config": {},
+      "position": {
+        "x": 1480,
+        "y": 300
+      },
+      "parent": "rg-11111111",
+      "manual": false
+    },
+    "obj-gateway": {
+      "id": "obj-gateway",
+      "name": "gateway storage",
+      "resource_type": "object_storage",
+      "config": {
+        "versioning": false
+      },
+      "provider_config": {
+        "aws": {
+          "bucket_name": "jobgateway-sa-x7q2"
+        },
+        "azure": {
+          "account_name": "jobgatewaysax7q2",
+          "container_name": "data",
+          "replication": "LRS"
+        }
+      },
+      "position": {
+        "x": 1260,
+        "y": 440
+      },
+      "parent": "rg-11111111",
+      "manual": false
+    },
+    "obj-runner": {
+      "id": "obj-runner",
+      "name": "runner storage",
+      "resource_type": "object_storage",
+      "config": {
+        "versioning": false
+      },
+      "provider_config": {
+        "aws": {
+          "bucket_name": "jobrunner-sa-x7q2"
+        },
+        "azure": {
+          "account_name": "jobrunnersax7q2",
+          "container_name": "data",
+          "replication": "LRS"
+        }
+      },
+      "position": {
+        "x": 1260,
+        "y": 560
+      },
+      "parent": "rg-11111111",
+      "manual": false
+    },
+    "log-pipeline": {
+      "id": "log-pipeline",
+      "name": "pipeline logs",
+      "resource_type": "log_group",
+      "config": {
+        "retention_days": "30"
+      },
+      "provider_config": {},
+      "position": {
+        "x": 1480,
+        "y": 440
+      },
+      "parent": "rg-11111111",
+      "manual": false
+    },
+    "sec-dbuser": {
+      "id": "sec-dbuser",
+      "name": "DBUser",
+      "resource_type": "secret",
+      "config": {},
+      "provider_config": {},
+      "position": {
+        "x": 120,
+        "y": 940
+      },
+      "parent": "kv-33333333",
+      "manual": false
+    },
+    "sec-dbpass": {
+      "id": "sec-dbpass",
+      "name": "DBPass",
+      "resource_type": "secret",
+      "config": {},
+      "provider_config": {},
+      "position": {
+        "x": 340,
+        "y": 940
+      },
+      "parent": "kv-33333333",
+      "manual": false
+    },
+    "sec-dburi": {
+      "id": "sec-dburi",
+      "name": "DBUri",
+      "resource_type": "secret",
+      "config": {},
+      "provider_config": {},
+      "position": {
+        "x": 560,
+        "y": 940
+      },
+      "parent": "kv-33333333",
+      "manual": false
+    },
+    "subnet-pub": {
+      "id": "subnet-pub",
+      "name": "public a",
+      "resource_type": "subnet",
+      "config": {
+        "cidr_block": "10.0.1.0/24"
+      },
+      "provider_config": {
+        "aws": {
+          "availability_zone": "eu-west-2a",
+          "map_public_ip": true
+        },
+        "azure": {
+          "delegation": "none"
+        }
+      },
+      "position": {
+        "x": 120,
+        "y": 60
+      },
+      "parent": "vnet-22222222",
+      "manual": false
+    },
+    "igw-1": {
+      "id": "igw-1",
+      "name": "igw",
+      "resource_type": "internet_gateway",
+      "config": {},
+      "provider_config": {},
+      "position": {
+        "x": 440,
+        "y": 60
+      },
+      "parent": "vnet-22222222",
+      "manual": false
+    },
+    "nat-1": {
+      "id": "nat-1",
+      "name": "nat",
+      "resource_type": "nat_gateway",
+      "config": {},
+      "provider_config": {},
+      "position": {
+        "x": 640,
+        "y": 60
+      },
+      "parent": "vnet-22222222",
+      "manual": false
+    },
+    "rt-public": {
+      "id": "rt-public",
+      "name": "public routes",
+      "resource_type": "route_table",
+      "config": {},
+      "provider_config": {},
+      "position": {
+        "x": 840,
+        "y": 60
+      },
+      "parent": "vnet-22222222",
+      "manual": false
+    },
+    "rt-private": {
+      "id": "rt-private",
+      "name": "private routes",
+      "resource_type": "route_table",
+      "config": {},
+      "provider_config": {},
+      "position": {
+        "x": 1000,
+        "y": 160
+      },
+      "parent": "vnet-22222222",
+      "manual": false
+    }
+  },
+  "edges": [
+    {
+      "source": "fn-gateway",
+      "target": "role-gateway",
+      "relation": "iam_binding"
+    },
+    {
+      "source": "fn-gateway",
+      "target": "q-jobs",
+      "relation": "sends_to"
+    },
+    {
+      "source": "fn-gateway",
+      "target": "log-pipeline",
+      "relation": "logs_to"
+    },
+    {
+      "source": "fn-gateway",
+      "target": "obj-gateway",
+      "relation": "attachment"
+    },
+    {
+      "source": "fn-runner",
+      "target": "role-runner",
+      "relation": "iam_binding"
+    },
+    {
+      "source": "fn-runner",
+      "target": "q-jobs",
+      "relation": "attribute_reference"
+    },
+    {
+      "source": "fn-runner",
+      "target": "db-jobs",
+      "relation": "attribute_reference"
+    },
+    {
+      "source": "fn-runner",
+      "target": "sg-runner",
+      "relation": "attribute_reference"
+    },
+    {
+      "source": "fn-runner",
+      "target": "subnet-a1",
+      "relation": "network_membership"
+    },
+    {
+      "source": "fn-runner",
+      "target": "subnet-a2",
+      "relation": "network_membership"
+    },
+    {
+      "source": "fn-runner",
+      "target": "sec-dbuser",
+      "relation": "reads"
+    },
+    {
+      "source": "fn-runner",
+      "target": "sec-dbpass",
+      "relation": "reads"
+    },
+    {
+      "source": "fn-runner",
+      "target": "sec-dburi",
+      "relation": "reads"
+    },
+    {
+      "source": "fn-runner",
+      "target": "log-pipeline",
+      "relation": "logs_to"
+    },
+    {
+      "source": "fn-runner",
+      "target": "obj-runner",
+      "relation": "attachment"
+    },
+    {
+      "source": "db-jobs",
+      "target": "subnet-d1",
+      "relation": "network_membership"
+    },
+    {
+      "source": "db-jobs",
+      "target": "subnet-d2",
+      "relation": "network_membership"
+    },
+    {
+      "source": "db-jobs",
+      "target": "sg-db",
+      "relation": "attribute_reference"
+    },
+    {
+      "source": "db-jobs",
+      "target": "sec-dbpass",
+      "relation": "reads"
+    },
+    {
+      "source": "sec-dburi",
+      "target": "db-jobs",
+      "relation": "reads"
+    },
+    {
+      "source": "nat-1",
+      "target": "subnet-pub",
+      "relation": "network_membership"
+    },
+    {
+      "source": "rt-public",
+      "target": "igw-1",
+      "relation": "attribute_reference"
+    },
+    {
+      "source": "rt-public",
+      "target": "subnet-pub",
+      "relation": "attachment"
+    },
+    {
+      "source": "rt-private",
+      "target": "nat-1",
+      "relation": "attribute_reference"
+    },
+    {
+      "source": "rt-private",
+      "target": "subnet-a1",
+      "relation": "attachment"
+    },
+    {
+      "source": "rt-private",
+      "target": "subnet-a2",
+      "relation": "attachment"
+    }
+  ],
+  "views": [
+    {
+      "name": "Data flow",
+      "filter": {
+        "categories": [
+          "serverless",
+          "database",
+          "storage",
+          "monitoring",
+          "secrets"
+        ],
+        "depth": 1,
+        "relations": [
+          "sends_to",
+          "attribute_reference",
+          "reads",
+          "logs_to",
+          "attachment"
+        ],
+        "containers": false
+      },
+      "layout": {
+        "positions": {
+          "fn-gateway": {
+            "x": 120,
+            "y": 200
+          },
+          "q-jobs": {
+            "x": 460,
+            "y": 200
+          },
+          "fn-runner": {
+            "x": 800,
+            "y": 200
+          },
+          "db-jobs": {
+            "x": 1140,
+            "y": 200
+          },
+          "log-pipeline": {
+            "x": 800,
+            "y": 420
+          },
+          "obj-gateway": {
+            "x": 120,
+            "y": 420
+          },
+          "obj-runner": {
+            "x": 1140,
+            "y": 420
+          },
+          "sec-dbuser": {
+            "x": 420,
+            "y": 560
+          },
+          "sec-dbpass": {
+            "x": 640,
+            "y": 560
+          },
+          "sec-dburi": {
+            "x": 860,
+            "y": 560
+          }
+        },
+        "sizes": {}
+      },
+      "groups": [
+        {
+          "id": "grp-ingress",
+          "label": "Ingress (public)",
+          "position": {
+            "x": 80,
+            "y": 140
+          },
+          "size": {
+            "w": 280,
+            "h": 380
+          },
+          "color": "#d08a3a"
+        },
+        {
+          "id": "grp-processing",
+          "label": "Processing (private)",
+          "position": {
+            "x": 420,
+            "y": 140
+          },
+          "size": {
+            "w": 620,
+            "h": 380
+          },
+          "color": "#5b7fb5"
+        },
+        {
+          "id": "grp-state",
+          "label": "State",
+          "position": {
+            "x": 1100,
+            "y": 140
+          },
+          "size": {
+            "w": 280,
+            "h": 380
+          },
+          "color": "#5fa870"
+        },
+        {
+          "id": "grp-secrets",
+          "label": "Credentials (Key Vault)",
+          "position": {
+            "x": 380,
+            "y": 520
+          },
+          "size": {
+            "w": 700,
+            "h": 140
+          },
+          "color": "#8a7f5a"
+        }
+      ],
+      "flows": [
+        {
+          "id": "flow-1",
+          "from": {
+            "entity": "fn-gateway"
+          },
+          "to": {
+            "entity": "q-jobs"
+          },
+          "label": "job requests"
+        },
+        {
+          "id": "flow-2",
+          "from": {
+            "entity": "q-jobs"
+          },
+          "to": {
+            "entity": "fn-runner"
+          },
+          "label": "triggers"
+        },
+        {
+          "id": "flow-3",
+          "from": {
+            "entity": "fn-runner"
+          },
+          "to": {
+            "entity": "db-jobs"
+          },
+          "label": "results"
+        },
+        {
+          "id": "flow-4",
+          "from": {
+            "group": "grp-secrets"
+          },
+          "to": {
+            "entity": "fn-runner"
+          },
+          "label": "db credentials",
+          "dashed": true
+        },
+        {
+          "id": "flow-5",
+          "from": {
+            "group": "grp-processing"
+          },
+          "to": {
+            "entity": "log-pipeline"
+          },
+          "label": "logs",
+          "dashed": true
+        }
+      ]
+    }
+  ]
+}

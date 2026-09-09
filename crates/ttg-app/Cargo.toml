@@ -1,0 +1,33 @@
+[package]
+name = "ttg-app"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Native desktop GUI for TerraTofu GUI"
+
+[[bin]]
+name = "terratofu-gui"
+path = "src/main.rs"
+
+[dependencies]
+ttg-core = { path = "../ttg-core" }
+ttg-catalog = { path = "../ttg-catalog" }
+ttg-codegen = { path = "../ttg-codegen" }
+egui.workspace = true
+eframe.workspace = true
+rfd.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+anyhow.workspace = true
+image = { version = "0.25", default-features = false, features = ["png"] }
+rmcp = { version = "3.2.0", features = ["server", "transport-streamable-http-server", "macros"], optional = true }
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync", "net", "time"], optional = true }
+axum = { version = "0.8", optional = true }
+schemars = { version = "1.2.2", optional = true }
+base64 = { version = "0.23.1", optional = true }
+uuid = { workspace = true, optional = true }
+tokio-util = { version = "0.7", optional = true }
+
+[features]
+default = ["mcp"]
+mcp = ["dep:rmcp", "dep:tokio", "dep:tokio-util", "dep:axum", "dep:schemars", "dep:base64", "dep:uuid"]

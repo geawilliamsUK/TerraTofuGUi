@@ -1,0 +1,33 @@
+# Provider definition: Microsoft Azure
+#
+# Every Azure resource must live inside a Resource Group, so `required_ancestor` tells the
+# diagnostics layer to flag any node that is not placed in a `resource_group` container.
+
+schema_version = 1
+required_ancestor = "resource_group"
+
+[provider]
+id = "azure"
+display_name = "Microsoft Azure"
+description = "hashicorp/azurerm provider, 4.x series."
+source_namespace = "hashicorp"
+source_name = "azurerm"
+version_constraint = "~> 4.0"
+
+[[variables]]
+name = "location"
+type = "string"
+description = "Azure region for all resources."
+default = "uksouth"
+
+[[variables]]
+name = "subscription_id"
+type = "string"
+description = "Azure subscription id. Required by azurerm >= 4.0; can also be supplied via ARM_SUBSCRIPTION_ID."
+
+[provider_block.args]
+subscription_id = { var = "subscription_id" }
+
+# `features {}` is mandatory even when empty.
+[[provider_block.nested]]
+block = "features"

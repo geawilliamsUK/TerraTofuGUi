@@ -1,0 +1,49 @@
+{
+  "schema_version": 1,
+  "name": "existing-network",
+  "settings": {
+    "tool": "opentofu",
+    "target_provider": "aws",
+    "provider_settings": { "aws": { "region": "eu-west-1" } },
+    "backend": { "type": "s3", "args": { "bucket": "my-tf-state", "key": "existing-network/terraform.tfstate", "region": "eu-west-1" } },
+    "state_encryption": false
+  },
+  "containers": {
+    "vnet-aa11bb22": {
+      "id": "vnet-aa11bb22",
+      "name": "legacy",
+      "container_type": "virtual_network",
+      "config": { "cidr_block": "172.16.0.0/16" },
+      "provider_config": {},
+      "position": { "x": 60, "y": 60 },
+      "size": { "w": 640, "h": 380 },
+      "parent": null,
+      "manual": true
+    }
+  },
+  "nodes": {
+    "subnet-cc33dd44": {
+      "id": "subnet-cc33dd44",
+      "name": "batch",
+      "resource_type": "subnet",
+      "config": { "cidr_block": "172.16.10.0/24" },
+      "provider_config": {},
+      "position": { "x": 120, "y": 140 },
+      "parent": "vnet-aa11bb22",
+      "manual": false
+    },
+    "vm-ee55ff66": {
+      "id": "vm-ee55ff66",
+      "name": "worker",
+      "resource_type": "compute_instance",
+      "config": { "size": "medium" },
+      "provider_config": { "aws": { "ami": "ami-0abcdef1234567890", "key_name": "ops" } },
+      "position": { "x": 420, "y": 140 },
+      "parent": "vnet-aa11bb22",
+      "manual": false
+    }
+  },
+  "edges": [
+    { "source": "vm-ee55ff66", "target": "subnet-cc33dd44", "relation": "network_membership" }
+  ]
+}

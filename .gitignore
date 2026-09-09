@@ -1,0 +1,11 @@
+/target
+/out
+*.zip
+*.tfstate
+*.tfstate.*
+.terraform/
+.terraform.lock.hcl
+/.idea
+**/*.rs.bk
+debug
+target

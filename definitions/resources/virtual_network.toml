@@ -1,0 +1,63 @@
+# Abstract type: Virtual Network (container)
+#
+# AWS: aws_vpc. Azure: azurerm_virtual_network. Subnets drawn inside this container
+# get their network membership from containment (see subnet.toml `via_parent`).
+
+schema_version = 1
+
+[resource]
+type = "virtual_network"
+category = "network"
+display_name = "Virtual Network"
+description = "An isolated private network (AWS VPC, Azure VNet)."
+kind = "container"
+allowed_parents = ["resource_group"]
+icon = "NET"
+
+[[fields]]
+name = "cidr_block"
+label = "Address space"
+type = "cidr"
+required = true
+default = "10.0.0.0/16"
+description = "Primary IPv4 address range of the network."
+
+# ---------------------------------------------------------------- AWS
+[providers.aws]
+status = "full"
+
+[[providers.aws.fields]]
+name = "enable_dns_hostnames"
+label = "Enable DNS hostnames"
+type = "bool"
+default = true
+
+[[providers.aws.blocks]]
+key = "main"
+resource = "aws_vpc"
+
+[providers.aws.blocks.args]
+cidr_block           = { field = "cidr_block" }
+enable_dns_support   = { value = true }
+enable_dns_hostnames = { provider_field = "enable_dns_hostnames", optional = true }
+tags                 = { object = { Name = { field = "name" } } }
+
+[providers.aws.outputs]
+id = { attr = "id", description = "VPC id" }
+
+# ---------------------------------------------------------------- Azure
+[providers.azure]
+status = "full"
+
+[[providers.azure.blocks]]
+key = "main"
+resource = "azurerm_virtual_network"
+
+[providers.azure.blocks.args]
+name                = { field = "name", transform = "kebab" }
+location            = { var = "location" }
+resource_group_name = { ancestor = "resource_group", attr = "name" }
+address_space       = { field = "cidr_block", wrap = "list" }
+
+[providers.azure.outputs]
+id = { attr = "id", description = "Virtual network id" }

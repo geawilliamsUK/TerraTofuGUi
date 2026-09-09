@@ -1,0 +1,214 @@
+{
+  "schema_version": 1,
+  "name": "fan-out",
+  "settings": {
+    "tool": "opentofu",
+    "target_provider": "aws",
+    "provider_settings": {
+      "aws": {
+        "region": "eu-west-2"
+      },
+      "azure": {
+        "location": "uksouth"
+      }
+    },
+    "backend": null,
+    "state_encryption": false
+  },
+  "containers": {
+    "rg-fan00001": {
+      "id": "rg-fan00001",
+      "name": "events",
+      "container_type": "resource_group",
+      "config": {},
+      "provider_config": {},
+      "position": {
+        "x": 40,
+        "y": 40
+      },
+      "size": {
+        "w": 1250,
+        "h": 560
+      },
+      "parent": null,
+      "manual": false
+    },
+    "sb-fan00001": {
+      "id": "sb-fan00001",
+      "name": "orders bus",
+      "container_type": "servicebus_namespace",
+      "config": {
+        "sku": "Standard"
+      },
+      "provider_config": {
+        "azure": {
+          "namespace_name": "orders-bus-fan0"
+        }
+      },
+      "position": {
+        "x": 380,
+        "y": 80
+      },
+      "size": {
+        "w": 560,
+        "h": 320
+      },
+      "parent": "rg-fan00001",
+      "manual": false
+    }
+  },
+  "nodes": {
+    "fn-publisher": {
+      "id": "fn-publisher",
+      "name": "OrderApi",
+      "resource_type": "function",
+      "config": {
+        "runtime": "python3.12",
+        "handler": "app.handler",
+        "memory_mb": 128,
+        "timeout_seconds": 30,
+        "http_trigger": true
+      },
+      "provider_config": {
+        "azure": {
+          "app_name": "orderapi-fan0",
+          "storage_account_name": "orderapisafan0"
+        }
+      },
+      "position": {
+        "x": 80,
+        "y": 120
+      },
+      "parent": "rg-fan00001",
+      "manual": false
+    },
+    "role-publisher": {
+      "id": "role-publisher",
+      "name": "order api role",
+      "resource_type": "iam_role",
+      "config": {
+        "trusted_service": "serverless",
+        "permissions": "none"
+      },
+      "provider_config": {},
+      "position": {
+        "x": 80,
+        "y": 300
+      },
+      "parent": "rg-fan00001",
+      "manual": false
+    },
+    "tp-orders": {
+      "id": "tp-orders",
+      "name": "order events",
+      "resource_type": "topic",
+      "config": {},
+      "provider_config": {
+        "azure": {}
+      },
+      "position": {
+        "x": 420,
+        "y": 200
+      },
+      "parent": "sb-fan00001",
+      "manual": false
+    },
+    "q-audit": {
+      "id": "q-audit",
+      "name": "audit queue",
+      "resource_type": "event_queue",
+      "config": {
+        "visibility_timeout_seconds": 60
+      },
+      "provider_config": {
+        "azure": {
+          "sku": "Basic"
+        }
+      },
+      "position": {
+        "x": 720,
+        "y": 140
+      },
+      "parent": "sb-fan00001",
+      "manual": false
+    },
+    "fn-notifier": {
+      "id": "fn-notifier",
+      "name": "Notifier",
+      "resource_type": "function",
+      "config": {
+        "runtime": "python3.12",
+        "handler": "app.handler",
+        "memory_mb": 128,
+        "timeout_seconds": 30,
+        "http_trigger": false
+      },
+      "provider_config": {
+        "azure": {
+          "app_name": "notifier-fan0",
+          "storage_account_name": "notifiersafan0"
+        }
+      },
+      "position": {
+        "x": 1000,
+        "y": 300
+      },
+      "parent": "rg-fan00001",
+      "manual": false
+    },
+    "role-notifier": {
+      "id": "role-notifier",
+      "name": "notifier role",
+      "resource_type": "iam_role",
+      "config": {
+        "trusted_service": "serverless",
+        "permissions": "none"
+      },
+      "provider_config": {},
+      "position": {
+        "x": 1000,
+        "y": 460
+      },
+      "parent": "rg-fan00001",
+      "manual": false
+    }
+  },
+  "edges": [
+    {
+      "source": "fn-publisher",
+      "target": "role-publisher",
+      "relation": "iam_binding"
+    },
+    {
+      "source": "fn-publisher",
+      "target": "tp-orders",
+      "relation": "sends_to"
+    },
+    {
+      "source": "tp-orders",
+      "target": "q-audit",
+      "relation": "sends_to"
+    },
+    {
+      "source": "tp-orders",
+      "target": "fn-notifier",
+      "relation": "sends_to"
+    },
+    {
+      "source": "fn-notifier",
+      "target": "role-notifier",
+      "relation": "iam_binding"
+    }
+  ],
+  "views": [
+    {
+      "name": "Messaging",
+      "filter": {
+        "categories": [
+          "serverless"
+        ],
+        "depth": 1
+      }
+    }
+  ]
+}

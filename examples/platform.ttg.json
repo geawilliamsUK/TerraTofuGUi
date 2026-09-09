@@ -1,0 +1,254 @@
+{
+  "schema_version": 1,
+  "name": "platform",
+  "settings": {
+    "tool": "opentofu",
+    "target_provider": "aws",
+    "provider_settings": {
+      "aws": { "region": "eu-west-2" },
+      "azure": { "location": "uksouth" }
+    },
+    "backend": null,
+    "state_encryption": false
+  },
+  "containers": {
+    "rg-a1b2c3d4": {
+      "id": "rg-a1b2c3d4",
+      "name": "platform",
+      "container_type": "resource_group",
+      "config": {},
+      "provider_config": {},
+      "position": { "x": 40, "y": 40 },
+      "size": { "w": 1640, "h": 1020 },
+      "parent": null,
+      "manual": false
+    },
+    "vnet-b2c3d4e5": {
+      "id": "vnet-b2c3d4e5",
+      "name": "core",
+      "container_type": "virtual_network",
+      "config": { "cidr_block": "10.1.0.0/16" },
+      "provider_config": { "aws": { "enable_dns_hostnames": true } },
+      "position": { "x": 80, "y": 100 },
+      "size": { "w": 1000, "h": 560 },
+      "parent": "rg-a1b2c3d4",
+      "manual": false
+    },
+    "dns-c3d4e5f6": {
+      "id": "dns-c3d4e5f6",
+      "name": "example zone",
+      "container_type": "dns_zone",
+      "config": { "domain": "example.test" },
+      "provider_config": {},
+      "position": { "x": 80, "y": 700 },
+      "size": { "w": 700, "h": 300 },
+      "parent": "rg-a1b2c3d4",
+      "manual": false
+    },
+    "kv-d4e5f6a7": {
+      "id": "kv-d4e5f6a7",
+      "name": "kv",
+      "container_type": "key_vault",
+      "config": {},
+      "provider_config": { "azure": { "vault_name": "platform-kv-x7q2" } },
+      "position": { "x": 820, "y": 700 },
+      "size": { "w": 300, "h": 200 },
+      "parent": "rg-a1b2c3d4",
+      "manual": false
+    }
+  },
+  "nodes": {
+    "subnet-e5f6a7b8": {
+      "id": "subnet-e5f6a7b8",
+      "name": "svc a",
+      "resource_type": "subnet",
+      "config": { "cidr_block": "10.1.1.0/24" },
+      "provider_config": { "aws": { "availability_zone": "eu-west-2a", "map_public_ip": true } },
+      "position": { "x": 120, "y": 160 },
+      "parent": "vnet-b2c3d4e5",
+      "manual": false
+    },
+    "subnet-f6a7b8c9": {
+      "id": "subnet-f6a7b8c9",
+      "name": "svc b",
+      "resource_type": "subnet",
+      "config": { "cidr_block": "10.1.2.0/24" },
+      "provider_config": { "aws": { "availability_zone": "eu-west-2b", "map_public_ip": true } },
+      "position": { "x": 120, "y": 260 },
+      "parent": "vnet-b2c3d4e5",
+      "manual": false
+    },
+    "sg-a7b8c9d0": {
+      "id": "sg-a7b8c9d0",
+      "name": "svc sg",
+      "resource_type": "security_group",
+      "config": {
+        "rules": [
+          { "name": "ssh", "direction": "ingress", "protocol": "tcp", "from_port": 22, "to_port": 22, "cidr": "10.1.0.0/16", "description": "SSH from inside" },
+          { "name": "http", "direction": "ingress", "protocol": "tcp", "from_port": 80, "to_port": 80, "cidr": "0.0.0.0/0", "description": "HTTP" },
+          { "name": "all-out", "direction": "egress", "protocol": "all", "from_port": 0, "to_port": 0, "cidr": "0.0.0.0/0", "description": "" }
+        ]
+      },
+      "provider_config": {},
+      "position": { "x": 120, "y": 420 },
+      "parent": "vnet-b2c3d4e5",
+      "manual": false
+    },
+    "k8s-b8c9d0e1": {
+      "id": "k8s-b8c9d0e1",
+      "name": "k8s",
+      "resource_type": "kubernetes_cluster",
+      "config": { "node_size": "small", "node_count": 2, "min_nodes": 1, "max_nodes": 3 },
+      "provider_config": {},
+      "position": { "x": 420, "y": 160 },
+      "parent": "vnet-b2c3d4e5",
+      "manual": false
+    },
+    "cache-c9d0e1f2": {
+      "id": "cache-c9d0e1f2",
+      "name": "sessions",
+      "resource_type": "cache",
+      "config": { "size": "small" },
+      "provider_config": { "azure": { "cache_name": "platform-sessions-x7q2" } },
+      "position": { "x": 420, "y": 420 },
+      "parent": "vnet-b2c3d4e5",
+      "manual": false
+    },
+    "asg-d0e1f2a3": {
+      "id": "asg-d0e1f2a3",
+      "name": "workers",
+      "resource_type": "autoscaling_group",
+      "config": { "size": "small", "min_instances": 1, "max_instances": 4, "desired_instances": 2 },
+      "provider_config": { "aws": { "ami": "" }, "azure": { "admin_username": "azureuser", "image": "ubuntu-22.04" } },
+      "position": { "x": 720, "y": 160 },
+      "parent": "vnet-b2c3d4e5",
+      "manual": false
+    },
+    "lb-e1f2a3b4": {
+      "id": "lb-e1f2a3b4",
+      "name": "workers lb",
+      "resource_type": "load_balancer",
+      "config": { "scheme": "internet_facing", "protocol": "http", "listener_port": 80, "target_port": 80 },
+      "provider_config": {},
+      "position": { "x": 720, "y": 420 },
+      "parent": "vnet-b2c3d4e5",
+      "manual": false
+    },
+    "reg-f2a3b4c5": {
+      "id": "reg-f2a3b4c5",
+      "name": "images",
+      "resource_type": "container_registry",
+      "config": {},
+      "provider_config": { "azure": { "registry_name": "platformimagesx7q2" } },
+      "position": { "x": 1140, "y": 120 },
+      "parent": "rg-a1b2c3d4",
+      "manual": false
+    },
+    "nosql-a3b4c5d6": {
+      "id": "nosql-a3b4c5d6",
+      "name": "orders",
+      "resource_type": "nosql_table",
+      "config": { "partition_key": "order_id" },
+      "provider_config": { "azure": { "account_name": "platform-orders-x7q2" } },
+      "position": { "x": 1140, "y": 220 },
+      "parent": "rg-a1b2c3d4",
+      "manual": false
+    },
+    "q-b4c5d6e7": {
+      "id": "q-b4c5d6e7",
+      "name": "jobs",
+      "resource_type": "event_queue",
+      "config": { "visibility_timeout_seconds": 60 },
+      "provider_config": { "azure": { "namespace_name": "platform-jobs-x7q2" } },
+      "position": { "x": 1140, "y": 340 },
+      "parent": "rg-a1b2c3d4",
+      "manual": false
+    },
+    "fn-c5d6e7f8": {
+      "id": "fn-c5d6e7f8",
+      "name": "resize",
+      "resource_type": "function",
+      "config": { "runtime": "python3.12", "handler": "app.handler", "memory_mb": 256, "timeout_seconds": 60 },
+      "provider_config": { "azure": { "app_name": "platform-resize-x7q2", "storage_account_name": "platformresizex7q2" } },
+      "position": { "x": 1400, "y": 340 },
+      "parent": "rg-a1b2c3d4",
+      "manual": false
+    },
+    "role-d6e7f8a9": {
+      "id": "role-d6e7f8a9",
+      "name": "fn role",
+      "resource_type": "iam_role",
+      "config": { "trusted_service": "serverless", "permissions": "none" },
+      "provider_config": {},
+      "position": { "x": 1400, "y": 460 },
+      "parent": "rg-a1b2c3d4",
+      "manual": false
+    },
+    "log-e7f8a9b0": {
+      "id": "log-e7f8a9b0",
+      "name": "app logs",
+      "resource_type": "log_group",
+      "config": { "retention_days": "90" },
+      "provider_config": {},
+      "position": { "x": 1140, "y": 460 },
+      "parent": "rg-a1b2c3d4",
+      "manual": false
+    },
+    "rec-f8a9b0c1": {
+      "id": "rec-f8a9b0c1",
+      "name": "www",
+      "resource_type": "dns_record",
+      "config": { "record_name": "www", "record_type": "A", "ttl": 300, "values": ["10.1.1.10"] },
+      "provider_config": {},
+      "position": { "x": 120, "y": 760 },
+      "parent": "dns-c3d4e5f6",
+      "manual": false
+    },
+    "rec-a9b0c1d2": {
+      "id": "rec-a9b0c1d2",
+      "name": "api",
+      "resource_type": "dns_record",
+      "config": { "record_name": "api", "record_type": "CNAME", "ttl": 300, "values": ["www.example.test"] },
+      "provider_config": {},
+      "position": { "x": 340, "y": 760 },
+      "parent": "dns-c3d4e5f6",
+      "manual": false
+    },
+    "rec-b0c1d2e3": {
+      "id": "rec-b0c1d2e3",
+      "name": "verify",
+      "resource_type": "dns_record",
+      "config": { "record_name": "@", "record_type": "TXT", "ttl": 3600, "values": ["v=spf1 -all", "verification=abc123"] },
+      "provider_config": {},
+      "position": { "x": 560, "y": 760 },
+      "parent": "dns-c3d4e5f6",
+      "manual": false
+    },
+    "sec-c1d2e3f4": {
+      "id": "sec-c1d2e3f4",
+      "name": "api key",
+      "resource_type": "secret",
+      "config": {},
+      "provider_config": {},
+      "position": { "x": 860, "y": 760 },
+      "parent": "kv-d4e5f6a7",
+      "manual": false
+    }
+  },
+  "edges": [
+    { "source": "k8s-b8c9d0e1", "target": "subnet-e5f6a7b8", "relation": "network_membership" },
+    { "source": "k8s-b8c9d0e1", "target": "subnet-f6a7b8c9", "relation": "network_membership" },
+    { "source": "cache-c9d0e1f2", "target": "subnet-e5f6a7b8", "relation": "network_membership" },
+    { "source": "cache-c9d0e1f2", "target": "subnet-f6a7b8c9", "relation": "network_membership" },
+    { "source": "cache-c9d0e1f2", "target": "sg-a7b8c9d0", "relation": "attribute_reference" },
+    { "source": "asg-d0e1f2a3", "target": "subnet-e5f6a7b8", "relation": "network_membership" },
+    { "source": "asg-d0e1f2a3", "target": "subnet-f6a7b8c9", "relation": "network_membership" },
+    { "source": "asg-d0e1f2a3", "target": "sg-a7b8c9d0", "relation": "attribute_reference" },
+    { "source": "asg-d0e1f2a3", "target": "lb-e1f2a3b4", "relation": "attachment" },
+    { "source": "lb-e1f2a3b4", "target": "subnet-e5f6a7b8", "relation": "network_membership" },
+    { "source": "lb-e1f2a3b4", "target": "subnet-f6a7b8c9", "relation": "network_membership" },
+    { "source": "lb-e1f2a3b4", "target": "sg-a7b8c9d0", "relation": "attribute_reference" },
+    { "source": "fn-c5d6e7f8", "target": "role-d6e7f8a9", "relation": "iam_binding" },
+    { "source": "fn-c5d6e7f8", "target": "q-b4c5d6e7", "relation": "attribute_reference" }
+  ]
+}

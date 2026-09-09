@@ -1,0 +1,57 @@
+# Abstract type: Service Bus Namespace (container)  (schema_version 2)  — Azure only
+#
+# Groups Event Queues and Topics in one Azure Service Bus namespace so they share a
+# tier and a connection string, and so a Topic can auto-forward into the queues next to
+# it. Queues and topics drawn inside it stop creating a namespace of their own.
+#
+# There is no AWS counterpart and none is needed (SQS/SNS are account-scoped), so the
+# type is scoped to Azure: on the AWS layer the container is simply grouping, and its
+# contents are exported as if they sat in the enclosing container.
+
+schema_version = 2
+
+[resource]
+type = "servicebus_namespace"
+category = "serverless"
+display_name = "Service Bus Namespace"
+description = "Azure only. Put Event Queues and Topics inside it to share one Service Bus namespace (needed for topic-to-queue forwarding). On AWS it is just grouping."
+kind = "container"
+allowed_parents = ["resource_group"]
+icon = "SB"
+providers = ["azure"]
+
+[[fields]]
+name = "sku"
+label = "SKU"
+type = "enum"
+required = true
+options = ["Basic", "Standard", "Premium"]
+default = "Standard"
+description = "Basic supports queues only; Standard adds topics, sessions and duplicate detection; Premium is dedicated capacity."
+
+# ---------------------------------------------------------------- Azure
+[providers.azure]
+status = "full"
+
+[[providers.azure.fields]]
+name = "namespace_name"
+label = "Namespace name"
+type = "string"
+required = true
+pattern = "^[a-zA-Z][a-zA-Z0-9-]{4,48}[a-zA-Z0-9]$"
+pattern_hint = "6-50 letters, digits and hyphens, starting with a letter; globally unique"
+unique_scope = "servicebus_namespace"
+
+[[providers.azure.blocks]]
+key = "main"
+resource = "azurerm_servicebus_namespace"
+
+[providers.azure.blocks.args]
+name                = { provider_field = "namespace_name" }
+location            = { var = "location" }
+resource_group_name = { ancestor = "resource_group", attr = "name" }
+sku                 = { field = "sku" }
+
+[providers.azure.outputs]
+id                = { attr = "id", description = "Namespace id" }
+connection_string = { attr = "default_primary_connection_string", description = "Root connection string", sensitive = true }

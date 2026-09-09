@@ -1,0 +1,220 @@
+# Abstract type: Security Group  (schema_version 2)
+#
+# A stateful firewall rule set attached to compute instances, functions, databases,
+# load balancers and caches.
+# AWS: aws_security_group plus one standalone aws_vpc_security_group_ingress_rule /
+#      egress_rule per row (standalone so groups can reference each other).
+# Azure: azurerm_network_security_group plus one azurerm_network_security_rule per rule.
+#
+# A rule's source is either a CIDR or another Security Group on the canvas
+# (`source_group`, an `entity_ref` item). AWS references the group directly; Azure has
+# no group-to-group rules, so a group source becomes the `VirtualNetwork` service tag.
+
+schema_version = 2
+
+[resource]
+type = "security_group"
+category = "network"
+display_name = "Security Group"
+description = "A stateful firewall rule set. Attach it to a compute instance, function, database or load balancer with a 'Uses' link."
+kind = "node"
+allowed_parents = ["virtual_network", "resource_group"]
+icon = "SG"
+
+[[fields]]
+name = "rules"
+label = "Rules"
+type = "struct_list"
+required = true
+description = "One row per rule. Give each rule a CIDR or a source security group. Ports are ignored for icmp / all."
+
+[[fields.items]]
+name = "name"
+label = "Name"
+type = "string"
+required = true
+default = "rule"
+pattern = "^[A-Za-z0-9_-]{1,64}$"
+pattern_hint = "letters, digits, '-' and '_' only"
+
+[[fields.items]]
+name = "direction"
+label = "Direction"
+type = "enum"
+required = true
+options = ["ingress", "egress"]
+default = "ingress"
+
+[[fields.items]]
+name = "protocol"
+label = "Protocol"
+type = "enum"
+required = true
+options = ["tcp", "udp", "icmp", "all"]
+default = "tcp"
+
+[[fields.items]]
+name = "from_port"
+label = "From port"
+type = "int"
+required = true
+default = 0
+
+[[fields.items]]
+name = "to_port"
+label = "To port"
+type = "int"
+required = true
+default = 0
+
+[[fields.items]]
+name = "cidr"
+label = "CIDR"
+type = "cidr"
+default = "0.0.0.0/0"
+description = "Leave empty when using a source security group."
+
+[[fields.items]]
+name = "source_group"
+label = "From security group"
+type = "entity_ref"
+targets = ["security_group"]
+description = "Allow traffic from members of another security group instead of a CIDR (AWS: referenced directly; Azure: VirtualNetwork tag)."
+
+[[fields.items]]
+name = "description"
+label = "Description"
+type = "string"
+
+[[relations]]
+kind = "network_membership"
+label = "Belongs to network"
+targets = ["virtual_network"]
+cardinality = "optional"
+via_parent = true
+
+# ---------------------------------------------------------------- AWS
+[providers.aws]
+status = "full"
+
+[[providers.aws.checks]]
+for_each_field = "rules"
+when = { all = [ { item = "cidr", equals = "" }, { item = "source_group", equals = "" } ] }
+severity = "error"
+message = "rule '{item.name}' needs a CIDR or a source security group"
+
+[[providers.aws.checks]]
+for_each_field = "rules"
+when = { all = [ { item = "direction", equals = "ingress" }, { item = "cidr", equals = "0.0.0.0/0" }, { item = "from_port", not_equals = "80" }, { item = "from_port", not_equals = "443" } ] }
+message = "rule '{item.name}' opens port {item.from_port} to the whole internet"
+
+[[providers.aws.blocks]]
+key = "main"
+resource = "aws_security_group"
+
+[providers.aws.blocks.args]
+name        = { field = "name", transform = "kebab" }
+description = { template = "{name} (managed by TerraTofu GUI)" }
+vpc_id      = { relation = "network_membership", attr = "id", optional = true }
+tags        = { object = { Name = { field = "name" } } }
+
+# Rules are standalone resources (not inline blocks) so that two groups may reference
+# each other without creating a dependency cycle. `from_port` / `to_port` must be omitted
+# when the protocol is `-1` (all).
+[[providers.aws.blocks]]
+key = "ingress"
+resource = "aws_vpc_security_group_ingress_rule"
+for_each_field = "rules"
+when = { item = "direction", equals = "ingress" }
+
+[providers.aws.blocks.args]
+security_group_id            = { self_block = "main", attr = "id" }
+description                  = { item = "description", optional = true }
+ip_protocol                  = { map = "protocol", table = { tcp = "tcp", udp = "udp", icmp = "icmp", all = "-1" } }
+from_port                    = { if = { item = "protocol", not_equals = "all" }, then = { item = "from_port" } }
+to_port                      = { if = { item = "protocol", not_equals = "all" }, then = { item = "to_port" } }
+cidr_ipv4                    = { item = "cidr", optional = true }
+referenced_security_group_id = { item_ref = "source_group", attr = "id" }
+tags                         = { object = { Name = { item = "name" } } }
+
+[[providers.aws.blocks]]
+key = "egress"
+resource = "aws_vpc_security_group_egress_rule"
+for_each_field = "rules"
+when = { item = "direction", equals = "egress" }
+
+[providers.aws.blocks.args]
+security_group_id            = { self_block = "main", attr = "id" }
+description                  = { item = "description", optional = true }
+ip_protocol                  = { map = "protocol", table = { tcp = "tcp", udp = "udp", icmp = "icmp", all = "-1" } }
+from_port                    = { if = { item = "protocol", not_equals = "all" }, then = { item = "from_port" } }
+to_port                      = { if = { item = "protocol", not_equals = "all" }, then = { item = "to_port" } }
+cidr_ipv4                    = { item = "cidr", optional = true }
+referenced_security_group_id = { item_ref = "source_group", attr = "id" }
+tags                         = { object = { Name = { item = "name" } } }
+
+[providers.aws.outputs]
+id = { attr = "id", description = "Security group id" }
+
+# ---------------------------------------------------------------- Azure
+[providers.azure]
+status = "full"
+notes = "Rules whose source is another security group use the VirtualNetwork service tag; Azure has no group-to-group rules."
+
+[[providers.azure.checks]]
+for_each_field = "rules"
+when = { all = [ { item = "cidr", equals = "" }, { item = "source_group", equals = "" } ] }
+severity = "error"
+message = "rule '{item.name}' needs a CIDR or a source security group"
+
+[[providers.azure.checks]]
+for_each_field = "rules"
+when = { all = [ { item = "direction", equals = "ingress" }, { item = "cidr", equals = "0.0.0.0/0" }, { item = "from_port", not_equals = "80" }, { item = "from_port", not_equals = "443" } ] }
+message = "rule '{item.name}' opens port {item.from_port} to the whole internet"
+
+[[providers.azure.blocks]]
+key = "main"
+resource = "azurerm_network_security_group"
+
+[providers.azure.blocks.args]
+name                = { field = "name", transform = "kebab" }
+location            = { var = "location" }
+resource_group_name = { ancestor = "resource_group", attr = "name" }
+
+[[providers.azure.blocks]]
+key = "rule"
+resource = "azurerm_network_security_rule"
+for_each_field = "rules"
+
+[providers.azure.blocks.args]
+name                        = { item = "name", transform = "kebab" }
+priority                    = { item_index = { base = 100, step = 10 } }
+direction                   = { map = "direction", table = { ingress = "Inbound", egress = "Outbound" } }
+access                      = { value = "Allow" }
+protocol                    = { map = "protocol", table = { tcp = "Tcp", udp = "Udp", icmp = "Icmp", all = "*" } }
+source_port_range           = { value = "*" }
+resource_group_name         = { ancestor = "resource_group", attr = "name" }
+network_security_group_name = { self_block = "main", attr = "name" }
+
+[providers.azure.blocks.args.destination_port_range]
+if = { item = "protocol", equals = "all" }
+then = { value = "*" }
+
+[providers.azure.blocks.args.destination_port_range.else]
+if = { item = "from_port", equals_item = "to_port" }
+then = { item = "from_port" }
+else = { template = "{item.from_port}-{item.to_port}" }
+
+# Ingress: source is the CIDR, or the VirtualNetwork tag when a source group is used.
+[providers.azure.blocks.args.source_address_prefix]
+if = { item = "direction", equals = "ingress" }
+then = { if = { item = "cidr", not_equals = "" }, then = { item = "cidr" }, else = { value = "VirtualNetwork" } }
+else = { value = "*" }
+
+[providers.azure.blocks.args.destination_address_prefix]
+if = { item = "direction", equals = "egress" }
+then = { if = { item = "cidr", not_equals = "" }, then = { item = "cidr" }, else = { value = "VirtualNetwork" } }
+else = { value = "*" }
+
+[providers.azure.outputs]
+id = { attr = "id", description = "Network security group id" }

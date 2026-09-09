@@ -1,0 +1,204 @@
+# Abstract type: Kubernetes Cluster
+#
+# AWS: EKS — cluster IAM role + policy, aws_eks_cluster, node IAM role + 3 policies,
+#      aws_eks_node_group. Link two subnets in different availability zones.
+# Azure: AKS — azurerm_kubernetes_cluster with a system-assigned identity and an
+#      autoscaling default node pool in the first linked subnet (Azure CNI).
+
+schema_version = 1
+
+[resource]
+type = "kubernetes_cluster"
+category = "container"
+display_name = "Kubernetes Cluster"
+description = "A managed Kubernetes control plane with one autoscaling node pool. Link the subnets it runs in."
+kind = "node"
+allowed_parents = ["virtual_network", "resource_group"]
+icon = "K8S"
+
+[[fields]]
+name = "node_size"
+label = "Node size"
+type = "enum"
+required = true
+options = ["small", "medium", "large"]
+default = "small"
+
+[[fields]]
+name = "node_count"
+label = "Desired nodes"
+type = "int"
+required = true
+default = 2
+
+[[fields]]
+name = "min_nodes"
+label = "Min nodes"
+type = "int"
+required = true
+default = 1
+
+[[fields]]
+name = "max_nodes"
+label = "Max nodes"
+type = "int"
+required = true
+default = 3
+
+[[relations]]
+kind = "network_membership"
+label = "Subnets"
+targets = ["subnet"]
+cardinality = "many"
+
+# ---------------------------------------------------------------- AWS
+[providers.aws]
+status = "full"
+
+[[providers.aws.blocks]]
+key = "cluster_role"
+resource = "aws_iam_role"
+
+[providers.aws.blocks.args]
+name = { template = "{name}-cluster", transform = "kebab" }
+
+[providers.aws.blocks.args.assume_role_policy]
+func = "jsonencode"
+[[providers.aws.blocks.args.assume_role_policy.args]]
+[providers.aws.blocks.args.assume_role_policy.args.object]
+Version = { value = "2012-10-17" }
+[[providers.aws.blocks.args.assume_role_policy.args.object.Statement.list]]
+[providers.aws.blocks.args.assume_role_policy.args.object.Statement.list.object]
+Effect    = { value = "Allow" }
+Action    = { value = "sts:AssumeRole" }
+Principal = { object = { Service = { value = "eks.amazonaws.com" } } }
+
+[[providers.aws.blocks]]
+key = "cluster_policy"
+resource = "aws_iam_role_policy_attachment"
+
+[providers.aws.blocks.args]
+role       = { self_block = "cluster_role", attr = "name" }
+policy_arn = { value = "arn:aws:iam::aws:policy/AmazonEKSClusterPolicy" }
+
+[[providers.aws.blocks]]
+key = "main"
+resource = "aws_eks_cluster"
+
+[providers.aws.blocks.args]
+name       = { field = "name", transform = "kebab" }
+role_arn   = { self_block = "cluster_role", attr = "arn" }
+depends_on = { list = [ { self_block = "cluster_policy", attr = "" } ] }
+
+[[providers.aws.blocks.nested]]
+block = "vpc_config"
+
+[providers.aws.blocks.nested.args]
+subnet_ids = { relation = "network_membership", attr = "id", wrap = "list" }
+
+[[providers.aws.blocks]]
+key = "node_role"
+resource = "aws_iam_role"
+
+[providers.aws.blocks.args]
+name = { template = "{name}-nodes", transform = "kebab" }
+
+[providers.aws.blocks.args.assume_role_policy]
+func = "jsonencode"
+[[providers.aws.blocks.args.assume_role_policy.args]]
+[providers.aws.blocks.args.assume_role_policy.args.object]
+Version = { value = "2012-10-17" }
+[[providers.aws.blocks.args.assume_role_policy.args.object.Statement.list]]
+[providers.aws.blocks.args.assume_role_policy.args.object.Statement.list.object]
+Effect    = { value = "Allow" }
+Action    = { value = "sts:AssumeRole" }
+Principal = { object = { Service = { value = "ec2.amazonaws.com" } } }
+
+[[providers.aws.blocks]]
+key = "node_policy_worker"
+resource = "aws_iam_role_policy_attachment"
+
+[providers.aws.blocks.args]
+role       = { self_block = "node_role", attr = "name" }
+policy_arn = { value = "arn:aws:iam::aws:policy/AmazonEKSWorkerNodePolicy" }
+
+[[providers.aws.blocks]]
+key = "node_policy_cni"
+resource = "aws_iam_role_policy_attachment"
+
+[providers.aws.blocks.args]
+role       = { self_block = "node_role", attr = "name" }
+policy_arn = { value = "arn:aws:iam::aws:policy/AmazonEKS_CNI_Policy" }
+
+[[providers.aws.blocks]]
+key = "node_policy_ecr"
+resource = "aws_iam_role_policy_attachment"
+
+[providers.aws.blocks.args]
+role       = { self_block = "node_role", attr = "name" }
+policy_arn = { value = "arn:aws:iam::aws:policy/AmazonEC2ContainerRegistryReadOnly" }
+
+[[providers.aws.blocks]]
+key = "nodes"
+resource = "aws_eks_node_group"
+
+[providers.aws.blocks.args]
+cluster_name    = { self_block = "main", attr = "name" }
+node_group_name = { value = "default" }
+node_role_arn   = { self_block = "node_role", attr = "arn" }
+subnet_ids      = { relation = "network_membership", attr = "id", wrap = "list" }
+instance_types  = { map = "node_size", table = { small = ["t3.medium"], medium = ["t3.large"], large = ["m5.xlarge"] } }
+depends_on      = { list = [ { self_block = "node_policy_worker", attr = "" }, { self_block = "node_policy_cni", attr = "" }, { self_block = "node_policy_ecr", attr = "" } ] }
+
+[[providers.aws.blocks.nested]]
+block = "scaling_config"
+
+[providers.aws.blocks.nested.args]
+desired_size = { field = "node_count" }
+min_size     = { field = "min_nodes" }
+max_size     = { field = "max_nodes" }
+
+[providers.aws.outputs]
+endpoint = { attr = "endpoint", description = "Kubernetes API endpoint" }
+
+# ---------------------------------------------------------------- Azure
+[providers.azure]
+status = "full"
+
+[[providers.azure.blocks]]
+key = "main"
+resource = "azurerm_kubernetes_cluster"
+
+[providers.azure.blocks.args]
+name                = { field = "name", transform = "kebab" }
+location            = { var = "location" }
+resource_group_name = { ancestor = "resource_group", attr = "name" }
+dns_prefix          = { field = "name", transform = "kebab" }
+
+[[providers.azure.blocks.nested]]
+block = "default_node_pool"
+
+[providers.azure.blocks.nested.args]
+name                 = { value = "default" }
+vm_size              = { map = "node_size", table = { small = "Standard_B2s", medium = "Standard_D2s_v3", large = "Standard_D4s_v3" } }
+node_count           = { field = "node_count" }
+auto_scaling_enabled = { value = true }
+min_count            = { field = "min_nodes" }
+max_count            = { field = "max_nodes" }
+vnet_subnet_id       = { relation = "network_membership", attr = "id" }
+
+[[providers.azure.blocks.nested]]
+block = "identity"
+
+[providers.azure.blocks.nested.args]
+type = { value = "SystemAssigned" }
+
+[[providers.azure.blocks.nested]]
+block = "network_profile"
+
+[providers.azure.blocks.nested.args]
+network_plugin = { value = "azure" }
+
+[providers.azure.outputs]
+fqdn        = { attr = "fqdn", description = "Kubernetes API host name" }
+kube_config = { attr = "kube_config_raw", description = "Raw kubeconfig for the cluster", sensitive = true }

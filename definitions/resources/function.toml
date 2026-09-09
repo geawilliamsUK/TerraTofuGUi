@@ -1,0 +1,478 @@
+# Abstract type: Function (serverless)  (schema_version 2)
+#
+# A serverless function and everything it needs to talk to the rest of the diagram:
+#   * `http_trigger`          -> AWS Lambda function URL (public); Azure: HTTP trigger is code-side
+#   * 'Runs as'               -> IAM Role / user-assigned identity (required)
+#   * 'Uses'                  -> event queue (trigger), relational database (connection env vars),
+#                                security group (with subnets: network placement)
+#   * 'Sends to'              -> event queue / topic / storage queue it publishes to (env var + send permission)
+#   * 'Reads'                 -> secrets (SECRETS env var as JSON name->id, read permission)
+#   * 'Logs to'               -> log group / Log Analytics workspace
+#   * 'Attached to'           -> object storage: its bucket (AWS env var) or, on Azure, the
+#                                storage account the function app is hosted in
+#   * subnets ('Subnets')     -> AWS VPC config; Azure VNet integration (needs EP1 plan and a
+#                                subnet delegated to Microsoft.Web/serverFarms)
+#
+# AWS generates one least-privilege inline policy on the linked role from these links.
+# Azure grants the identity the matching built-in roles per linked resource.
+# The deployment package (AWS) is an input variable; Azure code deploy is a manual step.
+
+schema_version = 2
+
+[resource]
+type = "function"
+category = "serverless"
+display_name = "Function"
+description = "A serverless function. Link the role it runs as; then link queues, secrets, a database, a log group and subnets to wire it up."
+kind = "node"
+allowed_parents = ["resource_group", "virtual_network"]
+icon = "FN"
+
+[[fields]]
+name = "runtime"
+label = "Runtime"
+type = "enum"
+required = true
+options = ["python3.12", "nodejs20.x"]
+default = "python3.12"
+
+[[fields]]
+name = "handler"
+label = "Handler"
+type = "string"
+required = true
+default = "app.handler"
+description = "Entry point (AWS handler string; on Azure the function project decides)."
+
+[[fields]]
+name = "memory_mb"
+label = "Memory (MB)"
+type = "int"
+required = true
+default = 128
+
+[[fields]]
+name = "timeout_seconds"
+label = "Timeout (s)"
+type = "int"
+required = true
+default = 30
+
+[[fields]]
+name = "http_trigger"
+label = "HTTP trigger"
+type = "bool"
+default = false
+description = "Expose the function over HTTPS (AWS: public function URL; Azure: HTTP-triggered function in the project)."
+
+[[relations]]
+kind = "iam_binding"
+label = "Runs as role / identity"
+targets = ["iam_role"]
+cardinality = "one"
+
+[[relations]]
+kind = "attribute_reference"
+label = "Uses (queue trigger, database, security group)"
+targets = ["event_queue", "storage_queue", "relational_database", "security_group"]
+cardinality = "many"
+
+[[relations]]
+kind = "sends_to"
+label = "Sends to (queue, topic, storage queue)"
+targets = ["event_queue", "topic", "storage_queue"]
+cardinality = "many"
+
+[[relations]]
+kind = "reads"
+label = "Reads secrets"
+targets = ["secret"]
+cardinality = "many"
+
+[[relations]]
+kind = "logs_to"
+label = "Logs to"
+targets = ["log_group"]
+cardinality = "optional"
+
+[[relations]]
+kind = "attachment"
+label = "Stored in / uses bucket"
+targets = ["object_storage"]
+cardinality = "optional"
+
+[[relations]]
+kind = "network_membership"
+label = "Subnets (run inside the network)"
+targets = ["subnet"]
+cardinality = "many"
+
+# ---------------------------------------------------------------- AWS
+[providers.aws]
+status = "full"
+
+[[providers.aws.checks]]
+when = { all = [ { relation = "network_membership" }, { relation = "attribute_reference", target_type = "security_group", absent = true } ] }
+message = "\"{name}\" runs inside subnets but has no security group linked; AWS requires one for VPC-attached functions"
+severity = "error"
+
+[[providers.aws.blocks]]
+key = "main"
+resource = "aws_lambda_function"
+
+[providers.aws.blocks.args]
+function_name    = { field = "name", transform = "kebab" }
+role             = { relation = "iam_binding", attr = "arn" }
+handler          = { field = "handler" }
+runtime          = { field = "runtime" }
+memory_size      = { field = "memory_mb" }
+timeout          = { field = "timeout_seconds" }
+filename         = { entity_var = "package", description = "Path to the deployment zip for function \"{name}\"." }
+source_code_hash = { func = "filebase64sha256", args = [ { entity_var = "package", description = "Path to the deployment zip for function \"{name}\"." } ] }
+tags             = { object = { Name = { field = "name" } } }
+
+[[providers.aws.blocks.nested]]
+block = "environment"
+
+[providers.aws.blocks.nested.args.variables]
+object.QUEUE_URL      = { relation = "sends_to", target_type = "event_queue", attr = "url" }
+object.TOPIC_ARN      = { relation = "sends_to", target_type = "topic", attr = "arn" }
+object.DB_HOST        = { relation = "attribute_reference", target_type = "relational_database", attr = "address" }
+object.DB_PORT        = { relation = "attribute_reference", target_type = "relational_database", attr = "port" }
+object.DB_NAME        = { relation = "attribute_reference", target_type = "relational_database", attr = "db_name" }
+object.DB_USER        = { relation = "attribute_reference", target_type = "relational_database", attr = "username" }
+object.STORAGE_BUCKET = { relation = "attachment", target_type = "object_storage", attr = "bucket" }
+object.SECRETS        = { if = { relation = "reads" }, then = { func = "jsonencode", args = [ { func = "zipmap", args = [ { relation = "reads", attr = "name", wrap = "list" }, { relation = "reads", attr = "arn", wrap = "list" } ] } ] } }
+
+[[providers.aws.blocks.nested]]
+block = "vpc_config"
+when = { relation = "network_membership" }
+
+[providers.aws.blocks.nested.args]
+subnet_ids         = { relation = "network_membership", attr = "id", wrap = "list" }
+security_group_ids = { relation = "attribute_reference", target_type = "security_group", attr = "id", wrap = "list" }
+
+[[providers.aws.blocks.nested]]
+block = "logging_config"
+when = { relation = "logs_to" }
+
+[providers.aws.blocks.nested.args]
+log_format = { value = "Text" }
+log_group  = { relation = "logs_to", attr = "name" }
+
+# Queue trigger.
+[[providers.aws.blocks]]
+key = "trigger"
+resource = "aws_lambda_event_source_mapping"
+when = { relation = "attribute_reference", target_type = "event_queue" }
+
+[providers.aws.blocks.args]
+event_source_arn = { relation = "attribute_reference", target_type = "event_queue", attr = "arn" }
+function_name    = { self_block = "main", attr = "arn" }
+batch_size       = { value = 10 }
+
+# Public HTTPS endpoint.
+[[providers.aws.blocks]]
+key = "url"
+resource = "aws_lambda_function_url"
+when = { field = "http_trigger" }
+
+[providers.aws.blocks.args]
+function_name      = { self_block = "main", attr = "function_name" }
+authorization_type = { value = "NONE" }
+
+[[providers.aws.blocks]]
+key = "url_permission"
+resource = "aws_lambda_permission"
+when = { field = "http_trigger" }
+
+[providers.aws.blocks.args]
+statement_id           = { value = "AllowPublicInvokeUrl" }
+action                 = { value = "lambda:InvokeFunctionUrl" }
+function_name          = { self_block = "main", attr = "function_name" }
+principal              = { value = "*" }
+function_url_auth_type = { value = "NONE" }
+
+# Least-privilege inline policy on the linked role, derived from this function's links.
+[[providers.aws.blocks]]
+key = "policy"
+resource = "aws_iam_role_policy"
+
+[providers.aws.blocks.args]
+name = { template = "{name}-policy", transform = "kebab" }
+role = { relation = "iam_binding", attr = "id" }
+
+[providers.aws.blocks.args.policy]
+func = "jsonencode"
+
+[[providers.aws.blocks.args.policy.args]]
+[providers.aws.blocks.args.policy.args.object]
+Version = { value = "2012-10-17" }
+
+# Always: write its own CloudWatch logs.
+[[providers.aws.blocks.args.policy.args.object.Statement.list]]
+object = { Sid = { value = "Logs" }, Effect = { value = "Allow" }, Action = { value = ["logs:CreateLogGroup", "logs:CreateLogStream", "logs:PutLogEvents"] }, Resource = { value = "*" } }
+
+# Inside subnets: manage its network interfaces.
+[[providers.aws.blocks.args.policy.args.object.Statement.list]]
+if = { relation = "network_membership" }
+then = { object = { Sid = { value = "Vpc" }, Effect = { value = "Allow" }, Action = { value = ["ec2:CreateNetworkInterface", "ec2:DescribeNetworkInterfaces", "ec2:DeleteNetworkInterface", "ec2:AssignPrivateIpAddresses", "ec2:UnassignPrivateIpAddresses"] }, Resource = { value = "*" } } }
+
+# Consume the queue(s) that trigger it.
+[[providers.aws.blocks.args.policy.args.object.Statement.list]]
+if = { relation = "attribute_reference", target_type = "event_queue" }
+then = { object = { Sid = { value = "QueueConsume" }, Effect = { value = "Allow" }, Action = { value = ["sqs:ReceiveMessage", "sqs:DeleteMessage", "sqs:GetQueueAttributes"] }, Resource = { relation = "attribute_reference", target_type = "event_queue", attr = "arn", wrap = "list" } } }
+
+# Publish to the queue(s) it sends to.
+[[providers.aws.blocks.args.policy.args.object.Statement.list]]
+if = { relation = "sends_to", target_type = "event_queue" }
+then = { object = { Sid = { value = "QueueSend" }, Effect = { value = "Allow" }, Action = { value = ["sqs:SendMessage", "sqs:GetQueueUrl", "sqs:GetQueueAttributes"] }, Resource = { relation = "sends_to", target_type = "event_queue", attr = "arn", wrap = "list" } } }
+
+# Publish to the topic(s) it sends to.
+[[providers.aws.blocks.args.policy.args.object.Statement.list]]
+if = { relation = "sends_to", target_type = "topic" }
+then = { object = { Sid = { value = "TopicPublish" }, Effect = { value = "Allow" }, Action = { value = ["sns:Publish"] }, Resource = { relation = "sends_to", target_type = "topic", attr = "arn", wrap = "list" } } }
+
+# Read the secrets it reads.
+[[providers.aws.blocks.args.policy.args.object.Statement.list]]
+if = { relation = "reads" }
+then = { object = { Sid = { value = "Secrets" }, Effect = { value = "Allow" }, Action = { value = ["secretsmanager:GetSecretValue", "secretsmanager:DescribeSecret"] }, Resource = { relation = "reads", attr = "arn", wrap = "list" } } }
+
+# Read / write its bucket.
+[[providers.aws.blocks.args.policy.args.object.Statement.list]]
+if = { relation = "attachment", target_type = "object_storage" }
+then = { object = { Sid = { value = "Bucket" }, Effect = { value = "Allow" }, Action = { value = ["s3:GetObject", "s3:PutObject", "s3:DeleteObject", "s3:ListBucket"] }, Resource = { func = "concat", args = [ { relation = "attachment", target_type = "object_storage", attr = "arn", wrap = "list" }, { func = "formatlist", args = [ { value = "%s/*" }, { relation = "attachment", target_type = "object_storage", attr = "arn", wrap = "list" } ] } ] } } }
+
+[providers.aws.outputs]
+arn = { attr = "arn", description = "Function ARN" }
+url = { block = "url", attr = "function_url", description = "Public HTTPS URL" }
+
+# ---------------------------------------------------------------- Azure
+[providers.azure]
+status = "partial"
+
+[[providers.azure.fields]]
+name = "app_name"
+label = "Function app name"
+type = "string"
+required = true
+pattern = "^[a-z0-9][a-z0-9-]{1,58}[a-z0-9]$"
+pattern_hint = "3-60 lowercase letters, digits and hyphens; globally unique"
+unique_scope = "function_app"
+
+[[providers.azure.fields]]
+name = "storage_account_name"
+label = "Storage account name"
+type = "string"
+pattern = "^[a-z0-9]{3,24}$"
+pattern_hint = "3-24 lowercase letters and digits; globally unique"
+description = "Only needed when the function is not 'Attached to' an Object Storage node."
+required_unless_relation = "attachment"
+unique_scope = "storage_account"
+
+# Backing storage account, only when no Object Storage node is linked.
+[[providers.azure.blocks]]
+key = "sa"
+resource = "azurerm_storage_account"
+when = { relation = "attachment", target_type = "object_storage", absent = true }
+
+[providers.azure.blocks.args]
+name                     = { provider_field = "storage_account_name" }
+resource_group_name      = { ancestor = "resource_group", attr = "name" }
+location                 = { var = "location" }
+account_tier             = { value = "Standard" }
+account_replication_type = { value = "LRS" }
+
+[[providers.azure.blocks]]
+key = "plan"
+resource = "azurerm_service_plan"
+
+[providers.azure.blocks.args]
+name                = { template = "{name}-plan", transform = "kebab" }
+resource_group_name = { ancestor = "resource_group", attr = "name" }
+location            = { var = "location" }
+os_type             = { value = "Linux" }
+sku_name            = { if = { relation = "network_membership" }, then = { value = "EP1" }, else = { value = "Y1" } }
+
+[[providers.azure.blocks]]
+key = "main"
+resource = "azurerm_linux_function_app"
+
+[providers.azure.blocks.args]
+name                       = { provider_field = "app_name" }
+resource_group_name        = { ancestor = "resource_group", attr = "name" }
+location                   = { var = "location" }
+storage_account_name       = { if = { relation = "attachment", target_type = "object_storage" }, then = { relation = "attachment", target_type = "object_storage", attr = "name" }, else = { self_block = "sa", attr = "name" } }
+storage_account_access_key = { if = { relation = "attachment", target_type = "object_storage" }, then = { relation = "attachment", target_type = "object_storage", attr = "primary_access_key" }, else = { self_block = "sa", attr = "primary_access_key" } }
+service_plan_id            = { self_block = "plan", attr = "id" }
+virtual_network_subnet_id  = { relation = "network_membership", attr = "id", optional = true }
+
+[providers.azure.blocks.args.app_settings]
+object.QUEUE_NAME            = { relation = "sends_to", target_type = "event_queue", attr = "name" }
+object.SERVICEBUS_CONNECTION = { relation = "sends_to", target_type = "event_queue", block = "ns", attr = "default_primary_connection_string", fallback = { relation = "sends_to", target_type = "event_queue", ancestor = "servicebus_namespace", attr = "default_primary_connection_string" } }
+object.TOPIC_NAME            = { relation = "sends_to", target_type = "topic", attr = "name" }
+object.TOPIC_CONNECTION      = { relation = "sends_to", target_type = "topic", block = "ns", attr = "default_primary_connection_string", fallback = { relation = "sends_to", target_type = "topic", ancestor = "servicebus_namespace", attr = "default_primary_connection_string" } }
+object.STORAGE_QUEUE_NAME    = { relation = "sends_to", target_type = "storage_queue", attr = "name" }
+object.STORAGE_QUEUE_CONNECTION = { relation = "sends_to", target_type = "storage_queue", block = "sa", attr = "primary_connection_string" }
+object.AzureWebJobsServiceBus = { relation = "attribute_reference", target_type = "event_queue", block = "ns", attr = "default_primary_connection_string", fallback = { relation = "attribute_reference", target_type = "event_queue", ancestor = "servicebus_namespace", attr = "default_primary_connection_string" } }
+object.TRIGGER_QUEUE_NAME    = { relation = "attribute_reference", target_type = "event_queue", attr = "name" }
+object.StorageQueueConnection = { relation = "attribute_reference", target_type = "storage_queue", block = "sa", attr = "primary_connection_string" }
+object.TRIGGER_STORAGE_QUEUE_NAME = { relation = "attribute_reference", target_type = "storage_queue", attr = "name" }
+object.DB_HOST               = { relation = "attribute_reference", target_type = "relational_database", block = "pg", attr = "fqdn" }
+object.DB_PORT               = { if = { relation = "attribute_reference", target_type = "relational_database" }, then = { value = "5432" } }
+object.DB_NAME               = { relation = "attribute_reference", target_type = "relational_database", block = "pgdb", attr = "name" }
+object.DB_USER               = { relation = "attribute_reference", target_type = "relational_database", block = "pg", attr = "administrator_login" }
+object.SECRETS               = { if = { relation = "reads" }, then = { func = "jsonencode", args = [ { func = "zipmap", args = [ { relation = "reads", attr = "name", wrap = "list" }, { relation = "reads", attr = "versionless_id", wrap = "list" } ] } ] } }
+
+[[providers.azure.blocks.nested]]
+block = "site_config"
+
+[[providers.azure.blocks.nested.nested]]
+block = "application_stack"
+when = { field = "runtime", equals = "python3.12" }
+
+[providers.azure.blocks.nested.nested.args]
+python_version = { value = "3.12" }
+
+[[providers.azure.blocks.nested.nested]]
+block = "application_stack"
+when = { field = "runtime", equals = "nodejs20.x" }
+
+[providers.azure.blocks.nested.nested.args]
+node_version = { value = "20" }
+
+[[providers.azure.blocks.nested]]
+block = "identity"
+when = { relation = "iam_binding" }
+
+[providers.azure.blocks.nested.args]
+type         = { value = "UserAssigned" }
+identity_ids = { relation = "iam_binding", attr = "id", wrap = "list" }
+
+# Least-privilege role assignments for the identity, one per linked resource.
+[[providers.azure.blocks]]
+key = "send"
+resource = "azurerm_role_assignment"
+for_each_relation = "sends_to"
+for_each_target_type = "event_queue"
+
+[providers.azure.blocks.args]
+scope                = { target = "id" }
+role_definition_name = { value = "Azure Service Bus Data Sender" }
+principal_id         = { relation = "iam_binding", attr = "principal_id" }
+
+[[providers.azure.blocks]]
+key = "publish"
+resource = "azurerm_role_assignment"
+for_each_relation = "sends_to"
+for_each_target_type = "topic"
+
+[providers.azure.blocks.args]
+scope                = { target = "id" }
+role_definition_name = { value = "Azure Service Bus Data Sender" }
+principal_id         = { relation = "iam_binding", attr = "principal_id" }
+
+[[providers.azure.blocks]]
+key = "sq_send"
+resource = "azurerm_role_assignment"
+for_each_relation = "sends_to"
+for_each_target_type = "storage_queue"
+
+[providers.azure.blocks.args]
+scope                = { target = "id", block = "sa" }
+role_definition_name = { value = "Storage Queue Data Message Sender" }
+principal_id         = { relation = "iam_binding", attr = "principal_id" }
+
+[[providers.azure.blocks]]
+key = "sq_receive"
+resource = "azurerm_role_assignment"
+for_each_relation = "attribute_reference"
+for_each_target_type = "storage_queue"
+
+[providers.azure.blocks.args]
+scope                = { target = "id", block = "sa" }
+role_definition_name = { value = "Storage Queue Data Message Processor" }
+principal_id         = { relation = "iam_binding", attr = "principal_id" }
+
+[[providers.azure.blocks]]
+key = "receive"
+resource = "azurerm_role_assignment"
+for_each_relation = "attribute_reference"
+for_each_target_type = "event_queue"
+
+[providers.azure.blocks.args]
+scope                = { target = "id" }
+role_definition_name = { value = "Azure Service Bus Data Receiver" }
+principal_id         = { relation = "iam_binding", attr = "principal_id" }
+
+[[providers.azure.blocks]]
+key = "secret_read"
+resource = "azurerm_role_assignment"
+for_each_relation = "reads"
+
+[providers.azure.blocks.args]
+scope                = { target = "id" }
+role_definition_name = { value = "Key Vault Secrets User" }
+principal_id         = { relation = "iam_binding", attr = "principal_id" }
+
+[[providers.azure.blocks]]
+key = "blob"
+resource = "azurerm_role_assignment"
+for_each_relation = "attachment"
+for_each_target_type = "object_storage"
+
+[providers.azure.blocks.args]
+scope                = { target = "id" }
+role_definition_name = { value = "Storage Blob Data Contributor" }
+principal_id         = { relation = "iam_binding", attr = "principal_id" }
+
+# A linked Security Group becomes the NSG of the integration subnet(s).
+[[providers.azure.blocks]]
+key = "nsg"
+resource = "azurerm_subnet_network_security_group_association"
+for_each_relation = "network_membership"
+when = { relation = "attribute_reference", target_type = "security_group" }
+
+[providers.azure.blocks.args]
+subnet_id                 = { target = "id" }
+network_security_group_id = { relation = "attribute_reference", target_type = "security_group", attr = "id" }
+
+# Logs to a Log Analytics workspace.
+[[providers.azure.blocks]]
+key = "diag"
+resource = "azurerm_monitor_diagnostic_setting"
+for_each_relation = "logs_to"
+
+[providers.azure.blocks.args]
+name                       = { template = "{name}-logs", transform = "kebab" }
+target_resource_id         = { self_block = "main", attr = "id" }
+log_analytics_workspace_id = { target = "id" }
+
+[[providers.azure.blocks.nested]]
+block = "enabled_log"
+
+[providers.azure.blocks.nested.args]
+category = { value = "FunctionAppLogs" }
+
+[providers.azure.outputs]
+hostname = { attr = "default_hostname", description = "Function app host name (HTTP triggers are served here)" }
+
+[[providers.azure.manual_steps]]
+title = "Deploy the function code"
+body = """
+The function app is created empty. Publish the project with
+`func azure functionapp publish <app name>` or a zip deploy. Queue triggers use the
+`AzureWebJobsServiceBus` connection app setting and the `TRIGGER_QUEUE_NAME` queue
+(Storage Queue triggers: `StorageQueueConnection` and `TRIGGER_STORAGE_QUEUE_NAME`); HTTP
+triggers are defined in the function project itself.
+"""
+
+[[providers.azure.manual_steps]]
+title = "Delegate the subnet to Microsoft.Web/serverFarms"
+when = { relation = "network_membership" }
+body = """
+VNet integration needs the linked subnet delegated to `Microsoft.Web/serverFarms` and a
+plan that supports it (the generated plan uses `EP1`). Set the subnet's Azure
+**Delegation** field to `web_serverfarms`. A subnet can only carry one delegation, so the
+database's delegated subnet must be a different one.
+"""

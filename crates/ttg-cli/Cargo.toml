@@ -1,0 +1,17 @@
+[package]
+name = "ttg-cli"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Headless exporter / validator for TerraTofu GUI projects"
+
+[[bin]]
+name = "ttg"
+path = "src/main.rs"
+
+[dependencies]
+ttg-core = { path = "../ttg-core" }
+ttg-catalog = { path = "../ttg-catalog" }
+ttg-codegen = { path = "../ttg-codegen" }
+anyhow.workspace = true
+clap.workspace = true

@@ -1,0 +1,14 @@
+[package]
+name = "ttg-core"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Intermediate representation, validation and project persistence for TerraTofu GUI"
+
+[dependencies]
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+petgraph.workspace = true
+indexmap.workspace = true
+uuid.workspace = true

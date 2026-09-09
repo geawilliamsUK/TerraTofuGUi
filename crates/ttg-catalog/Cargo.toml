@@ -1,0 +1,14 @@
+[package]
+name = "ttg-catalog"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Data-driven resource and provider definition catalog for TerraTofu GUI"
+
+[dependencies]
+ttg-core = { path = "../ttg-core" }
+serde.workspace = true
+toml.workspace = true
+thiserror.workspace = true
+indexmap.workspace = true
+regex.workspace = true

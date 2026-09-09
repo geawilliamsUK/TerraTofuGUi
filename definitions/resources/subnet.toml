@@ -1,0 +1,102 @@
+# Abstract type: Subnet
+#
+# A layer-3 address range inside a virtual network. Membership in the network comes
+# either from being drawn inside a Virtual Network container (`via_parent = true`) or
+# from an explicit `network_membership` edge to one.
+
+schema_version = 1
+
+[resource]
+type = "subnet"
+category = "network"
+display_name = "Subnet"
+description = "An address range inside a virtual network."
+kind = "node"
+allowed_parents = ["virtual_network"]
+icon = "SUB"
+
+[[fields]]
+name = "cidr_block"
+label = "CIDR block"
+type = "cidr"
+required = true
+default = "10.0.1.0/24"
+
+[[relations]]
+kind = "network_membership"
+label = "Belongs to network"
+targets = ["virtual_network"]
+cardinality = "one"
+via_parent = true
+
+# ---------------------------------------------------------------- AWS
+[providers.aws]
+status = "full"
+
+[[providers.aws.fields]]
+name = "availability_zone"
+label = "Availability zone"
+type = "string"
+description = "Optional AZ, e.g. eu-west-2a. Leave empty to let AWS choose."
+
+[[providers.aws.fields]]
+name = "map_public_ip"
+label = "Auto-assign public IP"
+type = "bool"
+default = false
+
+[[providers.aws.blocks]]
+key = "main"
+resource = "aws_subnet"
+
+[providers.aws.blocks.args]
+vpc_id                  = { relation = "network_membership", attr = "id" }
+cidr_block              = { field = "cidr_block" }
+availability_zone       = { provider_field = "availability_zone", optional = true }
+map_public_ip_on_launch = { provider_field = "map_public_ip", optional = true }
+tags                    = { object = { Name = { field = "name" } } }
+
+[providers.aws.outputs]
+id = { attr = "id", description = "Subnet id" }
+
+# ---------------------------------------------------------------- Azure
+[providers.azure]
+status = "full"
+
+# Azure subnets can be delegated to one service. Functions with VNet integration need
+# `web_serverfarms`; VNet-integrated flexible database servers need `postgres_flexible`
+# or `mysql_flexible`; a delegated subnet can host nothing else.
+[[providers.azure.fields]]
+name = "delegation"
+label = "Delegation"
+type = "enum"
+options = ["none", "web_serverfarms", "postgres_flexible", "mysql_flexible"]
+default = "none"
+description = "Delegate the subnet to a service (required for VNet-integrated functions and database servers)."
+
+[[providers.azure.blocks]]
+key = "main"
+resource = "azurerm_subnet"
+
+[providers.azure.blocks.args]
+name                 = { field = "name", transform = "kebab" }
+resource_group_name  = { ancestor = "resource_group", attr = "name" }
+virtual_network_name = { relation = "network_membership", attr = "name" }
+address_prefixes     = { field = "cidr_block", wrap = "list" }
+
+[[providers.azure.blocks.nested]]
+block = "delegation"
+when = { provider_field = "delegation", not_equals = "none" }
+
+[providers.azure.blocks.nested.args]
+name = { value = "delegation" }
+
+[[providers.azure.blocks.nested.nested]]
+block = "service_delegation"
+
+[providers.azure.blocks.nested.nested.args]
+name    = { map = "delegation", table = { web_serverfarms = "Microsoft.Web/serverFarms", postgres_flexible = "Microsoft.DBforPostgreSQL/flexibleServers", mysql_flexible = "Microsoft.DBforMySQL/flexibleServers" } }
+actions = { map = "delegation", table = { web_serverfarms = ["Microsoft.Network/virtualNetworks/subnets/action"], postgres_flexible = ["Microsoft.Network/virtualNetworks/subnets/join/action"], mysql_flexible = ["Microsoft.Network/virtualNetworks/subnets/join/action"] } }
+
+[providers.azure.outputs]
+id = { attr = "id", description = "Subnet id" }

@@ -1,0 +1,38 @@
+# Abstract type: Resource Group (container)
+#
+# A deployment-scoped grouping of resources. Azure requires one for every resource;
+# AWS has no equivalent with deployment semantics, so on AWS the container is purely
+# logical (nothing is emitted, children are placed at top level, and no warning is raised
+# because that is the declared, intended behaviour).
+
+schema_version = 1
+
+[resource]
+type = "resource_group"
+category = "organization"
+display_name = "Resource Group"
+description = "A logical deployment group. Required on Azure; organisational only on AWS."
+kind = "container"
+allowed_parents = []
+icon = "RG"
+
+# ---------------------------------------------------------------- AWS
+[providers.aws]
+status = "logical"
+notes = "AWS has no resource-group primitive with deployment semantics. Children are emitted at top level."
+
+# ---------------------------------------------------------------- Azure
+[providers.azure]
+status = "full"
+file = "main"
+
+[[providers.azure.blocks]]
+key = "main"
+resource = "azurerm_resource_group"
+
+[providers.azure.blocks.args]
+name = { field = "name", transform = "kebab" }
+location = { var = "location" }
+
+[providers.azure.outputs]
+id = { attr = "id", description = "Resource group id" }

@@ -1,0 +1,122 @@
+# Abstract type: Object Storage
+#
+# AWS: aws_s3_bucket (+ aws_s3_bucket_versioning when versioning is on).
+# Azure: azurerm_storage_account + azurerm_storage_container.
+# Provider-specific naming rules are enforced with `pattern` on provider fields.
+
+schema_version = 2
+
+[resource]
+type = "object_storage"
+category = "storage"
+display_name = "Object Storage"
+description = "A bucket / container for unstructured objects."
+kind = "node"
+allowed_parents = ["resource_group"]
+icon = "OBJ"
+
+[[fields]]
+name = "versioning"
+label = "Object versioning"
+type = "bool"
+default = false
+description = "Keep previous versions of overwritten objects."
+
+# ---------------------------------------------------------------- AWS
+[providers.aws]
+status = "full"
+
+[[providers.aws.fields]]
+name = "bucket_name"
+label = "Bucket name"
+type = "string"
+required = true
+pattern = "^[a-z0-9][a-z0-9.-]{1,61}[a-z0-9]$"
+pattern_hint = "3-63 chars, lowercase letters, digits, dots and hyphens; globally unique"
+unique_scope = "bucket"
+
+[[providers.aws.blocks]]
+key = "main"
+resource = "aws_s3_bucket"
+
+[providers.aws.blocks.args]
+bucket = { provider_field = "bucket_name" }
+tags   = { object = { Name = { field = "name" } } }
+
+[[providers.aws.blocks]]
+key = "versioning"
+resource = "aws_s3_bucket_versioning"
+when = { field = "versioning" }
+
+[providers.aws.blocks.args]
+bucket = { self_block = "main", attr = "id" }
+
+[[providers.aws.blocks.nested]]
+block = "versioning_configuration"
+
+[providers.aws.blocks.nested.args]
+status = { value = "Enabled" }
+
+[providers.aws.outputs]
+id  = { attr = "id", description = "Bucket name" }
+arn = { attr = "arn", description = "Bucket ARN" }
+
+# ---------------------------------------------------------------- Azure
+[providers.azure]
+status = "full"
+
+[[providers.azure.fields]]
+name = "account_name"
+label = "Storage account name"
+type = "string"
+required = true
+pattern = "^[a-z0-9]{3,24}$"
+pattern_hint = "3-24 lowercase letters and digits; globally unique"
+unique_scope = "storage_account"
+
+[[providers.azure.fields]]
+name = "container_name"
+label = "Blob container name"
+type = "string"
+required = true
+default = "data"
+pattern = "^[a-z0-9]([a-z0-9-]{1,61}[a-z0-9])?$"
+pattern_hint = "3-63 lowercase letters, digits and single hyphens"
+
+[[providers.azure.fields]]
+name = "replication"
+label = "Replication"
+type = "enum"
+options = ["LRS", "ZRS", "GRS"]
+default = "LRS"
+
+[[providers.azure.blocks]]
+key = "main"
+resource = "azurerm_storage_account"
+
+[providers.azure.blocks.args]
+name                     = { provider_field = "account_name" }
+resource_group_name      = { ancestor = "resource_group", attr = "name" }
+location                 = { var = "location" }
+account_tier             = { value = "Standard" }
+account_replication_type = { provider_field = "replication" }
+tags                     = { object = { Name = { field = "name" } } }
+
+[[providers.azure.blocks.nested]]
+block = "blob_properties"
+when = { field = "versioning" }
+
+[providers.azure.blocks.nested.args]
+versioning_enabled = { value = true }
+
+[[providers.azure.blocks]]
+key = "container"
+resource = "azurerm_storage_container"
+
+[providers.azure.blocks.args]
+name                  = { provider_field = "container_name" }
+storage_account_id    = { self_block = "main", attr = "id" }
+container_access_type = { value = "private" }
+
+[providers.azure.outputs]
+id = { attr = "id", description = "Storage account id" }
