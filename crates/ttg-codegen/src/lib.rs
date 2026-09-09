@@ -12,6 +12,7 @@
 
 pub mod bundle;
 pub mod diagnostics;
+pub mod diff;
 pub mod emit;
 pub mod files;
 pub mod layers;

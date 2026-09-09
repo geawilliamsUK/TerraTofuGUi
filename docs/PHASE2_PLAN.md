@@ -223,12 +223,16 @@ Done on 2026-09-09 (polish sweep):
   steps. Relations can be scoped with `providers = [...]` so AWS-only links (LB security
   group, NAT subnet, peering route tables) stop producing Azure "cannot express" noise.
 
+- ~~Obstacle-aware edge routing~~ (2026-09-09): orthogonal links score a set of
+  candidate Z / U detours around nearby nodes (crossings, then bends, then length) and
+  take the best; View ▸ *Route around nodes* toggles it.
+- ~~Diff view~~ (2026-09-09): `ttg_codegen::diff` (LCS line diff of a fresh generation
+  against an export directory), the "Changes vs last export" window, and `ttg diff`.
+
 Still open:
 
-- Edge routing that actually avoids crossing nodes (obstacle-aware; the current router
-  only picks facing sides and spreads parallel edges).
-- Auto-layout (layered) for imported/large diagrams.
-- Diff view: show which `.tf` files change relative to the last export.
+- Auto-layout for imported/large diagrams beyond *Tidy layout* (e.g. crossing-minimising
+  ordering across containers).
 
 ## Phase 3 — GCP
 

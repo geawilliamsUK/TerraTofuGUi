@@ -56,8 +56,14 @@ pub struct PendingEdge {
 pub struct ExportUi {
     pub open: bool,
     pub dir: Option<PathBuf>,
+    /// `dir` is the root of an "export all" (one sub-directory per provider).
+    pub root: bool,
     pub results: Vec<(String, Result<ttg_codegen::ExportReport, String>)>,
     pub validate: Vec<(String, String)>,
+    /// Last "preview changes" result: provider and per-file diffs.
+    pub diff: Option<(String, Vec<ttg_codegen::diff::FileDiff>)>,
+    pub diff_open: bool,
+    pub diff_show_unchanged: bool,
 }
 
 pub struct TtgApp {
@@ -91,6 +97,8 @@ pub struct TtgApp {
     /// Most recently opened/saved project files, newest first. Persisted by eframe.
     pub recent: Vec<PathBuf>,
     pub edge_style: EdgeStyle,
+    /// Orthogonal edges detour around nodes instead of crossing them.
+    pub avoid_obstacles: bool,
     /// Action waiting on the "unsaved changes" prompt.
     pub confirm: Option<PendingAction>,
     /// Set once the user has decided to discard/save; lets the close request through.
@@ -170,6 +178,7 @@ impl TtgApp {
             frame_no: 0,
             recent: Vec::new(),
             edge_style: EdgeStyle::Curved,
+            avoid_obstacles: true,
             confirm: None,
             allow_close: false,
             quit_requested: false,
@@ -195,8 +204,18 @@ impl TtgApp {
                     app.recent = v.into_iter().filter(|p| p.exists()).collect();
                 }
             }
+            if let Some(d) = storage.get_string("last_export_dir") {
+                let d = PathBuf::from(d);
+                if d.is_dir() {
+                    app.export.dir = Some(d);
+                    app.export.root = storage.get_string("last_export_root").as_deref() == Some("true");
+                }
+            }
             if storage.get_string("edge_style").as_deref() == Some("orthogonal") {
                 app.edge_style = EdgeStyle::Orthogonal;
+            }
+            if storage.get_string("avoid_obstacles").as_deref() == Some("off") {
+                app.avoid_obstacles = false;
             }
             if storage.get_string("display_mode").as_deref() == Some("concrete") {
                 app.display = crate::display::DisplayMode::Concrete;
@@ -244,6 +263,10 @@ impl TtgApp {
         // Override for documentation screenshots / testing.
         match std::env::var("TTG_EDGE_STYLE").as_deref() {
             Ok("orthogonal") => app.edge_style = EdgeStyle::Orthogonal,
+            Ok("orthogonal-plain") => {
+                app.edge_style = EdgeStyle::Orthogonal;
+                app.avoid_obstacles = false;
+            }
             Ok("curved") => app.edge_style = EdgeStyle::Curved,
             _ => {}
         }
@@ -817,6 +840,10 @@ impl TtgApp {
             dir: Some(dir),
             results: vec![(provider, r)],
             validate: Vec::new(),
+            root: false,
+            diff: None,
+            diff_open: false,
+            diff_show_unchanged: false,
         };
     }
 
@@ -838,7 +865,54 @@ impl TtgApp {
                 .map(|(p, r)| (p, r.map_err(|e| e.to_string())))
                 .collect(),
             validate: Vec::new(),
+            root: true,
+            diff: None,
+            diff_open: false,
+            diff_show_unchanged: false,
         };
+    }
+
+    /// Diff the current project against the directory of the last export (asking for
+    /// one when none is known) without writing anything.
+    pub fn preview_changes(&mut self) {
+        let provider = self.project.settings.target_provider.clone();
+        let dir = match self.export.dir.clone() {
+            Some(d) if d.is_dir() => d,
+            _ => {
+                let Some(d) = rfd::FileDialog::new()
+                    .set_title(format!("Folder of a previous {provider} export to compare with"))
+                    .pick_folder()
+                else {
+                    return;
+                };
+                self.export.root = false;
+                d
+            }
+        };
+        let target = if self.export.root {
+            dir.join(&provider)
+        } else {
+            dir.clone()
+        };
+        let tool = self.project.settings.tool;
+        match ttg_codegen::generate(&self.project, &self.catalog, &provider, tool) {
+            Ok(g) => {
+                let diffs = ttg_codegen::diff::against_dir(&g, &target);
+                let msg = format!(
+                    "Changes vs {}: {}",
+                    target.display(),
+                    ttg_codegen::diff::summary(&diffs)
+                );
+                self.status = msg;
+                self.export.dir = Some(dir);
+                self.export.diff = Some((provider, diffs));
+                self.export.diff_open = true;
+            }
+            Err(e) => {
+                let msg = format!("cannot generate {provider}: {e}");
+                self.status = msg;
+            }
+        }
     }
 
     pub fn run_validate(&mut self) {
@@ -1152,6 +1226,15 @@ impl TtgApp {
                 .show(ctx, |ui| crate::inspector::export_ui(self, ui));
             self.export.open = open;
         }
+        if self.export.diff_open {
+            let mut open = true;
+            egui::Window::new("Changes vs last export")
+                .open(&mut open)
+                .default_width(760.0)
+                .default_height(520.0)
+                .show(ctx, |ui| crate::inspector::diff_ui(self, ui));
+            self.export.diff_open = open;
+        }
         #[cfg(feature = "mcp")]
         if self.mcp.show_window {
             let mut open = true;
@@ -1311,6 +1394,10 @@ impl eframe::App for TtgApp {
         if let Ok(json) = serde_json::to_string(&self.recent) {
             storage.set_string("recent_files", json);
         }
+        if let Some(d) = &self.export.dir {
+            storage.set_string("last_export_dir", d.display().to_string());
+            storage.set_string("last_export_root", self.export.root.to_string());
+        }
         #[cfg(feature = "mcp")]
         self.mcp_persist(storage);
         storage.set_string(
@@ -1328,6 +1415,10 @@ impl eframe::App for TtgApp {
                 EdgeStyle::Orthogonal => "orthogonal",
             }
             .into(),
+        );
+        storage.set_string(
+            "avoid_obstacles",
+            if self.avoid_obstacles { "on" } else { "off" }.into(),
         );
     }
 }

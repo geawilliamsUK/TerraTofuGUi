@@ -146,6 +146,10 @@ pub fn show(app: &mut TtgApp, ui: &mut Ui) {
             ui.label("Edge style");
             ui.radio_value(&mut app.edge_style, EdgeStyle::Curved, "Curved");
             ui.radio_value(&mut app.edge_style, EdgeStyle::Orthogonal, "Orthogonal");
+            ui.add_enabled(
+                app.edge_style == EdgeStyle::Orthogonal,
+                egui::Checkbox::new(&mut app.avoid_obstacles, "Route around nodes"),
+            );
         });
         #[cfg(feature = "mcp")]
         ui.menu_button("Agent", |ui| {
@@ -249,6 +253,14 @@ pub fn show(app: &mut TtgApp, ui: &mut Ui) {
             .clicked()
         {
             app.export_single();
+        }
+        if ui
+            .button("Preview changes vs last export…")
+            .on_hover_text("Diff a fresh generation against the folder of the last export, without writing")
+            .clicked()
+        {
+            ui.close();
+            app.preview_changes();
         }
         if ui
             .add_enabled(true, egui::Button::new("Export all providers…"))

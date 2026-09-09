@@ -60,6 +60,21 @@ enum Cmd {
         #[arg(long)]
         validate: bool,
     },
+    /// Show what exporting would change in an existing export directory, without
+    /// writing anything. Exits 1 when there are changes.
+    Diff {
+        project: PathBuf,
+        #[arg(long)]
+        provider: Option<String>,
+        #[arg(long)]
+        tool: Option<ToolArg>,
+        /// The directory a previous export wrote to.
+        #[arg(long)]
+        out: PathBuf,
+        /// Print the changed lines, not just the per-file summary.
+        #[arg(long)]
+        full: bool,
+    },
     /// Export one complete project directory per provider under --out.
     ExportAll {
         project: PathBuf,
@@ -371,6 +386,40 @@ fn main() -> Result<()> {
                 if matches!(o, ttg_codegen::validate::Outcome::Ran { success: false, .. }) {
                     std::process::exit(2);
                 }
+            }
+        }
+        Cmd::Diff {
+            project,
+            provider,
+            tool,
+            out,
+            full,
+        } => {
+            let p = ttg_core::project::load(&project)?;
+            cat.ensure_native_types(&p);
+            let provider = provider.unwrap_or(p.settings.target_provider.clone());
+            let tool: Tool = tool.map(Into::into).unwrap_or(p.settings.tool);
+            let g = ttg_codegen::generate(&p, &cat, &provider, tool)?;
+            let diffs = ttg_codegen::diff::against_dir(&g, &out);
+            println!(
+                "[{provider}] {} vs {}: {}",
+                tool.display_name(),
+                out.display(),
+                ttg_codegen::diff::summary(&diffs)
+            );
+            for d in diffs.iter().filter(|d| d.changed()) {
+                let tag = match d.status {
+                    ttg_codegen::diff::FileStatus::Added => "added  ",
+                    ttg_codegen::diff::FileStatus::Removed => "removed",
+                    _ => "changed",
+                };
+                println!("  {tag} {:<20} +{} -{}", d.name, d.added, d.removed);
+                if full {
+                    print!("{}", ttg_codegen::diff::render(d, 2));
+                }
+            }
+            if diffs.iter().any(|d| d.changed()) {
+                std::process::exit(1);
             }
         }
         Cmd::ExportAll {

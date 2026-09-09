@@ -931,6 +931,138 @@ fn orthogonal_path(a: Pos2, sa: Side, b: Pos2, sb: Side) -> Vec<Pos2> {
     }
 }
 
+/// Does the axis-aligned segment `p`-`q` pass through the interior of `r`?
+fn seg_crosses(p: Pos2, q: Pos2, r: Rect) -> bool {
+    if (p.x - q.x).abs() < 0.5 {
+        let (y0, y1) = (p.y.min(q.y), p.y.max(q.y));
+        p.x > r.left() && p.x < r.right() && y1 > r.top() && y0 < r.bottom()
+    } else {
+        let (x0, x1) = (p.x.min(q.x), p.x.max(q.x));
+        p.y > r.top() && p.y < r.bottom() && x1 > r.left() && x0 < r.right()
+    }
+}
+
+/// Orthogonal polyline from `a` (leaving side `sa`) to `b` (arriving at side `sb`) that
+/// avoids `obstacles` where a detour exists. Candidate paths are the plain route plus
+/// Z- and U-shapes whose free segment runs just outside each nearby obstacle; the one
+/// with the fewest crossings, then bends, then length wins.
+fn routed_path(a: Pos2, sa: Side, b: Pos2, sb: Side, obstacles: &[Rect], zoom: f32) -> Vec<Pos2> {
+    let plain = orthogonal_path(a, sa, b, sb);
+    if obstacles
+        .iter()
+        .all(|r| !plain.windows(2).any(|w| seg_crosses(w[0], w[1], *r)))
+    {
+        return plain;
+    }
+    let m = 16.0 * zoom.clamp(0.5, 1.5);
+    let bbox = Rect::from_two_pos(a, b).expand(4.0 * m);
+    let near: Vec<Rect> = obstacles.iter().copied().filter(|r| r.intersects(bbox)).collect();
+    let mut xs = vec![(a.x + b.x) / 2.0];
+    let mut ys = vec![(a.y + b.y) / 2.0];
+    for r in &near {
+        xs.push(r.left() - m);
+        xs.push(r.right() + m);
+        ys.push(r.top() - m);
+        ys.push(r.bottom() + m);
+    }
+    let ax = a + sa.normal() * m;
+    let bx = b + sb.normal() * m;
+    let mut cands: Vec<Vec<Pos2>> = vec![plain];
+    match (sa.horizontal(), sb.horizontal()) {
+        (true, true) => {
+            for &x in &xs {
+                cands.push(vec![a, Pos2::new(x, a.y), Pos2::new(x, b.y), b]);
+            }
+            for &y in &ys {
+                cands.push(vec![
+                    a,
+                    Pos2::new(ax.x, a.y),
+                    Pos2::new(ax.x, y),
+                    Pos2::new(bx.x, y),
+                    Pos2::new(bx.x, b.y),
+                    b,
+                ]);
+            }
+        }
+        (false, false) => {
+            for &y in &ys {
+                cands.push(vec![a, Pos2::new(a.x, y), Pos2::new(b.x, y), b]);
+            }
+            for &x in &xs {
+                cands.push(vec![
+                    a,
+                    Pos2::new(a.x, ax.y),
+                    Pos2::new(x, ax.y),
+                    Pos2::new(x, bx.y),
+                    Pos2::new(b.x, bx.y),
+                    b,
+                ]);
+            }
+        }
+        (true, false) => {
+            for &x in &xs {
+                cands.push(vec![
+                    a,
+                    Pos2::new(x, a.y),
+                    Pos2::new(x, bx.y),
+                    Pos2::new(b.x, bx.y),
+                    b,
+                ]);
+            }
+            for &y in &ys {
+                cands.push(vec![
+                    a,
+                    Pos2::new(ax.x, a.y),
+                    Pos2::new(ax.x, y),
+                    Pos2::new(b.x, y),
+                    b,
+                ]);
+            }
+        }
+        (false, true) => {
+            for &y in &ys {
+                cands.push(vec![
+                    a,
+                    Pos2::new(a.x, y),
+                    Pos2::new(bx.x, y),
+                    Pos2::new(bx.x, b.y),
+                    b,
+                ]);
+            }
+            for &x in &xs {
+                cands.push(vec![
+                    a,
+                    Pos2::new(a.x, ax.y),
+                    Pos2::new(x, ax.y),
+                    Pos2::new(x, b.y),
+                    b,
+                ]);
+            }
+        }
+    }
+    let score = |pts: &[Pos2]| -> f32 {
+        let crossings = pts
+            .windows(2)
+            .map(|w| obstacles.iter().filter(|r| seg_crosses(w[0], w[1], **r)).count())
+            .sum::<usize>() as f32;
+        // Leaving against the side's normal or arriving from behind runs through the
+        // endpoint's own node.
+        let first = pts[1] - pts[0];
+        let last = pts[pts.len() - 1] - pts[pts.len() - 2];
+        let backwards = (first.dot(sa.normal()) < -0.5) as u8 + (last.dot(sb.normal()) > 0.5) as u8;
+        let len: f32 = pts.windows(2).map(|w| (w[1] - w[0]).length()).sum();
+        crossings * 1000.0 + backwards as f32 * 500.0 + (pts.len() as f32 - 2.0) * 25.0 + len * 0.1
+    };
+    cands
+        .into_iter()
+        .min_by(|p, q| {
+            score(p)
+                .partial_cmp(&score(q))
+                .unwrap_or(std::cmp::Ordering::Equal)
+        })
+        .unwrap()
+}
+
 fn side_from_name(s: &str) -> Option<Side> {
     match s {
         "left" => Some(Side::Left),
@@ -1084,6 +1216,21 @@ fn draw_edges(app: &mut TtgApp, ui: &mut Ui, origin: Pos2) {
         )));
     }
     let mut used: std::collections::HashMap<(String, Side), usize> = Default::default();
+    // Obstacles for routed edges: every visible node. Containers are not obstacles (an
+    // edge to something inside has to cross the wall).
+    let obstacles: Vec<(String, Rect)> = if app.avoid_obstacles {
+        app.project
+            .nodes
+            .keys()
+            .filter(|id| app.is_visible(id))
+            .filter_map(|id| {
+                app.entity_rect(id)
+                    .map(|r| (id.clone(), app.camera.rect_to_screen(origin, r)))
+            })
+            .collect()
+    } else {
+        Vec::new()
+    };
 
     let resolve = |end: &EdgeEnd,
                    id: &str,
@@ -1152,7 +1299,16 @@ fn draw_edges(app: &mut TtgApp, ui: &mut Ui, origin: Pos2) {
                 (bezier_point([a, c1, c2, b], 0.5), (b - c2).normalized())
             }
             crate::app::EdgeStyle::Orthogonal => {
-                let pts = orthogonal_path(a, sa, b, sb);
+                let pts = if app.avoid_obstacles {
+                    let obs: Vec<Rect> = obstacles
+                        .iter()
+                        .filter(|(id, _)| id != &e.source && id != &e.target)
+                        .map(|(_, r)| *r)
+                        .collect();
+                    routed_path(a, sa, b, sb, &obs, zoom)
+                } else {
+                    orthogonal_path(a, sa, b, sb)
+                };
                 painter.add(egui::Shape::line(pts.clone(), stroke));
                 let (mut best, mut best_len) = (pts[0], -1.0);
                 for w in pts.windows(2) {

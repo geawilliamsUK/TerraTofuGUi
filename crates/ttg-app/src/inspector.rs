@@ -1289,10 +1289,94 @@ pub fn export_ui(app: &mut TtgApp, ui: &mut Ui) {
         if !available {
             ui.label(RichText::new(format!("{bin} not on PATH")).small().color(Color32::from_gray(120)));
         }
+        if ui
+            .button("Preview changes")
+            .on_hover_text("Diff what an export would write now against the files in this folder")
+            .clicked()
+        {
+            app.preview_changes();
+        }
     });
     for (pid, out) in &app.export.validate {
         ui.label(RichText::new(format!("[{pid}] {out}")).monospace().small());
     }
+}
+
+/// The "Changes vs last export" window: per-file diffs of a fresh generation against
+/// the export directory, changed files expanded, unchanged runs folded.
+pub fn diff_ui(app: &mut TtgApp, ui: &mut Ui) {
+    use ttg_codegen::diff::{FileStatus, LineKind};
+    let Some((provider, diffs)) = app.export.diff.clone() else {
+        ui.label("Nothing compared yet. Use File ▸ Preview changes.");
+        return;
+    };
+    ui.horizontal(|ui| {
+        ui.label(RichText::new(format!("{provider}: {}", ttg_codegen::diff::summary(&diffs))).strong());
+        if ui.button("Refresh").clicked() {
+            app.preview_changes();
+        }
+        if ui.button("Compare with another folder…").clicked() {
+            app.export.dir = None;
+            app.preview_changes();
+        }
+        ui.checkbox(&mut app.export.diff_show_unchanged, "Show unchanged files");
+    });
+    if let Some(d) = &app.export.dir {
+        let shown = if app.export.root {
+            d.join(&provider)
+        } else {
+            d.clone()
+        };
+        ui.label(RichText::new(shown.display().to_string()).small().monospace());
+    }
+    ui.separator();
+    let green = Color32::from_rgb(30, 130, 60);
+    let red = Color32::from_rgb(190, 40, 40);
+    let orange = Color32::from_rgb(200, 120, 20);
+    let gray = Color32::from_gray(120);
+    egui::ScrollArea::vertical().show(ui, |ui| {
+        for d in &diffs {
+            if !d.changed() && !app.export.diff_show_unchanged {
+                continue;
+            }
+            let (tag, color) = match d.status {
+                FileStatus::Added => ("added", green),
+                FileStatus::Removed => ("removed", red),
+                FileStatus::Changed => ("changed", orange),
+                FileStatus::Unchanged => ("unchanged", gray),
+            };
+            let header = format!("{tag:<9} {}   +{} \u{2212}{}", d.name, d.added, d.removed);
+            egui::CollapsingHeader::new(RichText::new(header).monospace().color(color))
+                .id_salt(("diff", &d.name))
+                .default_open(d.changed())
+                .show(ui, |ui| {
+                    for l in d.condensed(3) {
+                        let (prefix, col, bg) = match l.kind {
+                            LineKind::Context => (' ', Color32::from_gray(90), None),
+                            LineKind::Added => (
+                                '+',
+                                Color32::from_rgb(20, 100, 40),
+                                Some(Color32::from_rgb(225, 245, 228)),
+                            ),
+                            LineKind::Removed => (
+                                '-',
+                                Color32::from_rgb(150, 30, 30),
+                                Some(Color32::from_rgb(250, 228, 228)),
+                            ),
+                            LineKind::Skip => ('@', gray, None),
+                        };
+                        let mut text = RichText::new(format!("{prefix} {}", l.text))
+                            .monospace()
+                            .small()
+                            .color(col);
+                        if let Some(bg) = bg {
+                            text = text.background_color(bg);
+                        }
+                        ui.label(text);
+                    }
+                });
+        }
+    });
 }
 
 pub fn status_ui(app: &mut TtgApp, ui: &mut Ui) {

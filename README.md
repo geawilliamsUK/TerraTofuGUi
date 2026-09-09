@@ -66,6 +66,11 @@ OpenTofu installed, so a definition change that produces invalid HCL fails the b
 - **Inspector** (right): typed fields from the resource definition, provider-specific
   fields, links, and the diagnostics for that node.
 - **Toolbar**: choose Terraform or OpenTofu, the target provider, and export.
+  *Preview changes vs last export…* (also in the File menu and the Export window) runs
+  the generator without writing anything and shows a per-file diff against the folder
+  of the last export, changed files expanded and unchanged runs folded, so you can see
+  what a re-export would touch. Headless: `ttg diff <project> --out <dir> [--full]`,
+  which exits 1 when something would change.
 - Badges on nodes: red `!` = error (export blocked), orange `!` = warning (manual step),
   `✕` = no mapping for this provider, blue `M` = flagged external/manual.
 - Undo/redo (Ctrl+Z / Ctrl+Y), copy/paste (Ctrl+C / Ctrl+V), delete, select all, save
@@ -74,7 +79,10 @@ OpenTofu installed, so a definition change that produces invalid HCL fails the b
   window close button) ask before discarding unsaved changes.
 - **View ▸ Edge style** switches between curved and orthogonal links. Links attach to
   whichever side faces the other node and fan out when several share a side. Select a
-  link to pin either end to a chosen side and position (inspector ▸ Routing).
+  link to pin either end to a chosen side and position (inspector ▸ Routing). With
+  *Route around nodes* on (the default for orthogonal links), a link that would cut
+  through another node takes a Z- or U-shaped detour just outside it instead; turn it
+  off for the plain facing-sides router.
 - A link to a container ends in a small terminal on the nearest wall, wherever the
   other end sits, so a node inside a subnet linking to its VNet stays a short line.
 - A link that containment already implies (a subnet drawn inside its network) is not
