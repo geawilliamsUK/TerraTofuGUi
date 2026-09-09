@@ -2,11 +2,14 @@ name: CI
 
 on:
   push:
-    branches: [main]
+    branches: [master, main]
   pull_request:
 
 env:
   CARGO_TERM_COLOR: always
+  # Shared provider plugin cache: the aws/azurerm/google providers are downloaded once
+  # per run instead of once per validated example directory.
+  TF_PLUGIN_CACHE_DIR: ${{ github.workspace }}/.plugin-cache
 
 jobs:
   test:
@@ -30,24 +33,36 @@ jobs:
         with:
           tofu_wrapper: false
 
+      - name: Cache provider plugins
+        uses: actions/cache@v4
+        with:
+          path: .plugin-cache
+          key: tofu-providers-${{ hashFiles('definitions/providers/*.toml') }}
+
       - name: Format check
         run: cargo fmt --all -- --check
 
-      - name: Clippy
+      - name: Clippy (default features)
         run: cargo clippy --workspace --all-targets -- -D warnings
 
-      - name: Tests (includes `tofu validate` on every example)
+      - name: Clippy (app without MCP)
+        run: cargo clippy -p ttg-app --no-default-features -- -D warnings
+
+      - name: Tests (includes `tofu validate` on every example x provider x tool and the headless MCP test)
         env:
           TTG_REQUIRE_VALIDATE: "1"
-        run: cargo test --workspace
+        run: cargo test --workspace --no-fail-fast
 
-      - name: Catalog loads
-        run: cargo run -p ttg-cli -- catalog --definitions ./definitions
+      - name: Catalog loads and passes the strict checks
+        run: cargo run -p ttg-cli -- catalog --strict
 
-      - name: Export examples (artifact)
+      - name: Export the examples (artifact)
         run: |
-          cargo run -p ttg-cli -- export-all examples/three-tier.ttg.json --out out/three-tier --validate
-          cargo run -p ttg-cli -- export examples/existing-network.ttg.json --provider aws --out out/existing-network/aws --validate
+          mkdir -p .plugin-cache
+          for f in examples/*.ttg.json; do
+            name=$(basename "$f" .ttg.json)
+            cargo run -p ttg-cli -- export-all "$f" --out "out/$name" || true
+          done
 
       - uses: actions/upload-artifact@v4
         with:

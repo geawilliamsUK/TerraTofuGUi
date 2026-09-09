@@ -11,6 +11,7 @@ use std::fmt;
 pub type Record = std::collections::BTreeMap<String, Value>;
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(untagged)]
 pub enum Value {
     Bool(bool),

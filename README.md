@@ -13,8 +13,8 @@ provider — never a single "portable" HCL file, because no such thing can exist
 
 ![TerraTofu GUI with the three-tier example open](docs/screenshot.png)
 
-Status: **Phase 2 catalog** — 31 curated abstract types mapped for AWS and Azure, plus
-every native provider resource through the bundled schema index (see "Beyond the
+Status: **Phase 3** — 31 curated abstract types mapped for AWS, Azure and Google Cloud,
+plus every native provider resource through the bundled schema index (see "Beyond the
 curated catalog"). Curated: networking (Virtual Network, Subnet, Internet Gateway, NAT
 Gateway, Route Table, Security Group, Private Endpoint, Network Peering), compute (Compute Instance,
 Autoscaling Group, Load Balancer), data (Relational Database, NoSQL Table, Cache, Object
@@ -23,8 +23,22 @@ Service Bus Namespace), containers (Container App,
 Container Registry, Kubernetes Cluster), DNS (Zone, Record), secrets (Key Vault, Secret),
 monitoring (Log Group, Alarm), IAM Role and the Resource Group container. Gaps a provider cannot
 express (an Azure database's network access, for example) are reported as manual steps,
-never papered over. Every example passes `tofu validate` for both providers and both
-tools in CI.
+never papered over. Every example passes `tofu validate` for all three providers and
+both tools in CI.
+
+Google Cloud (added 2026-09-09, `hashicorp/google` 6.x): networks and subnets, Cloud NAT,
+firewall rules driven by network tags, Compute Engine, service accounts, Cloud Storage,
+Cloud SQL with private services access, Cloud Functions (2nd gen) with Pub/Sub triggers
+and a Serverless VPC Access connector, Pub/Sub queues and topics, Secret Manager, Cloud
+Logging buckets, Cloud DNS, Memorystore, Firestore, Artifact Registry, GKE, managed
+instance groups with an autoscaler, a passthrough Network Load Balancer, Cloud Run and
+Cloud Monitoring alert policies. Internet gateways, route tables and private endpoints
+are *logical* on GCP (the network already routes to the internet, Cloud NAT covers whole
+subnets, and Private Google Access is on every subnet); Storage Queue and Service Bus
+Namespace stay Azure-only. The switch to a third provider was pure data plus one
+registration line, as Phase 3 promised; see `docs/PHASE2_PLAN.md`.
+
+![The hub-and-spoke example shown as Google Cloud resources](docs/screenshot-gcp.png)
 
 ## Build & run
 
@@ -48,7 +62,8 @@ Provider plugins downloaded during `init` are cached once per user
 (`TF_PLUGIN_CACHE_DIR`, defaulting to `%LOCALAPPDATA%\terratofu-gui\plugin-cache` or
 `~/.cache/terratofu-gui/plugin-cache`), so repeated validation is fast.
 
-Full validation of every example against every provider and both tools:
+Full validation of every example against every provider (AWS, Azure, Google Cloud) and
+both tools:
 
 ```bash
 TTG_REQUIRE_VALIDATE=1 cargo test -p ttg-codegen --test validate_examples
@@ -232,6 +247,17 @@ often reserved by Hyper-V, which is why the default is 9337.
 
 ![An agent session: a queue added, linked and the diagram tidied over MCP, with the orange flash on the touched entities and the activity in the status bar](docs/screenshot-mcp.png)
 
+## Contributing
+
+[CONTRIBUTING.md](CONTRIBUTING.md) walks through adding a resource definition (start from
+`ttg catalog --example <type_id>`, verify argument names with `ttg schema show`, prove it
+with an example) and what CI checks. `ttg catalog --strict` reports dead abstract fields,
+outputs that name attributes the provider does not have and relations no mapping
+consumes; `schemas/project.schema.json` (`ttg schema project`) describes the project
+file for editors and external tools, and a test keeps it current. Release builds are not
+automated yet; [docs/RELEASING.md](docs/RELEASING.md) explains how to set them up with
+GitHub Actions.
+
 ## Repository layout
 
 ```
@@ -241,8 +267,10 @@ crates/ttg-catalog    loads and validates definitions
 crates/ttg-codegen    HCL generation, diagnostics, MANUAL_STEPS.md, tool toggle
 crates/ttg-cli        headless `ttg` command
 crates/ttg-app        egui/eframe desktop application
-examples/             sample projects
-docs/                 ARCHITECTURE.md, MAPPING_FORMAT.md, PHASE2_PLAN.md
+examples/             sample projects (every one exports and validates on every provider)
+schemas/              JSON Schema of the .ttg.json project file (generated: `ttg schema project`)
+docs/                 ARCHITECTURE.md, MAPPING_FORMAT.md, PHASE2_PLAN.md, MCP_PLAN.md, RELEASING.md
+CONTRIBUTING.md       how to add a definition, verify it, and what CI expects
 ```
 
 Read [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) for the design and

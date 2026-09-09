@@ -89,7 +89,15 @@ enum Cmd {
         validate: bool,
     },
     /// Load and validate the definition catalog, then list what it contains.
-    Catalog,
+    Catalog {
+        /// Also report abstract fields no provider uses, outputs naming attributes the
+        /// provider schema lacks, and relations no provider consumes. Exits 1 on findings.
+        #[arg(long)]
+        strict: bool,
+        /// Print a starter definition file for a new abstract type instead.
+        #[arg(long, value_name = "TYPE_ID")]
+        example: Option<String>,
+    },
     /// Reachability: what is exposed, and what a resource can reach.
     Reach {
         project: PathBuf,
@@ -117,6 +125,11 @@ enum Cmd {
 enum SchemaCmd {
     /// Show which index is in use and what it covers.
     Info,
+    /// Print the JSON Schema of the .ttg.json project file (or write it with --out).
+    Project {
+        #[arg(long)]
+        out: Option<PathBuf>,
+    },
     /// Regenerate the index from the installed tool (`<tool> providers schema -json`).
     /// Writes to the per-user data directory by default; `--out` writes elsewhere
     /// (use `--out crates/ttg-schema/data/index.json.gz` to refresh the bundled copy).
@@ -148,7 +161,11 @@ fn main() -> Result<()> {
     let cli = Cli::parse();
     let mut cat = load_catalog(&cli.definitions)?;
     match cli.cmd {
-        Cmd::Catalog => {
+        Cmd::Catalog { strict, example } => {
+            if let Some(t) = example {
+                print!("{}", starter_definition(&t, &cat));
+                return Ok(());
+            }
             println!("providers:");
             for (id, p) in &cat.providers {
                 println!(
@@ -173,8 +190,30 @@ fn main() -> Result<()> {
                     provs.join(", ")
                 );
             }
+            if strict {
+                let findings = strict_findings(&cat);
+                if findings.is_empty() {
+                    println!("strict: no findings");
+                } else {
+                    println!("strict: {} finding(s)", findings.len());
+                    for f in &findings {
+                        println!("  - {f}");
+                    }
+                    std::process::exit(1);
+                }
+            }
         }
         Cmd::Schema { cmd } => match cmd {
+            SchemaCmd::Project { out } => {
+                let json = ttg_core::json_schema::project_schema_json();
+                match out {
+                    Some(p) => {
+                        std::fs::write(&p, format!("{json}\n"))?;
+                        eprintln!("wrote {}", p.display());
+                    }
+                    None => println!("{json}"),
+                }
+            }
             SchemaCmd::Info => {
                 let idx = ttg_schema::index();
                 println!("index: {} ({})", ttg_schema::index_source(), idx.generated);
@@ -513,4 +552,107 @@ fn print_block(b: &ttg_schema::BlockSchema, indent: usize) {
         print_block(n.block(), indent + 1);
         println!("{pad}}}");
     }
+}
+
+/// Things a definition can get wrong without producing invalid HCL: dead abstract
+/// fields, outputs that name attributes the provider does not have, relations that no
+/// provider mapping ever consumes.
+fn strict_findings(cat: &ttg_catalog::Catalog) -> Vec<String> {
+    let idx = ttg_schema::index();
+    let mut out = Vec::new();
+    for (id, r) in &cat.resources {
+        if ttg_catalog::Catalog::is_native(id) {
+            continue;
+        }
+        for f in &r.fields {
+            if ttg_catalog::usage::providers_using(r, &f.name).is_empty() {
+                out.push(format!(
+                    "{id}: abstract field '{}' is used by no provider mapping",
+                    f.name
+                ));
+            }
+        }
+        for (pid, m) in &r.providers {
+            let primary = m
+                .blocks
+                .iter()
+                .find(|b| b.key == "main")
+                .or(m.blocks.first())
+                .map(|b| b.key.clone());
+            for (oname, o) in &m.outputs {
+                let key = o.block.clone().or(primary.clone());
+                let Some(b) = m.blocks.iter().find(|b| Some(&b.key) == key.as_ref()) else {
+                    out.push(format!(
+                        "{id}/{pid}: output '{oname}' references block '{}' which the mapping does not define",
+                        key.unwrap_or_default()
+                    ));
+                    continue;
+                };
+                if b.resource == "terraform_data" {
+                    continue;
+                }
+                let root = o.attr.split('.').next().unwrap_or(&o.attr);
+                if let Some(schema) = idx.resource(pid, &b.resource) {
+                    if !schema.has(root) {
+                        out.push(format!(
+                            "{id}/{pid}: output '{oname}' names attribute '{}' which {} does not have",
+                            o.attr, b.resource
+                        ));
+                    }
+                }
+            }
+        }
+        for rel in &r.relations {
+            let applicable: Vec<&String> = r
+                .providers
+                .keys()
+                .filter(|pid| rel.providers.is_empty() || rel.providers.contains(pid))
+                .collect();
+            let consumed = applicable.iter().any(|pid| {
+                ttg_codegen::diagnostics::consumed_relations(&r.providers[*pid])
+                    .iter()
+                    .any(|c| c.relation == rel.kind)
+            });
+            if !consumed && !applicable.is_empty() && rel.kind != "depends_on" {
+                out.push(format!(
+                    "{id}: relation '{}' ({}) is consumed by no provider mapping",
+                    rel.kind,
+                    rel.label.clone().unwrap_or_default()
+                ));
+            }
+        }
+    }
+    out
+}
+
+/// A starter definition for a new abstract type, with every provider section stubbed.
+fn starter_definition(type_id: &str, cat: &ttg_catalog::Catalog) -> String {
+    let display: String = type_id
+        .split('_')
+        .map(|w| {
+            let mut c = w.chars();
+            match c.next() {
+                Some(f) => f.to_uppercase().collect::<String>() + c.as_str(),
+                None => String::new(),
+            }
+        })
+        .collect::<Vec<_>>()
+        .join(" ");
+    let mut s = format!(
+        "# Abstract type: {display}  (schema_version 2)\n#\n# One-paragraph description of the concept and how each provider renders it.\n\nschema_version = 2\n\n[resource]\ntype = \"{type_id}\"\ncategory = \"compute\"          # compute | network | storage | database | serverless | container | dns | secrets | monitoring | iam\ndisplay_name = \"{display}\"\ndescription = \"What it is and which links matter, in one sentence for the palette tooltip.\"\nkind = \"node\"                 # node | container\nallowed_parents = [\"resource_group\", \"virtual_network\"]\nicon = \"{}\"\n\n[[fields]]\nname = \"size\"\nlabel = \"Size\"\ntype = \"enum\"                 # string | int | bool | cidr | enum | string_list | struct_list | entity_ref\nrequired = true\noptions = [\"small\", \"medium\", \"large\"]\ndefault = \"small\"\n\n[[relations]]\nkind = \"network_membership\"   # network_membership | attribute_reference | iam_binding | attachment | sends_to | reads | logs_to\nlabel = \"Subnets\"\ntargets = [\"subnet\"]\ncardinality = \"many\"          # one | optional | many\n",
+        type_id.chars().take(3).collect::<String>().to_uppercase()
+    );
+    for (pid, p) in &cat.providers {
+        let prefix = match pid.as_str() {
+            "aws" => "aws_",
+            "azure" => "azurerm_",
+            "gcp" => "google_",
+            _ => "",
+        };
+        s.push_str(&format!(
+            "\n# ---------------------------------------------------------------- {}\n[providers.{pid}]\nstatus = \"partial\"             # full | partial (needs manual_steps) | logical (nothing generated)\n\n[[providers.{pid}.blocks]]\nkey = \"main\"\nresource = \"{prefix}{type_id}\"   # check with: ttg schema show {pid} {prefix}{type_id}\n\n[providers.{pid}.blocks.args]\nname = {{ field = \"name\", transform = \"kebab\" }}\n\n[providers.{pid}.outputs]\nid = {{ attr = \"id\", description = \"Resource id\" }}\n\n[[providers.{pid}.manual_steps]]\ntitle = \"What the mapping cannot express\"\nbody = \"\"\"\nExplain what the operator must do by hand after apply, or delete this step and set\nstatus = \"full\".\n\"\"\"\n",
+            p.provider.display_name
+        ));
+    }
+    s
 }

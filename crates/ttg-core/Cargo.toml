@@ -12,3 +12,8 @@ thiserror.workspace = true
 petgraph.workspace = true
 indexmap.workspace = true
 uuid.workspace = true
+schemars = { version = "1.2.2", optional = true }
+
+[features]
+# JSON Schema for the project file (`ttg schema project`).
+schema = ["dep:schemars"]
