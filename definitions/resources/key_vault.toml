@@ -64,3 +64,8 @@ identity that runs `apply` (an `azurerm_role_assignment` with
 data.azurerm_client_config.<slug>_current.object_id`) before applying the secrets inside
 it, or the secret resources will fail with a 403.
 """
+
+# ---------------------------------------------------------------- GCP
+[providers.gcp]
+status = "logical"
+notes = "Secret Manager is project-wide; secrets inside this container are created directly."

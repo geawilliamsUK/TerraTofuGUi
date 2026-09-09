@@ -1180,7 +1180,26 @@ fn network_checks(p: &Project, cat: &Catalog, provider: &str, out: &mut Vec<Diag
             }
         }
     }
+    // GCP: route tables are logical; Cloud NAT (or an internet gateway) covers the
+    // whole network.
+    if provider == "gcp" {
+        for s in &subnets {
+            let vnet = relation_targets(p, cat, s, Relation::NetworkMembership)
+                .into_iter()
+                .next();
+            let covered = entities.iter().any(|e| {
+                matches!(e.resource_type, "nat_gateway" | "internet_gateway")
+                    && p.ancestor_of_type(e.id, "virtual_network").map(|c| c.id.clone()) == vnet
+            });
+            if covered {
+                egress_subnets.insert(s.id.to_string());
+            }
+        }
+    }
     for (subnet, tables) in &tables_per_subnet {
+        if provider == "gcp" {
+            break;
+        }
         if tables.len() > 1 {
             let names: Vec<String> = tables.iter().map(|t| format!("\"{}\"", name_of(t))).collect();
             push(
@@ -1194,8 +1213,12 @@ fn network_checks(p: &Project, cat: &Catalog, provider: &str, out: &mut Vec<Diag
             );
         }
     }
-    // A NAT gateway's own subnet must route to an internet gateway.
-    for nat in entities.iter().filter(|e| e.resource_type == "nat_gateway") {
+    // A NAT gateway's own subnet must route to an internet gateway (not on GCP, where
+    // Cloud NAT needs no subnet).
+    for nat in entities
+        .iter()
+        .filter(|e| e.resource_type == "nat_gateway" && provider != "gcp")
+    {
         for s in relation_targets(p, cat, nat, Relation::NetworkMembership) {
             let routed_to_igw = route_tables.iter().any(|rt| {
                 relation_targets(p, cat, rt, Relation::Attachment).contains(&s)

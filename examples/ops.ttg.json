@@ -182,6 +182,9 @@
           "account_name": "ttgopsstorex91",
           "container_name": "data",
           "replication": "LRS"
+        },
+        "gcp": {
+          "bucket_name": "ops-store-x7q2"
         }
       },
       "position": {

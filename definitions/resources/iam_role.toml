@@ -144,3 +144,30 @@ Creating role assignments requires the identity running `apply` to hold **Owner*
 **User Access Administrator** on the resource group. A plain Contributor will get a 403 on
 `azurerm_role_assignment`.
 """
+
+# ---------------------------------------------------------------- GCP
+[providers.gcp]
+status = "full"
+notes = "A service account. Any workload may run as it, so 'Assumable by' does not apply; the permission level becomes a project-wide viewer / editor binding."
+
+[[providers.gcp.blocks]]
+key = "main"
+resource = "google_service_account"
+
+[providers.gcp.blocks.args]
+account_id   = { func = "substr", args = [ { func = "format", args = [ { value = "sa-%s" }, { field = "name", transform = "kebab" } ] }, { value = 0 }, { value = 30 } ] }
+display_name = { field = "name" }
+
+[[providers.gcp.blocks]]
+key = "binding"
+resource = "google_project_iam_member"
+when = { field = "permissions", not_equals = "none" }
+
+[providers.gcp.blocks.args]
+project = { var = "project" }
+role    = { map = "permissions", table = { read_only = "roles/viewer", admin = "roles/editor" } }
+member  = { self_block = "main", attr = "member" }
+
+[providers.gcp.outputs]
+email  = { attr = "email", description = "Service account email" }
+member = { attr = "member", description = "IAM member string (serviceAccount:...)" }

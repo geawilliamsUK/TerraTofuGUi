@@ -120,3 +120,42 @@ container_access_type = { value = "private" }
 
 [providers.azure.outputs]
 id = { attr = "id", description = "Storage account id" }
+
+# ---------------------------------------------------------------- GCP
+[providers.gcp]
+status = "full"
+
+[[providers.gcp.fields]]
+name = "bucket_name"
+label = "Bucket name"
+type = "string"
+pattern = "^[a-z0-9][a-z0-9._-]{1,61}[a-z0-9]$"
+pattern_hint = "3-63 chars, lowercase letters, digits, dots and hyphens; globally unique"
+description = "Globally unique bucket name. Defaults to the node name, which is unlikely to be free."
+unique_scope = "gcs_bucket"
+
+[[providers.gcp.checks]]
+when = { provider_field = "bucket_name", absent = true }
+message = "\"{name}\": set a Google Cloud bucket name; bucket names are global and the node name is unlikely to be free"
+
+[[providers.gcp.blocks]]
+key = "main"
+resource = "google_storage_bucket"
+
+[providers.gcp.blocks.args]
+name                        = { provider_field = "bucket_name", fallback = { field = "name", transform = "kebab" } }
+location                    = { var = "region" }
+uniform_bucket_level_access = { value = true }
+force_destroy               = { value = false }
+labels                      = { object = { name = { field = "name", transform = "kebab" } } }
+
+[[providers.gcp.blocks.nested]]
+block = "versioning"
+when = { field = "versioning" }
+
+[providers.gcp.blocks.nested.args]
+enabled = { value = true }
+
+[providers.gcp.outputs]
+id  = { attr = "id", description = "Bucket name" }
+url = { attr = "url", description = "gs:// URL" }

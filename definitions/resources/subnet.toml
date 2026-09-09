@@ -4,7 +4,7 @@
 # either from being drawn inside a Virtual Network container (`via_parent = true`) or
 # from an explicit `network_membership` edge to one.
 
-schema_version = 1
+schema_version = 2
 
 [resource]
 type = "subnet"
@@ -100,3 +100,21 @@ actions = { map = "delegation", table = { web_serverfarms = ["Microsoft.Network/
 
 [providers.azure.outputs]
 id = { attr = "id", description = "Subnet id" }
+
+# ---------------------------------------------------------------- GCP
+[providers.gcp]
+status = "full"
+
+[[providers.gcp.blocks]]
+key = "main"
+resource = "google_compute_subnetwork"
+
+[providers.gcp.blocks.args]
+name                     = { field = "name", transform = "kebab" }
+ip_cidr_range            = { field = "cidr_block" }
+region                   = { var = "region" }
+network                  = { relation = "network_membership", attr = "id" }
+private_ip_google_access = { value = true }
+
+[providers.gcp.outputs]
+id = { attr = "id", description = "Subnetwork id" }

@@ -57,3 +57,20 @@ admin_enabled       = { value = false }
 
 [providers.azure.outputs]
 url = { attr = "login_server", description = "Registry login server" }
+
+# ---------------------------------------------------------------- GCP
+[providers.gcp]
+status = "full"
+
+[[providers.gcp.blocks]]
+key = "main"
+resource = "google_artifact_registry_repository"
+
+[providers.gcp.blocks.args]
+repository_id = { field = "name", transform = "kebab" }
+location      = { var = "region" }
+format        = { value = "DOCKER" }
+description   = { template = "{name} (managed by TerraTofu GUI)" }
+
+[providers.gcp.outputs]
+id = { attr = "id", description = "Repository id" }

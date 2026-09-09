@@ -102,3 +102,29 @@ lock_duration = { template = "PT{visibility_timeout_seconds}S" }
 [providers.azure.outputs]
 id   = { attr = "id", description = "Queue id" }
 name = { attr = "name", description = "Queue name" }
+
+# ---------------------------------------------------------------- GCP
+[providers.gcp]
+status = "full"
+notes = "A Pub/Sub topic with one pull subscription: publishers use the topic, consumers pull from the subscription."
+
+[[providers.gcp.blocks]]
+key = "main"
+resource = "google_pubsub_topic"
+
+[providers.gcp.blocks.args]
+name   = { field = "name", transform = "kebab" }
+labels = { object = { name = { field = "name", transform = "kebab" } } }
+
+[[providers.gcp.blocks]]
+key = "sub"
+resource = "google_pubsub_subscription"
+
+[providers.gcp.blocks.args]
+name                 = { template = "{name}-sub", transform = "kebab" }
+topic                = { self_block = "main", attr = "id" }
+ack_deadline_seconds = { field = "visibility_timeout_seconds" }
+
+[providers.gcp.outputs]
+topic        = { attr = "id", description = "Topic id (publish here)" }
+subscription = { block = "sub", attr = "id", description = "Pull subscription (consume here)" }

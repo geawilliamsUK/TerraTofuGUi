@@ -3,7 +3,7 @@
 # A hosted zone that DNS Records are drawn inside. AWS: aws_route53_zone.
 # Azure: azurerm_dns_zone (public).
 
-schema_version = 1
+schema_version = 2
 
 [resource]
 type = "dns_zone"
@@ -51,4 +51,20 @@ name                = { field = "domain" }
 resource_group_name = { ancestor = "resource_group", attr = "name" }
 
 [providers.azure.outputs]
+name_servers = { attr = "name_servers", description = "Name servers to delegate the domain to" }
+
+# ---------------------------------------------------------------- GCP
+[providers.gcp]
+status = "full"
+
+[[providers.gcp.blocks]]
+key = "main"
+resource = "google_dns_managed_zone"
+
+[providers.gcp.blocks.args]
+name       = { field = "name", transform = "kebab" }
+dns_name   = { func = "format", args = [ { value = "%s." }, { field = "domain" } ] }
+visibility = { value = "public" }
+
+[providers.gcp.outputs]
 name_servers = { attr = "name_servers", description = "Name servers to delegate the domain to" }

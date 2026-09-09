@@ -121,3 +121,21 @@ value = { item = "value" }
 a_fqdn     = { block = "a", attr = "fqdn", description = "Fully qualified record name" }
 cname_fqdn = { block = "cname", attr = "fqdn", description = "Fully qualified record name" }
 txt_fqdn   = { block = "txt", attr = "fqdn", description = "Fully qualified record name" }
+
+# ---------------------------------------------------------------- GCP
+[providers.gcp]
+status = "full"
+
+[[providers.gcp.blocks]]
+key = "main"
+resource = "google_dns_record_set"
+
+[providers.gcp.blocks.args]
+managed_zone = { relation = "attribute_reference", attr = "name" }
+name         = { func = "format", args = [ { value = "%s.%s" }, { field = "record_name" }, { relation = "attribute_reference", attr = "dns_name" } ] }
+type         = { field = "record_type" }
+ttl          = { field = "ttl" }
+rrdatas      = { field = "values" }
+
+[providers.gcp.outputs]
+name = { attr = "name", description = "Fully qualified record name" }

@@ -208,3 +208,57 @@ project, declare a Service Bus topic trigger on this topic and that subscription
 (the `AzureWebJobsServiceBus` connection app setting is not generated for topics: add
 the namespace connection string as an app setting or use identity-based connections).
 """
+
+# ---------------------------------------------------------------- GCP
+[providers.gcp]
+status = "partial"
+notes = "A Pub/Sub topic. Fan-out to linked queues becomes one subscription per queue on this topic (a Pub/Sub queue is a subscription); functions subscribe through their own trigger."
+
+[[providers.gcp.blocks]]
+key = "main"
+resource = "google_pubsub_topic"
+
+[providers.gcp.blocks.args]
+name   = { field = "name", transform = "kebab" }
+labels = { object = { name = { field = "name", transform = "kebab" } } }
+
+[[providers.gcp.blocks]]
+key = "sub_queue"
+resource = "google_pubsub_subscription"
+for_each_relation = "sends_to"
+for_each_target_type = "event_queue"
+
+[providers.gcp.blocks.args]
+name  = { template = "{name}-to-{target.slug}", transform = "kebab" }
+topic = { self_block = "main", attr = "id" }
+
+[[providers.gcp.blocks]]
+key = "sub_fn"
+resource = "google_pubsub_subscription"
+for_each_relation = "sends_to"
+for_each_target_type = "function"
+
+[providers.gcp.blocks.args]
+name  = { template = "{name}-to-{target.slug}", transform = "kebab" }
+topic = { self_block = "main", attr = "id" }
+
+[providers.gcp.outputs]
+id = { attr = "id", description = "Topic id (publish here)" }
+
+[[providers.gcp.manual_steps]]
+title = "Consumers of fanned-out queues pull from this topic's subscriptions"
+when = { relation = "sends_to", target_type = "event_queue" }
+body = """
+Pub/Sub has no topic-to-topic forwarding. Each linked queue gets a subscription on this
+topic (`<topic>-to-<queue>`); point that queue's consumers at it instead of the queue's
+own subscription, or forward messages with a small function.
+"""
+
+[[providers.gcp.manual_steps]]
+title = "Functions subscribe through their own trigger"
+when = { relation = "sends_to", target_type = "function" }
+body = """
+A Cloud Function is triggered by a topic through its own `event_trigger`. Link the
+function to this topic with 'Triggered by' on the function side (or add an
+`event_trigger` with `pubsub_topic` set to this topic by hand).
+"""

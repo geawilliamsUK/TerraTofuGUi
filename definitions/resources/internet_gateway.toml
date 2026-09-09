@@ -6,7 +6,7 @@
 # still point at it ("default route via internet"), which Azure renders as an explicit
 # `next_hop_type = "Internet"` route.
 
-schema_version = 1
+schema_version = 2
 
 [resource]
 type = "internet_gateway"
@@ -43,3 +43,8 @@ id = { attr = "id", description = "Internet gateway id" }
 [providers.azure]
 status = "logical"
 notes = "Azure virtual networks reach the internet without a gateway resource; nothing is generated."
+
+# ---------------------------------------------------------------- GCP
+[providers.gcp]
+status = "logical"
+notes = "GCP networks carry a default route to the internet; instances with an external address use it directly and private ones go through Cloud NAT. Nothing is generated."

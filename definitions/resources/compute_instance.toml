@@ -201,3 +201,63 @@ network_security_group_id = { relation = "attribute_reference", target_type = "s
 [providers.azure.outputs]
 id         = { attr = "id", description = "Virtual machine id" }
 private_ip = { attr = "private_ip_address", description = "Private IPv4 address" }
+
+# ---------------------------------------------------------------- GCP
+[providers.gcp]
+status = "full"
+
+[[providers.gcp.fields]]
+name = "image"
+label = "Boot image"
+type = "string"
+default = "ubuntu-os-cloud/ubuntu-2204-lts"
+description = "Image family or image, e.g. ubuntu-os-cloud/ubuntu-2204-lts or debian-cloud/debian-12."
+
+[[providers.gcp.fields]]
+name = "public_ip"
+label = "Public IP"
+type = "bool"
+default = false
+description = "Attach an ephemeral external address. Without one the instance reaches the internet only through Cloud NAT."
+
+[[providers.gcp.blocks]]
+key = "main"
+resource = "google_compute_instance"
+
+[providers.gcp.blocks.args]
+name         = { field = "name", transform = "kebab" }
+machine_type = { map = "size", table = { small = "e2-micro", medium = "e2-medium", large = "e2-standard-2" } }
+zone         = { var = "zone" }
+tags         = { relation = "attribute_reference", target_type = "security_group", block = "tag", attr = "output", wrap = "list", optional = true }
+labels       = { object = { name = { field = "name", transform = "kebab" } } }
+
+[[providers.gcp.blocks.nested]]
+block = "boot_disk"
+
+[[providers.gcp.blocks.nested.nested]]
+block = "initialize_params"
+
+[providers.gcp.blocks.nested.nested.args]
+image = { provider_field = "image", fallback = { value = "ubuntu-os-cloud/ubuntu-2204-lts" } }
+
+[[providers.gcp.blocks.nested]]
+block = "network_interface"
+
+[providers.gcp.blocks.nested.args]
+subnetwork = { relation = "network_membership", attr = "id" }
+
+[[providers.gcp.blocks.nested.nested]]
+block = "access_config"
+when = { provider_field = "public_ip" }
+
+[[providers.gcp.blocks.nested]]
+block = "service_account"
+when = { relation = "iam_binding" }
+
+[providers.gcp.blocks.nested.args]
+email  = { relation = "iam_binding", attr = "email" }
+scopes = { value = ["cloud-platform"] }
+
+[providers.gcp.outputs]
+id         = { attr = "id", description = "Instance id" }
+private_ip = { attr = "network_interface.0.network_ip", description = "Internal IPv4 address" }

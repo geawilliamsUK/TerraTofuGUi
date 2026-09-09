@@ -50,6 +50,9 @@
           "account_name": "ttgassetsnx0001",
           "container_name": "assets",
           "replication": "LRS"
+        },
+        "gcp": {
+          "bucket_name": "native-extras-assets-x7q2"
         }
       },
       "position": {

@@ -78,6 +78,7 @@ cardinality = "optional"
 [[relations]]
 kind = "logs_to"
 label = "Logs to"
+providers = ["aws", "azure"]
 targets = ["log_group"]
 cardinality = "optional"
 
@@ -276,3 +277,104 @@ network_security_group_id = { relation = "attribute_reference", target_type = "s
 [providers.azure.outputs]
 fqdn = { attr = "latest_revision_fqdn", description = "Latest revision FQDN" }
 
+
+# ---------------------------------------------------------------- GCP
+[providers.gcp]
+status = "full"
+file = "container"
+notes = "A Cloud Run (v2) service. Public ingress grants allUsers the invoker role; subnets become direct VPC egress."
+
+[[providers.gcp.blocks]]
+key = "main"
+resource = "google_cloud_run_v2_service"
+
+[providers.gcp.blocks.args]
+name                = { field = "name", transform = "kebab" }
+location            = { var = "region" }
+ingress             = { if = { field = "public" }, then = { value = "INGRESS_TRAFFIC_ALL" }, else = { value = "INGRESS_TRAFFIC_INTERNAL_ONLY" } }
+deletion_protection = { value = false }
+
+[[providers.gcp.blocks.nested]]
+block = "template"
+
+[providers.gcp.blocks.nested.args]
+service_account = { relation = "iam_binding", attr = "email" }
+
+[[providers.gcp.blocks.nested.nested]]
+block = "scaling"
+
+[providers.gcp.blocks.nested.nested.args]
+min_instance_count = { field = "replicas" }
+max_instance_count = { field = "replicas" }
+
+[[providers.gcp.blocks.nested.nested]]
+block = "containers"
+
+[providers.gcp.blocks.nested.nested.args]
+image = { field = "image" }
+
+[[providers.gcp.blocks.nested.nested.nested]]
+block = "ports"
+
+[providers.gcp.blocks.nested.nested.nested.args]
+container_port = { field = "port" }
+
+[[providers.gcp.blocks.nested.nested.nested]]
+block = "resources"
+
+[providers.gcp.blocks.nested.nested.nested.args]
+limits = { object = { cpu = { map = "size", table = { small = "1", medium = "1", large = "2", xlarge = "4" } }, memory = { map = "size", table = { small = "512Mi", medium = "1Gi", large = "2Gi", xlarge = "4Gi" } } } }
+
+[[providers.gcp.blocks.nested.nested.nested]]
+block = "env"
+when = { relation = "sends_to", target_type = "event_queue" }
+
+[providers.gcp.blocks.nested.nested.nested.args]
+name  = { value = "QUEUE_TOPIC" }
+value = { relation = "sends_to", target_type = "event_queue", attr = "id" }
+
+[[providers.gcp.blocks.nested.nested.nested]]
+block = "env"
+when = { relation = "sends_to", target_type = "topic" }
+
+[providers.gcp.blocks.nested.nested.nested.args]
+name  = { value = "TOPIC" }
+value = { relation = "sends_to", target_type = "topic", attr = "id" }
+
+[[providers.gcp.blocks.nested.nested]]
+block = "vpc_access"
+when = { relation = "network_membership" }
+
+[providers.gcp.blocks.nested.nested.args]
+egress = { value = "ALL_TRAFFIC" }
+
+[[providers.gcp.blocks.nested.nested.nested]]
+block = "network_interfaces"
+
+[providers.gcp.blocks.nested.nested.nested.args]
+subnetwork = { relation = "network_membership", attr = "id" }
+tags       = { relation = "attribute_reference", target_type = "security_group", block = "tag", attr = "output", wrap = "list", optional = true }
+
+[[providers.gcp.blocks]]
+key = "invoker"
+resource = "google_cloud_run_v2_service_iam_member"
+when = { field = "public" }
+
+[providers.gcp.blocks.args]
+name     = { self_block = "main", attr = "name" }
+location = { var = "region" }
+role     = { value = "roles/run.invoker" }
+member   = { value = "allUsers" }
+
+[[providers.gcp.blocks]]
+key = "publish"
+resource = "google_pubsub_topic_iam_member"
+for_each_relation = "sends_to"
+
+[providers.gcp.blocks.args]
+topic  = { target = "id" }
+role   = { value = "roles/pubsub.publisher" }
+member = { relation = "iam_binding", attr = "member" }
+
+[providers.gcp.outputs]
+uri = { attr = "uri", description = "Service URL" }

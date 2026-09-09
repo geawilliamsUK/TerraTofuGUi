@@ -114,6 +114,11 @@ fn policy(provider: &str) -> Policy {
             intra_network_default_allow: true,
             egress_default_allow: true,
         },
+        // Custom-mode VPC: implied deny-ingress / allow-egress; no internal allow.
+        "gcp" => Policy {
+            intra_network_default_allow: false,
+            egress_default_allow: true,
+        },
         _ => Policy {
             intra_network_default_allow: false,
             egress_default_allow: false,
@@ -161,8 +166,37 @@ fn vnet_of_subnet(p: &Project, cat: &Catalog, subnet: &str) -> Option<Id> {
 }
 
 /// Hops from a subnet to the internet: route table, then NAT (and its own subnet's
-/// route table + internet gateway) or the internet gateway directly.
-fn subnet_egress(p: &Project, cat: &Catalog, subnet: &str) -> Result<Vec<Id>, String> {
+/// route table + internet gateway) or the internet gateway directly. On GCP route
+/// tables are logical: Cloud NAT covers the whole network and the default internet
+/// route always exists, so the answer is the network's NAT (or its internet gateway).
+fn subnet_egress(p: &Project, cat: &Catalog, provider: &str, subnet: &str) -> Result<Vec<Id>, String> {
+    if provider == "gcp" {
+        let vnet = vnet_of_subnet(p, cat, subnet);
+        let in_vnet = |e: &EntityRef| {
+            p.ancestor_of_type(e.id, "virtual_network").map(|c| c.id.as_str()) == vnet.as_deref()
+                || relation_targets(p, cat, e, Relation::NetworkMembership)
+                    .iter()
+                    .any(|t| {
+                        p.entity(t).is_some_and(|x| x.resource_type == "virtual_network")
+                            && Some(t.as_str()) == vnet.as_deref()
+                            || vnet_of_subnet(p, cat, t) == vnet
+                    })
+        };
+        let ents = p.entities();
+        if let Some(nat) = ents
+            .iter()
+            .find(|e| e.resource_type == "nat_gateway" && in_vnet(e))
+        {
+            return Ok(vec![nat.id.to_string()]);
+        }
+        if let Some(igw) = ents
+            .iter()
+            .find(|e| e.resource_type == "internet_gateway" && in_vnet(e))
+        {
+            return Ok(vec![igw.id.to_string()]);
+        }
+        return Err("the network has no Cloud NAT (NAT Gateway) and no Internet Gateway".into());
+    }
     let tables: Vec<EntityRef> = p
         .entities()
         .into_iter()
@@ -185,7 +219,7 @@ fn subnet_egress(p: &Project, cat: &Catalog, subnet: &str) -> Result<Vec<Id>, St
                     // The NAT itself must sit in a subnet that routes to an internet gateway.
                     let nat_subnets = subnets_of(p, cat, &g);
                     for ns in nat_subnets {
-                        if let Ok(rest) = subnet_egress(p, cat, &ns) {
+                        if let Ok(rest) = subnet_egress(p, cat, provider, &ns) {
                             if rest
                                 .iter()
                                 .any(|h| p.entity(h).is_some_and(|x| x.resource_type == "internet_gateway"))
@@ -375,7 +409,7 @@ pub fn analyse(full: &Project, cat: &Catalog, provider: &str) -> Reach {
             let mut found: Option<Vec<Id>> = None;
             let mut last_err = String::new();
             for s in &subnets {
-                match subnet_egress(p, cat, s) {
+                match subnet_egress(p, cat, provider, s) {
                     Ok(hops) => {
                         let mut h = vec![s.clone()];
                         h.extend(hops);
@@ -456,10 +490,21 @@ fn exposure(
             .and_then(|x| x.provider_field("aws", "map_public_ip"))
             .and_then(|v| v.as_bool())
             .unwrap_or(false);
-        let igw = subnet_egress(p, cat, s)
-            .map(|h| h.len() == 2) // route table + internet gateway directly
+        let igw = subnet_egress(p, cat, provider, s)
+            .map(|h| {
+                // Directly through an internet gateway, not via a NAT.
+                h.iter()
+                    .any(|x| p.entity(x).is_some_and(|y| y.resource_type == "internet_gateway"))
+                    && !h
+                        .iter()
+                        .any(|x| p.entity(x).is_some_and(|y| y.resource_type == "nat_gateway"))
+            })
             .unwrap_or(false);
-        igw && (provider != "aws" || public_ip)
+        let gcp_public = provider == "gcp"
+            && e.provider_field("gcp", "public_ip")
+                .and_then(|v| v.as_bool())
+                .unwrap_or(false);
+        igw && (provider == "azure" || (provider == "aws" && public_ip) || gcp_public)
     });
     if !public_subnet {
         return None;

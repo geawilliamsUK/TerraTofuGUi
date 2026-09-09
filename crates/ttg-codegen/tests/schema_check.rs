@@ -25,6 +25,9 @@ fn check_nested(schema: &BlockSchema, n: &NestedBlockDef, at: &str, errs: &mut V
 }
 
 fn check_block(provider: &str, b: &BlockDef, at: &str, errs: &mut Vec<String>) {
+    if b.resource == "terraform_data" {
+        return; // built into Terraform / OpenTofu, not part of any provider schema
+    }
     let idx = ttg_schema::index();
     let Some(schema) = idx.resource(provider, &b.resource) else {
         errs.push(format!(

@@ -98,3 +98,29 @@ allow_forwarded_traffic      = { value = true }
 
 [providers.azure.outputs]
 id = { attr = "id", description = "Peering id (local to remote)" }
+
+# ---------------------------------------------------------------- GCP
+[providers.gcp]
+status = "full"
+notes = "VPC Network Peering, one resource per direction. Subnet routes are exchanged automatically."
+
+[[providers.gcp.blocks]]
+key = "main"
+resource = "google_compute_network_peering"
+
+[providers.gcp.blocks.args]
+name         = { template = "{name}-out", transform = "kebab" }
+network      = { ancestor = "virtual_network", attr = "id" }
+peer_network = { relation = "attribute_reference", attr = "id" }
+
+[[providers.gcp.blocks]]
+key = "back"
+resource = "google_compute_network_peering"
+
+[providers.gcp.blocks.args]
+name         = { template = "{name}-back", transform = "kebab" }
+network      = { relation = "attribute_reference", attr = "id" }
+peer_network = { ancestor = "virtual_network", attr = "id" }
+
+[providers.gcp.outputs]
+id = { attr = "id", description = "Peering id (local to remote)" }

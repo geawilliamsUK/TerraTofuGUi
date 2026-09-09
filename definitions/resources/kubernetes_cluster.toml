@@ -5,7 +5,7 @@
 # Azure: AKS — azurerm_kubernetes_cluster with a system-assigned identity and an
 #      autoscaling default node pool in the first linked subnet (Azure CNI).
 
-schema_version = 1
+schema_version = 2
 
 [resource]
 type = "kubernetes_cluster"
@@ -202,3 +202,52 @@ network_plugin = { value = "azure" }
 [providers.azure.outputs]
 fqdn        = { attr = "fqdn", description = "Kubernetes API host name" }
 kube_config = { attr = "kube_config_raw", description = "Raw kubeconfig for the cluster", sensitive = true }
+
+# ---------------------------------------------------------------- GCP
+[providers.gcp]
+status = "full"
+notes = "A regional GKE Standard cluster with one autoscaling node pool on the linked subnet's network."
+
+[[providers.gcp.blocks]]
+key = "main"
+resource = "google_container_cluster"
+
+[providers.gcp.blocks.args]
+name                     = { field = "name", transform = "kebab" }
+location                 = { var = "region" }
+network                  = { relation = "network_membership", ancestor = "virtual_network", attr = "id" }
+subnetwork               = { relation = "network_membership", attr = "id" }
+remove_default_node_pool = { value = true }
+initial_node_count       = { value = 1 }
+deletion_protection      = { value = false }
+networking_mode          = { value = "VPC_NATIVE" }
+
+[[providers.gcp.blocks.nested]]
+block = "ip_allocation_policy"
+
+[[providers.gcp.blocks]]
+key = "nodes"
+resource = "google_container_node_pool"
+
+[providers.gcp.blocks.args]
+name               = { template = "{name}-nodes", transform = "kebab" }
+cluster            = { self_block = "main", attr = "id" }
+location           = { var = "region" }
+initial_node_count = { field = "node_count" }
+
+[[providers.gcp.blocks.nested]]
+block = "autoscaling"
+
+[providers.gcp.blocks.nested.args]
+min_node_count = { field = "min_nodes" }
+max_node_count = { field = "max_nodes" }
+
+[[providers.gcp.blocks.nested]]
+block = "node_config"
+
+[providers.gcp.blocks.nested.args]
+machine_type = { map = "node_size", table = { small = "e2-medium", medium = "e2-standard-4", large = "e2-standard-8" } }
+oauth_scopes = { value = ["https://www.googleapis.com/auth/cloud-platform"] }
+
+[providers.gcp.outputs]
+endpoint = { attr = "endpoint", description = "Cluster API endpoint" }
