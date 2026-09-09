@@ -773,3 +773,66 @@ fn views_round_trip_and_reach_incoming() {
     assert_eq!(ttg_codegen::reach::listening_port(&db), Some(5432));
     assert!(!ttg_codegen::reach::initiates("relational_database"));
 }
+
+#[test]
+fn extra_arguments_and_native_resources() {
+    let mut cat = Catalog::builtin();
+    let p = example("native-extras.ttg.json");
+    cat.ensure_native_types(&p);
+    assert!(cat.resource("native:aws:aws_s3_bucket_policy").is_some());
+    let g = generate(&p, &cat, "aws", Tool::OpenTofu).expect("aws generates");
+    let norm = |s: &str| s.split_whitespace().collect::<Vec<_>>().join(" ");
+    let st = norm(&g.files["storage.tf"]);
+    assert!(st.contains("force_destroy = true"), "{st}");
+    let nat = norm(&g.files["native.tf"]);
+    assert!(
+        nat.contains("resource \"aws_s3_bucket_policy\" \"assets_policy\""),
+        "{nat}"
+    );
+    assert!(nat.contains("bucket = aws_s3_bucket.assets.id"), "{nat}");
+    assert!(nat.contains("metric_transformation {"), "{nat}");
+    assert!(
+        nat.contains("log_group_name = aws_cloudwatch_log_group.app_logs.name"),
+        "{nat}"
+    );
+    // Azure keeps the curated extras and leaves the AWS-only natives out.
+    let g = generate(&p, &cat, "azure", Tool::Terraform).expect("azure generates");
+    assert!(norm(&g.files["storage.tf"]).contains("min_tls_version = \"TLS1_2\""));
+    assert!(!g.files.contains_key("native.tf"));
+    // Schema validation of extras.
+    let mut bad = p.clone();
+    let m = bad.extra_args_mut("obj-assets", "aws", "main").unwrap();
+    m.insert("no_such_argument".into(), serde_json::json!(1));
+    m.insert("force_destroy".into(), serde_json::json!(1));
+    m.insert("arn".into(), serde_json::json!("x"));
+    let d = ttg_codegen::diagnostics::run(&bad, &cat, "aws");
+    let msgs: Vec<&str> = d
+        .iter()
+        .filter(|x| x.code == ttg_codegen::Code::Extra)
+        .map(|x| x.message.as_str())
+        .collect();
+    assert!(
+        msgs.iter().any(|m| m.contains("no argument 'no_such_argument'")),
+        "{msgs:?}"
+    );
+    assert!(
+        msgs.iter().any(|m| m.contains("force_destroy expects a bool")),
+        "{msgs:?}"
+    );
+    assert!(msgs.iter().any(|m| m.contains("arn is read-only")), "{msgs:?}");
+    // A native resource missing a required argument is an error.
+    let mut bad = p.clone();
+    bad.extra_args_mut("nat-policy", "aws", "main")
+        .unwrap()
+        .remove("policy");
+    let d = ttg_codegen::diagnostics::run(&bad, &cat, "aws");
+    assert!(
+        d.iter()
+            .any(|x| x.severity == Severity::Error && x.message.contains("requires: policy")),
+        "{d:?}"
+    );
+    // Extras round-trip through the file.
+    let text = ttg_core::project::to_string(&p).unwrap();
+    let back = ttg_core::project::load_str(&text).unwrap();
+    assert_eq!(back.nodes["nat-policy"].extra, p.nodes["nat-policy"].extra);
+}

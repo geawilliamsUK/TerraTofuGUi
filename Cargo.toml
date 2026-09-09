@@ -3,6 +3,7 @@ resolver = "2"
 members = [
     "crates/ttg-core",
     "crates/ttg-catalog",
+    "crates/ttg-schema",
     "crates/ttg-codegen",
     "crates/ttg-cli",
     "crates/ttg-app",

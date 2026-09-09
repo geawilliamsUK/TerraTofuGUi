@@ -443,6 +443,7 @@ fn entity_inspector(app: &mut TtgApp, ui: &mut Ui, id: &Id) {
                     for f in m.fields.iter().filter(|f| f.field_type == FieldType::StructList) {
                         struct_list_editor(app, ui, id, Some(&pid), f);
                     }
+                    crate::schema_editor::extra_args_editor(app, ui, id, &pid, m, ttg_catalog::Catalog::is_native(&type_id));
                     for s in &m.manual_steps {
                         ui.label(RichText::new(format!("• {}", s.title)).small().color(Color32::from_rgb(200, 120, 20)));
                     }

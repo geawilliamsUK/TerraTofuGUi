@@ -1,0 +1,192 @@
+# Abstract type: Alarm  (schema_version 2)
+#
+# A metric alarm on one linked resource: fires when a metric crosses a threshold for
+# a number of periods, optionally notifying a Topic.
+#   AWS:   aws_cloudwatch_metric_alarm (namespace / metric name / dimension follow the
+#          linked resource type).
+#   Azure: azurerm_monitor_metric_alert scoped to the linked resource.
+# Metric names differ per provider, so each provider mapping carries its own metric field
+# with a sensible default (CPU); the threshold and timing are abstract.
+
+schema_version = 2
+
+[resource]
+type = "alarm"
+category = "monitoring"
+display_name = "Alarm"
+description = "A metric alarm on a linked resource (CPU by default). Link the resource it watches and, optionally, a Topic to notify."
+kind = "node"
+allowed_parents = ["resource_group", "virtual_network"]
+network_agnostic = true
+icon = "ALM"
+
+[[fields]]
+name = "threshold"
+label = "Threshold"
+type = "int"
+required = true
+default = 80
+
+[[fields]]
+name = "comparison"
+label = "Fires when metric is"
+type = "enum"
+required = true
+options = ["greater_than", "less_than"]
+default = "greater_than"
+
+[[fields]]
+name = "period_seconds"
+label = "Period (s)"
+type = "enum"
+required = true
+options = ["60", "300", "900"]
+default = "300"
+
+[[fields]]
+name = "evaluation_periods"
+label = "Consecutive periods"
+type = "int"
+required = true
+default = 2
+
+[[relations]]
+kind = "attribute_reference"
+label = "Watches"
+targets = ["compute_instance", "relational_database", "function", "event_queue", "load_balancer", "container_app"]
+cardinality = "one"
+
+[[relations]]
+kind = "sends_to"
+label = "Notifies topic"
+targets = ["topic"]
+cardinality = "optional"
+
+# ---------------------------------------------------------------- AWS
+[providers.aws]
+status = "full"
+
+[[providers.aws.fields]]
+name = "metric_name"
+label = "CloudWatch metric"
+type = "string"
+required = true
+default = "CPUUtilization"
+description = "Metric name in the resource's namespace, e.g. CPUUtilization (EC2, RDS), Errors / Duration (Lambda), ApproximateNumberOfMessagesVisible (SQS), TargetResponseTime (ALB)."
+
+[[providers.aws.fields]]
+name = "statistic"
+label = "Statistic"
+type = "enum"
+required = true
+options = ["Average", "Sum", "Maximum", "Minimum"]
+default = "Average"
+
+[[providers.aws.blocks]]
+key = "main"
+resource = "aws_cloudwatch_metric_alarm"
+
+[providers.aws.blocks.args]
+alarm_name          = { field = "name", transform = "kebab" }
+comparison_operator = { map = "comparison", table = { greater_than = "GreaterThanThreshold", less_than = "LessThanThreshold" } }
+evaluation_periods  = { field = "evaluation_periods" }
+metric_name         = { provider_field = "metric_name" }
+statistic           = { provider_field = "statistic" }
+period              = { map = "period_seconds", table = { "60" = 60, "300" = 300, "900" = 900 } }
+threshold           = { field = "threshold" }
+alarm_description   = { template = "{name}" }
+alarm_actions       = { relation = "sends_to", target_type = "topic", attr = "arn", wrap = "list" }
+tags                = { object = { Name = { field = "name" } } }
+
+# Namespace and dimension follow the type of the watched resource.
+[providers.aws.blocks.args.namespace]
+if = { relation = "attribute_reference", target_type = "compute_instance" }
+then = { value = "AWS/EC2" }
+else = { if = { relation = "attribute_reference", target_type = "relational_database" }, then = { value = "AWS/RDS" }, else = { if = { relation = "attribute_reference", target_type = "function" }, then = { value = "AWS/Lambda" }, else = { if = { relation = "attribute_reference", target_type = "event_queue" }, then = { value = "AWS/SQS" }, else = { if = { relation = "attribute_reference", target_type = "container_app" }, then = { value = "AWS/ECS" }, else = { value = "AWS/ApplicationELB" } } } } }
+
+[providers.aws.blocks.args.dimensions]
+if = { relation = "attribute_reference", target_type = "compute_instance" }
+then = { object = { InstanceId = { relation = "attribute_reference", target_type = "compute_instance", attr = "id" } } }
+else = { if = { relation = "attribute_reference", target_type = "relational_database" }, then = { object = { DBInstanceIdentifier = { relation = "attribute_reference", target_type = "relational_database", attr = "identifier" } } }, else = { if = { relation = "attribute_reference", target_type = "function" }, then = { object = { FunctionName = { relation = "attribute_reference", target_type = "function", attr = "function_name" } } }, else = { if = { relation = "attribute_reference", target_type = "event_queue" }, then = { object = { QueueName = { relation = "attribute_reference", target_type = "event_queue", attr = "name" } } }, else = { if = { relation = "attribute_reference", target_type = "container_app" }, then = { object = { ClusterName = { relation = "attribute_reference", target_type = "container_app", block = "cluster", attr = "name" }, ServiceName = { relation = "attribute_reference", target_type = "container_app", attr = "name" } } }, else = { object = { LoadBalancer = { relation = "attribute_reference", target_type = "load_balancer", attr = "arn_suffix" } } } } } } }
+
+[providers.aws.outputs]
+arn = { attr = "arn", description = "Alarm ARN" }
+
+# ---------------------------------------------------------------- Azure
+[providers.azure]
+status = "partial"
+
+[[providers.azure.fields]]
+name = "metric_namespace"
+label = "Metric namespace"
+type = "string"
+required = true
+default = "Microsoft.Compute/virtualMachines"
+description = "e.g. Microsoft.Compute/virtualMachines, Microsoft.DBforPostgreSQL/flexibleServers, Microsoft.Web/sites, Microsoft.ServiceBus/namespaces, Microsoft.App/containerApps."
+
+[[providers.azure.fields]]
+name = "metric_name"
+label = "Metric name"
+type = "string"
+required = true
+default = "Percentage CPU"
+description = "e.g. Percentage CPU, cpu_percent (PostgreSQL), FunctionExecutionCount, ActiveMessages, Replicas."
+
+[[providers.azure.fields]]
+name = "aggregation"
+label = "Aggregation"
+type = "enum"
+required = true
+options = ["Average", "Total", "Maximum", "Minimum", "Count"]
+default = "Average"
+
+[[providers.azure.blocks]]
+key = "main"
+resource = "azurerm_monitor_metric_alert"
+
+[providers.azure.blocks.args]
+name                = { field = "name", transform = "kebab" }
+resource_group_name = { ancestor = "resource_group", attr = "name" }
+description         = { template = "{name}" }
+frequency           = { value = "PT1M" }
+window_size         = { map = "period_seconds", table = { "60" = "PT1M", "300" = "PT5M", "900" = "PT15M" } }
+severity            = { value = 2 }
+tags                = { object = { Name = { field = "name" } } }
+
+# Scope: the watched resource's primary block; databases and queues have several.
+[providers.azure.blocks.args.scopes]
+relation = "attribute_reference"
+target_type = "compute_instance"
+attr = "id"
+wrap = "list"
+fallback = { relation = "attribute_reference", target_type = "relational_database", block = "pg", attr = "id", wrap = "list", fallback = { relation = "attribute_reference", target_type = "relational_database", block = "my", attr = "id", wrap = "list", fallback = { relation = "attribute_reference", target_type = "function", attr = "id", wrap = "list", fallback = { relation = "attribute_reference", target_type = "event_queue", block = "ns", attr = "id", wrap = "list", fallback = { relation = "attribute_reference", target_type = "event_queue", ancestor = "servicebus_namespace", attr = "id", wrap = "list", fallback = { relation = "attribute_reference", target_type = "container_app", attr = "id", wrap = "list", fallback = { relation = "attribute_reference", target_type = "load_balancer", attr = "id", wrap = "list" } } } } } } }
+
+[[providers.azure.blocks.nested]]
+block = "criteria"
+
+[providers.azure.blocks.nested.args]
+metric_namespace = { provider_field = "metric_namespace" }
+metric_name      = { provider_field = "metric_name" }
+aggregation      = { provider_field = "aggregation" }
+operator         = { map = "comparison", table = { greater_than = "GreaterThan", less_than = "LessThan" } }
+threshold        = { field = "threshold" }
+
+[providers.azure.outputs]
+id = { attr = "id", description = "Metric alert id" }
+
+[[providers.azure.manual_steps]]
+title = "Notifications need an action group"
+when = { relation = "sends_to" }
+body = """
+Azure Monitor notifies through an *action group*, not a Service Bus topic. Create an
+`azurerm_monitor_action_group` (email, webhook, or a Service Bus action to the linked
+topic) and add an `action { action_group_id = … }` block to the alert.
+"""
+
+[[providers.azure.manual_steps]]
+title = "Evaluation periods are not directly configurable"
+body = """
+Azure metric alerts evaluate one window; "consecutive periods" has no direct equivalent.
+Use a larger window size, or a dynamic-threshold alert with `number_of_evaluation_periods`
+if you need N-of-M behaviour.
+"""

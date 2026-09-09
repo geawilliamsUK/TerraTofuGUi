@@ -47,6 +47,8 @@ pub enum Code {
     Redundant,
     /// Parity: an entity that is not part of this provider's layer.
     Layer,
+    /// Extra / native arguments checked against the provider schema.
+    Extra,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -607,6 +609,7 @@ pub fn run(full: &Project, cat: &Catalog, provider: &str) -> Vec<Diagnostic> {
         }
     }
     network_checks(p, cat, provider, &mut out);
+    extra_checks(p, cat, provider, &mut out);
 
     for e in &p.edges {
         if is_redundant_edge(p, cat, e) {
@@ -1180,5 +1183,127 @@ fn network_checks(p: &Project, cat: &Catalog, provider: &str, out: &mut Vec<Diag
                 );
             }
         }
+    }
+}
+
+/// Extra provider arguments (and every argument of a native resource) against the
+/// provider schema: unknown names, read-only attributes, type mismatches, missing
+/// required arguments on native resources, and overrides of mapping-set arguments.
+fn extra_checks(p: &Project, cat: &Catalog, provider: &str, out: &mut Vec<Diagnostic>) {
+    let idx = ttg_schema::index();
+    for e in p.entities() {
+        let native = ttg_catalog::load::Catalog::is_native(e.resource_type);
+        let Some(m) = cat.mapping(e.resource_type, provider) else {
+            continue;
+        };
+        for b in &m.blocks {
+            let extra = e.extra_args(provider, &b.key);
+            let Some(schema) = idx.resource(provider, &b.resource) else {
+                if extra.is_some_and(|x| !x.is_empty()) {
+                    out.push(Diagnostic {
+                        entity: Some(e.id.to_string()),
+                        severity: Severity::Info,
+                        code: Code::Extra,
+                        message: format!(
+                            "{}: no schema for {} in the bundled index, extra arguments are not checked",
+                            b.key, b.resource
+                        ),
+                    });
+                }
+                continue;
+            };
+            if let Some(extra) = extra {
+                for (k, v) in extra {
+                    if let Some(a) = schema.attributes.get(k) {
+                        if a.read_only() {
+                            out.push(Diagnostic {
+                                entity: Some(e.id.to_string()),
+                                severity: Severity::Error,
+                                code: Code::Extra,
+                                message: format!("{}.{k} is read-only on {}", b.resource, provider),
+                            });
+                        } else if !json_matches(a.kind(), v) {
+                            out.push(Diagnostic {
+                                entity: Some(e.id.to_string()),
+                                severity: Severity::Error,
+                                code: Code::Extra,
+                                message: format!("{}.{k} expects a {} value", b.resource, a.kind().label()),
+                            });
+                        }
+                    } else if let Some(n) = schema.blocks.get(k) {
+                        let ok = match v {
+                            serde_json::Value::Object(_) => true,
+                            serde_json::Value::Array(items) => items.iter().all(|i| i.is_object()),
+                            _ => false,
+                        };
+                        if !ok {
+                            out.push(Diagnostic {
+                                entity: Some(e.id.to_string()),
+                                severity: Severity::Error,
+                                code: Code::Extra,
+                                message: format!(
+                                    "{}.{k} is a nested block ({}): give an object or a list of objects",
+                                    b.resource,
+                                    n.nesting()
+                                ),
+                            });
+                        }
+                    } else if !["depends_on", "count", "for_each", "provider", "lifecycle"]
+                        .contains(&k.as_str())
+                    {
+                        out.push(Diagnostic {
+                            entity: Some(e.id.to_string()),
+                            severity: Severity::Error,
+                            code: Code::Extra,
+                            message: format!("{} has no argument '{k}' on {}", b.resource, provider),
+                        });
+                    }
+                    if b.args.contains_key(k) || b.nested.iter().any(|n| &n.block == k) {
+                        out.push(Diagnostic {
+                            entity: Some(e.id.to_string()),
+                            severity: Severity::Info,
+                            code: Code::Extra,
+                            message: format!(
+                                "extra argument {k} overrides the value the {} mapping sets",
+                                b.resource
+                            ),
+                        });
+                    }
+                }
+            }
+            if native {
+                let have = extra.cloned().unwrap_or_default();
+                let missing: Vec<&str> = schema
+                    .required()
+                    .into_iter()
+                    .filter(|r| !have.contains_key(*r))
+                    .collect();
+                if !missing.is_empty() {
+                    out.push(Diagnostic {
+                        entity: Some(e.id.to_string()),
+                        severity: Severity::Error,
+                        code: Code::Extra,
+                        message: format!("{} requires: {}", b.resource, missing.join(", ")),
+                    });
+                }
+            }
+        }
+    }
+}
+
+fn json_matches(kind: ttg_schema::TypeKind, v: &serde_json::Value) -> bool {
+    use ttg_schema::TypeKind as K;
+    if v.as_object()
+        .is_some_and(|o| o.contains_key("$ref") || o.contains_key("$raw"))
+    {
+        return true;
+    }
+    match kind {
+        K::String => v.is_string(),
+        K::Number => v.is_number() || v.is_string(),
+        K::Bool => v.is_boolean() || v.is_string(),
+        K::List | K::Set => v.is_array(),
+        K::Map | K::Object => v.is_object(),
+        K::Dynamic => true,
     }
 }

@@ -84,6 +84,11 @@ enum Cmd {
         #[arg(long)]
         from: Option<String>,
     },
+    /// The bundled / refreshed provider schema index (resources, arguments, nested blocks).
+    Schema {
+        #[command(subcommand)]
+        cmd: SchemaCmd,
+    },
     /// Re-lay out a project file automatically (columns by dependency, containers fitted).
     Tidy {
         project: PathBuf,
@@ -91,6 +96,30 @@ enum Cmd {
         #[arg(long)]
         out: Option<PathBuf>,
     },
+}
+
+#[derive(Subcommand)]
+enum SchemaCmd {
+    /// Show which index is in use and what it covers.
+    Info,
+    /// Regenerate the index from the installed tool (`<tool> providers schema -json`).
+    /// Writes to the per-user data directory by default; `--out` writes elsewhere
+    /// (use `--out crates/ttg-schema/data/index.json.gz` to refresh the bundled copy).
+    Refresh {
+        #[arg(long)]
+        tool: Option<ToolArg>,
+        #[arg(long)]
+        out: Option<PathBuf>,
+    },
+    /// Search resource types on a provider.
+    Search {
+        provider: String,
+        query: String,
+        #[arg(long, default_value_t = 20)]
+        limit: usize,
+    },
+    /// Print the arguments and nested blocks of one resource type.
+    Show { provider: String, resource: String },
 }
 
 fn load_catalog(dir: &Option<PathBuf>) -> Result<Catalog> {
@@ -102,7 +131,7 @@ fn load_catalog(dir: &Option<PathBuf>) -> Result<Catalog> {
 
 fn main() -> Result<()> {
     let cli = Cli::parse();
-    let cat = load_catalog(&cli.definitions)?;
+    let mut cat = load_catalog(&cli.definitions)?;
     match cli.cmd {
         Cmd::Catalog => {
             println!("providers:");
@@ -130,8 +159,108 @@ fn main() -> Result<()> {
                 );
             }
         }
+        Cmd::Schema { cmd } => match cmd {
+            SchemaCmd::Info => {
+                let idx = ttg_schema::index();
+                println!("index: {} ({})", ttg_schema::index_source(), idx.generated);
+                for (id, p) in &idx.providers {
+                    println!(
+                        "  {id:<6} {} {}  {} resources",
+                        p.source,
+                        p.version,
+                        p.resources.len()
+                    );
+                }
+                if let Some(p) = ttg_schema::user_index_path() {
+                    println!(
+                        "user copy: {}{}",
+                        p.display(),
+                        if p.is_file() { "" } else { " (absent)" }
+                    );
+                }
+            }
+            SchemaCmd::Refresh { tool, out } => {
+                let tool = tool.map(Into::into).unwrap_or(Tool::OpenTofu);
+                let providers: Vec<(String, String)> = cat
+                    .providers
+                    .values()
+                    .map(|p| {
+                        (
+                            format!("{}/{}", p.provider.source_namespace, p.provider.source_name),
+                            p.provider.version_constraint.clone(),
+                        )
+                    })
+                    .collect();
+                let ids: std::collections::BTreeMap<String, String> = cat
+                    .providers
+                    .iter()
+                    .map(|(id, p)| (p.provider.source_name.clone(), id.clone()))
+                    .collect();
+                eprintln!(
+                    "running {} providers schema -json (downloads providers on first use)...",
+                    ttg_codegen::tool::Profile::new(tool).binary()
+                );
+                let raw = ttg_codegen::validate::dump_provider_schemas(tool, &providers)
+                    .map_err(|e| anyhow::anyhow!(e))?;
+                let (json, lock) = raw.split_once("\n//LOCK\n").unwrap_or((raw.as_str(), ""));
+                let mut idx =
+                    ttg_schema::compact_from_tool_json(json, &ids).map_err(|e| anyhow::anyhow!(e))?;
+                for (id, p) in idx.providers.iter_mut() {
+                    let name = &cat.providers[id].provider.source_name;
+                    if let Some(pos) = lock.find(&format!("/{name}\"")) {
+                        if let Some(v) = lock[pos..]
+                            .split("version")
+                            .nth(1)
+                            .and_then(|s| s.split('"').nth(1))
+                        {
+                            p.version = v.to_string();
+                        }
+                    }
+                }
+                let dest = match out {
+                    Some(o) => o,
+                    None => {
+                        ttg_schema::user_index_path().ok_or_else(|| anyhow::anyhow!("no data directory"))?
+                    }
+                };
+                if let Some(d) = dest.parent() {
+                    std::fs::create_dir_all(d)?;
+                }
+                std::fs::write(&dest, idx.to_gzip().map_err(|e| anyhow::anyhow!(e))?)?;
+                println!("wrote {} ({} resources)", dest.display(), idx.resource_count());
+                for (id, p) in &idx.providers {
+                    println!(
+                        "  {id:<6} {} {}  {} resources",
+                        p.source,
+                        p.version,
+                        p.resources.len()
+                    );
+                }
+            }
+            SchemaCmd::Search {
+                provider,
+                query,
+                limit,
+            } => {
+                let idx = ttg_schema::index();
+                let p = idx
+                    .provider(&provider)
+                    .ok_or_else(|| anyhow::anyhow!("unknown provider {provider}"))?;
+                for r in p.search(&query, limit) {
+                    println!("{r}");
+                }
+            }
+            SchemaCmd::Show { provider, resource } => {
+                let idx = ttg_schema::index();
+                let b = idx
+                    .resource(&provider, &resource)
+                    .ok_or_else(|| anyhow::anyhow!("no {resource} on {provider}"))?;
+                print_block(b, 0);
+            }
+        },
         Cmd::Tidy { project, out } => {
             let mut p = ttg_core::project::load(&project)?;
+            cat.ensure_native_types(&p);
             let size = |p: &ttg_core::Project, id: &str| -> ttg_core::Size {
                 if let Some(c) = p.containers.get(id) {
                     return c.size;
@@ -152,6 +281,7 @@ fn main() -> Result<()> {
             from,
         } => {
             let p = ttg_core::project::load(&project)?;
+            cat.ensure_native_types(&p);
             let provider = provider.unwrap_or(p.settings.target_provider.clone());
             let reach = ttg_codegen::reach::analyse(&p, &cat, &provider);
             let name = |id: &str| p.entity(id).map(|e| e.name.to_string()).unwrap_or(id.to_string());
@@ -210,6 +340,7 @@ fn main() -> Result<()> {
         }
         Cmd::Check { project, provider } => {
             let p = ttg_core::project::load(&project)?;
+            cat.ensure_native_types(&p);
             let provider = provider.unwrap_or(p.settings.target_provider.clone());
             let diags = ttg_codegen::diagnostics::run(&p, &cat, &provider);
             for d in &diags {
@@ -229,6 +360,7 @@ fn main() -> Result<()> {
             validate,
         } => {
             let p = ttg_core::project::load(&project)?;
+            cat.ensure_native_types(&p);
             let provider = provider.unwrap_or(p.settings.target_provider.clone());
             let tool: Tool = tool.map(Into::into).unwrap_or(p.settings.tool);
             let rep = ttg_codegen::export(&p, &cat, &provider, tool, &out)?;
@@ -249,6 +381,7 @@ fn main() -> Result<()> {
             validate,
         } => {
             let p = ttg_core::project::load(&project)?;
+            cat.ensure_native_types(&p);
             let tool: Tool = tool.map(Into::into).unwrap_or(p.settings.tool);
             std::fs::create_dir_all(&out)?;
             let results = ttg_codegen::export_all(&p, &cat, tool, &out);
@@ -303,5 +436,32 @@ fn print_report(rep: &ttg_codegen::ExportReport) {
             "  {} manual step(s) — see MANUAL_STEPS.md",
             rep.manual_steps.len()
         );
+    }
+}
+
+fn print_block(b: &ttg_schema::BlockSchema, indent: usize) {
+    let pad = "  ".repeat(indent);
+    for (k, a) in &b.attributes {
+        let flag = if a.required() {
+            "required"
+        } else if a.read_only() {
+            "read-only"
+        } else {
+            "optional"
+        };
+        println!(
+            "{pad}{k:<32} {:<10} {flag}  {}",
+            a.kind().label(),
+            a.description()
+        );
+    }
+    for (k, n) in &b.blocks {
+        println!(
+            "{pad}{k} {{  # nested block, {}{}",
+            n.nesting(),
+            if n.required() { ", required" } else { "" }
+        );
+        print_block(n.block(), indent + 1);
+        println!("{pad}}}");
     }
 }

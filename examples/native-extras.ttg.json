@@ -1,0 +1,171 @@
+{
+  "schema_version": 1,
+  "name": "native-extras",
+  "settings": {
+    "tool": "opentofu",
+    "target_provider": "aws",
+    "provider_settings": {
+      "aws": {
+        "region": "eu-west-2"
+      },
+      "azure": {
+        "location": "uksouth"
+      }
+    },
+    "backend": null,
+    "state_encryption": false
+  },
+  "containers": {
+    "rg-nx000001": {
+      "id": "rg-nx000001",
+      "name": "platform",
+      "container_type": "resource_group",
+      "config": {},
+      "provider_config": {},
+      "position": {
+        "x": 40,
+        "y": 40
+      },
+      "size": {
+        "w": 900,
+        "h": 420
+      },
+      "parent": null,
+      "manual": false
+    }
+  },
+  "nodes": {
+    "obj-assets": {
+      "id": "obj-assets",
+      "name": "assets",
+      "resource_type": "object_storage",
+      "config": {
+        "versioning": true
+      },
+      "provider_config": {
+        "aws": {
+          "bucket_name": "ttg-assets-nx0001"
+        },
+        "azure": {
+          "account_name": "ttgassetsnx0001",
+          "container_name": "assets",
+          "replication": "LRS"
+        }
+      },
+      "position": {
+        "x": 100,
+        "y": 120
+      },
+      "parent": "rg-nx000001",
+      "manual": false,
+      "extra": {
+        "aws": {
+          "main": {
+            "force_destroy": true,
+            "object_lock_enabled": false
+          }
+        },
+        "azure": {
+          "main": {
+            "min_tls_version": "TLS1_2",
+            "allow_nested_items_to_be_public": false
+          }
+        }
+      }
+    },
+    "nat-policy": {
+      "id": "nat-policy",
+      "name": "assets policy",
+      "resource_type": "native:aws:aws_s3_bucket_policy",
+      "config": {},
+      "provider_config": {},
+      "position": {
+        "x": 420,
+        "y": 120
+      },
+      "parent": "rg-nx000001",
+      "manual": false,
+      "extra": {
+        "aws": {
+          "main": {
+            "bucket": {
+              "$ref": {
+                "entity": "assets",
+                "attr": "id"
+              }
+            },
+            "policy": {
+              "$raw": "jsonencode({ Version = \"2012-10-17\", Statement = [{ Sid = \"DenyInsecure\", Effect = \"Deny\", Principal = \"*\", Action = \"s3:*\", Resource = [aws_s3_bucket.assets.arn, \"${aws_s3_bucket.assets.arn}/*\"], Condition = { Bool = { \"aws:SecureTransport\" = \"false\" } } }] })"
+            }
+          }
+        }
+      }
+    },
+    "log-app": {
+      "id": "log-app",
+      "name": "app logs",
+      "resource_type": "log_group",
+      "config": {
+        "retention_days": "90"
+      },
+      "provider_config": {},
+      "position": {
+        "x": 100,
+        "y": 280
+      },
+      "parent": "rg-nx000001",
+      "manual": false,
+      "extra": {
+        "aws": {
+          "main": {
+            "skip_destroy": true
+          }
+        }
+      }
+    },
+    "nat-metric": {
+      "id": "nat-metric",
+      "name": "error count",
+      "resource_type": "native:aws:aws_cloudwatch_log_metric_filter",
+      "config": {},
+      "provider_config": {},
+      "position": {
+        "x": 420,
+        "y": 280
+      },
+      "parent": "rg-nx000001",
+      "manual": false,
+      "extra": {
+        "aws": {
+          "main": {
+            "name": "error-count",
+            "pattern": "ERROR",
+            "log_group_name": {
+              "$ref": {
+                "entity": "app logs",
+                "attr": "name"
+              }
+            },
+            "metric_transformation": {
+              "name": "ErrorCount",
+              "namespace": "App",
+              "value": "1"
+            }
+          }
+        }
+      }
+    }
+  },
+  "edges": [
+    {
+      "source": "nat-policy",
+      "target": "obj-assets",
+      "relation": "depends_on"
+    },
+    {
+      "source": "nat-metric",
+      "target": "log-app",
+      "relation": "depends_on"
+    }
+  ]
+}

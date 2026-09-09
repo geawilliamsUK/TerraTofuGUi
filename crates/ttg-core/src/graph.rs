@@ -89,6 +89,7 @@ mod tests {
             parent: None,
             manual: false,
             providers: Vec::new(),
+            extra: Default::default(),
         }
     }
 

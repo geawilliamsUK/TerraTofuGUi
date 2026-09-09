@@ -1,0 +1,318 @@
+{
+  "schema_version": 1,
+  "name": "ops",
+  "settings": {
+    "tool": "opentofu",
+    "target_provider": "aws",
+    "provider_settings": {
+      "aws": {
+        "region": "eu-west-2"
+      },
+      "azure": {
+        "location": "uksouth"
+      }
+    },
+    "backend": null,
+    "state_encryption": false
+  },
+  "containers": {
+    "rg-ops": {
+      "id": "rg-ops",
+      "name": "ops",
+      "container_type": "resource_group",
+      "config": {},
+      "provider_config": {},
+      "position": {
+        "x": 40,
+        "y": 40
+      },
+      "size": {
+        "w": 1500,
+        "h": 760
+      },
+      "parent": null,
+      "manual": false
+    },
+    "vnet-ops": {
+      "id": "vnet-ops",
+      "name": "core",
+      "container_type": "virtual_network",
+      "config": {
+        "cidr_block": "10.20.0.0/16"
+      },
+      "provider_config": {},
+      "position": {
+        "x": 80,
+        "y": 100
+      },
+      "size": {
+        "w": 900,
+        "h": 420
+      },
+      "parent": "rg-ops",
+      "manual": false
+    }
+  },
+  "nodes": {
+    "sub-app": {
+      "id": "sub-app",
+      "name": "apps",
+      "resource_type": "subnet",
+      "config": {
+        "cidr_block": "10.20.1.0/24"
+      },
+      "provider_config": {
+        "aws": {
+          "availability_zone": "eu-west-2a"
+        },
+        "azure": {
+          "delegation": "app_environments"
+        }
+      },
+      "position": {
+        "x": 120,
+        "y": 160
+      },
+      "parent": "vnet-ops",
+      "manual": false
+    },
+    "sub-pe": {
+      "id": "sub-pe",
+      "name": "endpoints",
+      "resource_type": "subnet",
+      "config": {
+        "cidr_block": "10.20.2.0/24"
+      },
+      "provider_config": {
+        "aws": {
+          "availability_zone": "eu-west-2b"
+        }
+      },
+      "position": {
+        "x": 120,
+        "y": 300
+      },
+      "parent": "vnet-ops",
+      "manual": false
+    },
+    "sg-app": {
+      "id": "sg-app",
+      "name": "app sg",
+      "resource_type": "security_group",
+      "config": {
+        "rules": [
+          {
+            "direction": "egress",
+            "protocol": "all",
+            "from_port": 0,
+            "to_port": 0,
+            "cidr": "0.0.0.0/0",
+            "source_group": "",
+            "name": "allow-egress"
+          },
+          {
+            "direction": "ingress",
+            "protocol": "tcp",
+            "from_port": 443,
+            "to_port": 443,
+            "cidr": "10.20.0.0/16",
+            "source_group": "",
+            "name": "https-internal"
+          }
+        ]
+      },
+      "provider_config": {},
+      "position": {
+        "x": 420,
+        "y": 160
+      },
+      "parent": "vnet-ops",
+      "manual": false
+    },
+    "app-api": {
+      "id": "app-api",
+      "name": "api",
+      "resource_type": "container_app",
+      "config": {
+        "image": "public.ecr.aws/nginx/nginx:latest",
+        "size": "small",
+        "port": 80,
+        "replicas": 2,
+        "public": false
+      },
+      "provider_config": {},
+      "position": {
+        "x": 650,
+        "y": 160
+      },
+      "parent": "vnet-ops",
+      "manual": false
+    },
+    "pe-store": {
+      "id": "pe-store",
+      "name": "store endpoint",
+      "resource_type": "private_endpoint",
+      "config": {
+        "subresource": "blob"
+      },
+      "provider_config": {
+        "aws": {
+          "service": "s3"
+        }
+      },
+      "position": {
+        "x": 420,
+        "y": 300
+      },
+      "parent": "vnet-ops",
+      "manual": false
+    },
+    "obj-store": {
+      "id": "obj-store",
+      "name": "store",
+      "resource_type": "object_storage",
+      "config": {
+        "versioning": false
+      },
+      "provider_config": {
+        "aws": {
+          "bucket_name": "ttg-ops-store-x91"
+        },
+        "azure": {
+          "account_name": "ttgopsstorex91",
+          "container_name": "data",
+          "replication": "LRS"
+        }
+      },
+      "position": {
+        "x": 1050,
+        "y": 300
+      },
+      "parent": "rg-ops",
+      "manual": false
+    },
+    "role-app": {
+      "id": "role-app",
+      "name": "app role",
+      "resource_type": "iam_role",
+      "config": {
+        "trusted_service": "serverless",
+        "permissions": "none"
+      },
+      "provider_config": {},
+      "position": {
+        "x": 1050,
+        "y": 160
+      },
+      "parent": "rg-ops",
+      "manual": false
+    },
+    "log-app": {
+      "id": "log-app",
+      "name": "app logs",
+      "resource_type": "log_group",
+      "config": {
+        "retention_days": "30"
+      },
+      "provider_config": {},
+      "position": {
+        "x": 1050,
+        "y": 440
+      },
+      "parent": "rg-ops",
+      "manual": false
+    },
+    "tp-alerts": {
+      "id": "tp-alerts",
+      "name": "alerts",
+      "resource_type": "topic",
+      "config": {},
+      "provider_config": {
+        "azure": {
+          "namespace_name": "ops-alerts-x91"
+        }
+      },
+      "position": {
+        "x": 1300,
+        "y": 160
+      },
+      "parent": "rg-ops",
+      "manual": false
+    },
+    "alm-cpu": {
+      "id": "alm-cpu",
+      "name": "api cpu high",
+      "resource_type": "alarm",
+      "config": {
+        "threshold": 80,
+        "comparison": "greater_than",
+        "period_seconds": "300",
+        "evaluation_periods": 2
+      },
+      "provider_config": {
+        "aws": {
+          "metric_name": "CPUUtilization",
+          "statistic": "Average"
+        },
+        "azure": {
+          "metric_namespace": "Microsoft.App/containerApps",
+          "metric_name": "UsageNanoCores",
+          "aggregation": "Average"
+        }
+      },
+      "position": {
+        "x": 1300,
+        "y": 300
+      },
+      "parent": "rg-ops",
+      "manual": false
+    }
+  },
+  "edges": [
+    {
+      "source": "app-api",
+      "target": "role-app",
+      "relation": "iam_binding"
+    },
+    {
+      "source": "app-api",
+      "target": "sub-app",
+      "relation": "network_membership"
+    },
+    {
+      "source": "app-api",
+      "target": "sg-app",
+      "relation": "attribute_reference"
+    },
+    {
+      "source": "app-api",
+      "target": "log-app",
+      "relation": "logs_to"
+    },
+    {
+      "source": "pe-store",
+      "target": "sub-pe",
+      "relation": "network_membership"
+    },
+    {
+      "source": "pe-store",
+      "target": "obj-store",
+      "relation": "attribute_reference"
+    },
+    {
+      "source": "pe-store",
+      "target": "sg-app",
+      "relation": "attachment"
+    },
+    {
+      "source": "alm-cpu",
+      "target": "app-api",
+      "relation": "attribute_reference"
+    },
+    {
+      "source": "alm-cpu",
+      "target": "tp-alerts",
+      "relation": "sends_to"
+    }
+  ]
+}

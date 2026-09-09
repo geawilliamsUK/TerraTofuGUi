@@ -13,13 +13,15 @@ provider — never a single "portable" HCL file, because no such thing can exist
 
 ![TerraTofu GUI with the three-tier example open](docs/screenshot.png)
 
-Status: **Phase 2 catalog** — 26 abstract types mapped for AWS and Azure: networking
-(Virtual Network, Subnet, Internet Gateway, NAT Gateway, Route Table, Security Group),
-compute (Compute Instance, Autoscaling Group, Load Balancer), data (Relational Database,
-NoSQL Table, Cache, Object Storage), serverless (Function, Event Queue, Topic, and the
-Azure-only Storage Queue), containers
-(Container Registry, Kubernetes Cluster), DNS (Zone, Record), secrets (Key Vault, Secret),
-monitoring (Log Group), IAM Role and the Resource Group container. Gaps a provider cannot
+Status: **Phase 2 catalog** — 30 curated abstract types mapped for AWS and Azure, plus
+every native provider resource through the bundled schema index (see "Beyond the
+curated catalog"). Curated: networking (Virtual Network, Subnet, Internet Gateway, NAT
+Gateway, Route Table, Security Group, Private Endpoint), compute (Compute Instance,
+Autoscaling Group, Load Balancer), data (Relational Database, NoSQL Table, Cache, Object
+Storage), serverless (Function, Event Queue, Topic, the Azure-only Storage Queue and
+Service Bus Namespace), containers (Container App,
+Container Registry, Kubernetes Cluster), DNS (Zone, Record), secrets (Key Vault, Secret),
+monitoring (Log Group, Alarm), IAM Role and the Resource Group container. Gaps a provider cannot
 express (an Azure database's network access, for example) are reported as manual steps,
 never papered over. Every example passes `tofu validate` for both providers and both
 tools in CI.
@@ -144,6 +146,40 @@ OpenTofu installed, so a definition change that produces invalid HCL fails the b
 ![The job pipeline after Edit ▸ Arrange ▸ Tidy layout](docs/screenshot-tidy.png)
 
 ![Provider layers: the fan-out example shown as AWS, with the Azure-only Service Bus Namespace dimmed and its contents exported as plain SQS/SNS resources](docs/screenshot-layers.png)
+
+## Beyond the curated catalog: every provider resource and argument
+
+The curated types are the *portable* part of the catalog. For full provider scope the app
+bundles a compact index of the real provider schemas (every resource, argument and nested
+block of the AWS and Azure providers the catalog pins, about half a megabyte compressed)
+and uses it in three ways:
+
+- **Advanced arguments on curated resources.** Every provider mapping section in the
+  inspector has an *Advanced arguments* editor: search any argument the provider
+  accepts, add it, and it is merged into the generated block (an argument the mapping
+  already sets is overridden by yours, with a note). Typed editors for strings, numbers
+  and booleans; JSON for lists, maps and nested blocks; a *ref* button to point a string
+  at another resource's attribute. Unknown names, read-only attributes and type
+  mismatches are errors before validate ever runs.
+- **Native provider resources.** Type two or more letters in the palette search and a
+  *native* section lists matching resources from the schema: all 1,500+ AWS and 1,100+
+  Azure types. Drop one on the canvas and its inspector is generated from the schema,
+  with required arguments flagged. Native resources are provider-only by nature, so they
+  tag themselves to that provider's layer and the other provider's export leaves them
+  out. Link them to other resources with *Depends on* and reference attributes with the
+  ref button (`{"$ref": {"entity": "assets", "attr": "id"}}` in the file), or use
+  `{"$raw": "<hcl>"}` for an expression.
+- **A test that keeps curated definitions honest.** Every resource type and argument a
+  curated mapping writes is checked against the schema in CI, so a provider rename fails
+  a test instead of a user's export.
+
+`ttg schema info` shows the index in use, `ttg schema search aws "sqs queue"` and
+`ttg schema show azure azurerm_storage_queue` explore it, and `ttg schema refresh`
+regenerates it from the installed tool into your data directory, where it takes
+precedence over the bundled copy (`--out crates/ttg-schema/data/index.json.gz` refreshes
+the bundled one). See `examples/native-extras.ttg.json`.
+
+![A native resource with its schema-driven inspector](docs/screenshot-native.png)
 
 ## Driving the app from an agent (MCP)
 

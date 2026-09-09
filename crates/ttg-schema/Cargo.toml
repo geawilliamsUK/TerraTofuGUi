@@ -1,0 +1,11 @@
+[package]
+name = "ttg-schema"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Compact index of the Terraform provider schemas (resources, arguments, nested blocks) for TerraTofu GUI"
+
+[dependencies]
+serde.workspace = true
+serde_json.workspace = true
+flate2 = "1"

@@ -98,6 +98,15 @@ impl Default for Size {
     }
 }
 
+/// Extra provider arguments set directly on a generated block, keyed by argument name.
+/// Values are JSON: scalars, lists, objects (maps / nested blocks), `{"$ref": {"entity":
+/// "<id or name>", "attr": "id"}}` for a traversal to another resource, or `{"$raw":
+/// "<hcl>"}` for a raw expression. Validated against the provider schema.
+pub type ExtraArgs = serde_json::Map<String, serde_json::Value>;
+
+/// provider id -> block key -> extra arguments.
+pub type Extras = BTreeMap<ProviderId, BTreeMap<String, ExtraArgs>>;
+
 /// A leaf resource on the canvas.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Node {
@@ -122,6 +131,9 @@ pub struct Node {
     /// the abstract graph minus entities not tagged for it; see `Project::layer`.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub providers: Vec<ProviderId>,
+    /// Extra provider arguments beyond what the mapping sets (schema-validated).
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub extra: Extras,
 }
 
 /// A resource that can hold other resources (VPC, Resource Group, Project).
@@ -145,6 +157,9 @@ pub struct Container {
     /// Providers this container is part of (empty = every provider).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub providers: Vec<ProviderId>,
+    /// Extra provider arguments beyond what the mapping sets (schema-validated).
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub extra: Extras,
 }
 
 /// Kinds of relationship an edge can express. Direction is always
@@ -438,6 +453,7 @@ pub struct EntityRef<'a> {
     pub manual: bool,
     pub is_container: bool,
     pub position: Position,
+    pub extra: &'a Extras,
 }
 
 impl<'a> EntityRef<'a> {
@@ -490,6 +506,7 @@ impl Project {
                 manual: n.manual,
                 is_container: false,
                 position: n.position,
+                extra: &n.extra,
             });
         }
         self.containers.get(id).map(|c| EntityRef {
@@ -502,6 +519,7 @@ impl Project {
             manual: c.manual,
             is_container: true,
             position: c.position,
+            extra: &c.extra,
         })
     }
 
@@ -776,6 +794,48 @@ pub fn slugify(name: &str) -> String {
     s
 }
 
+impl EntityRef<'_> {
+    /// Extra arguments for one generated block on a provider.
+    pub fn extra_args(&self, provider: &str, block: &str) -> Option<&ExtraArgs> {
+        self.extra.get(provider)?.get(block)
+    }
+}
+
+impl Project {
+    /// Mutable extra arguments for one block of an entity (created on demand).
+    pub fn extra_args_mut(&mut self, id: &str, provider: &str, block: &str) -> Option<&mut ExtraArgs> {
+        let extras = if let Some(n) = self.nodes.get_mut(id) {
+            &mut n.extra
+        } else if let Some(c) = self.containers.get_mut(id) {
+            &mut c.extra
+        } else {
+            return None;
+        };
+        Some(
+            extras
+                .entry(provider.to_string())
+                .or_default()
+                .entry(block.to_string())
+                .or_default(),
+        )
+    }
+
+    /// Drop empty extra-argument maps so files stay tidy.
+    pub fn prune_extras(&mut self, id: &str) {
+        let extras = if let Some(n) = self.nodes.get_mut(id) {
+            &mut n.extra
+        } else if let Some(c) = self.containers.get_mut(id) {
+            &mut c.extra
+        } else {
+            return;
+        };
+        for m in extras.values_mut() {
+            m.retain(|_, a| !a.is_empty());
+        }
+        extras.retain(|_, m| !m.is_empty());
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -805,6 +865,7 @@ mod tests {
                     parent: None,
                     manual: false,
                     providers: Vec::new(),
+                    extra: Default::default(),
                 },
             );
         }

@@ -204,6 +204,7 @@ impl TtgApp {
     }
 
     /// Resolve a flow endpoint from an id, an entity name or a group label.
+    #[cfg_attr(not(feature = "mcp"), allow(dead_code))]
     pub fn resolve_end(&self, key: &str) -> Option<FlowEnd> {
         if self.project.entity(key).is_some() {
             return Some(FlowEnd::Entity {

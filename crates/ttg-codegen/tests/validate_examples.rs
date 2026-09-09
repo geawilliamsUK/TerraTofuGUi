@@ -34,12 +34,13 @@ fn every_example_validates() {
         eprintln!("skipping: no tofu/terraform binary found");
         return;
     };
-    let cat = Catalog::builtin();
+    let mut cat = Catalog::builtin();
     let root = std::env::temp_dir().join(format!("ttg-validate-{}", std::process::id()));
     let mut ran = 0;
     let mut failures = Vec::new();
     for example in examples() {
         let project = ttg_core::project::load(&example).unwrap();
+        cat.ensure_native_types(&project);
         let stem = example
             .file_name()
             .unwrap()

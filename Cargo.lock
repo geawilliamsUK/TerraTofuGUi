@@ -3054,6 +3054,7 @@ dependencies = [
  "ttg-catalog",
  "ttg-codegen",
  "ttg-core",
+ "ttg-schema",
  "uuid",
 ]
 
@@ -3075,9 +3076,11 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "clap",
+ "serde_json",
  "ttg-catalog",
  "ttg-codegen",
  "ttg-core",
+ "ttg-schema",
 ]
 
 [[package]]
@@ -3088,10 +3091,12 @@ dependencies = [
  "indexmap",
  "petgraph",
  "serde",
+ "serde_json",
  "thiserror 2.0.20",
  "toml",
  "ttg-catalog",
  "ttg-core",
+ "ttg-schema",
  "zip",
 ]
 
@@ -3105,6 +3110,15 @@ dependencies = [
  "serde_json",
  "thiserror 2.0.20",
  "uuid",
+]
+
+[[package]]
+name = "ttg-schema"
+version = "0.1.0"
+dependencies = [
+ "flate2",
+ "serde",
+ "serde_json",
 ]
 
 [[package]]

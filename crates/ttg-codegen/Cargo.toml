@@ -8,6 +8,8 @@ description = "Terraform / OpenTofu HCL generator for TerraTofu GUI"
 [dependencies]
 ttg-core = { path = "../ttg-core" }
 ttg-catalog = { path = "../ttg-catalog" }
+ttg-schema = { path = "../ttg-schema" }
+serde_json.workspace = true
 serde.workspace = true
 thiserror.workspace = true
 petgraph.workspace = true

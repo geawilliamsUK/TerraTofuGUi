@@ -117,6 +117,8 @@ pub struct TtgApp {
     pub selected_annotation: Option<crate::annotations::Annotation>,
     /// "Data flow from …" waiting for its target.
     pub flow_from: Option<ttg_core::FlowEnd>,
+    /// Buffers and popups of the schema-driven argument editor.
+    pub schema_editor: crate::schema_editor::EditorState,
     /// Abstract or concrete (provider-specific) labelling of the canvas.
     pub display: crate::display::DisplayMode,
     pub icons: crate::display::Icons,
@@ -181,6 +183,7 @@ impl TtgApp {
             view_edit: None,
             selected_annotation: None,
             flow_from: None,
+            schema_editor: Default::default(),
             display: crate::display::DisplayMode::Abstract,
             icons: crate::display::Icons::new(defs_dir.as_ref()),
             #[cfg(feature = "mcp")]
@@ -248,6 +251,7 @@ impl TtgApp {
         if let Some(p) = open {
             match ttg_core::project::load(&p) {
                 Ok(project) => {
+                    app.catalog.ensure_native_types(&project);
                     app.project = project;
                     app.path = Some(p.clone());
                     app.fit_requested = true;
@@ -468,6 +472,10 @@ impl TtgApp {
     /// Create an entity of the given abstract type at a world position, parenting it to
     /// the container under that position when the catalog allows it.
     pub fn add_entity(&mut self, type_id: &str, world: Pos2) -> Option<Id> {
+        if Catalog::is_native(type_id) && !self.catalog.ensure_native(type_id) {
+            self.status = format!("unknown native resource {type_id}");
+            return None;
+        }
         let def = self.catalog.resource(type_id)?.clone();
         let before = self.snapshot();
         let id = self.project.fresh_id(clipboard::prefix(type_id));
@@ -511,6 +519,7 @@ impl TtgApp {
                         parent,
                         manual: false,
                         providers: Vec::new(),
+                        extra: Default::default(),
                     },
                 );
             }
@@ -528,6 +537,7 @@ impl TtgApp {
                         parent,
                         manual: false,
                         providers: Vec::new(),
+                        extra: Default::default(),
                     },
                 );
             }
@@ -592,6 +602,11 @@ impl TtgApp {
             .and_then(|t| serde_json::from_str::<Clip>(&t).ok())
             .or_else(|| self.clip.clone());
         let Some(clip) = clip else { return };
+        for n in &clip.nodes {
+            if Catalog::is_native(&n.resource_type) {
+                self.catalog.ensure_native(&n.resource_type);
+            }
+        }
         let before = self.snapshot();
         let ids = clipboard::paste(&mut self.project, &clip, (40, 40));
         self.finish(before);
@@ -735,6 +750,7 @@ impl TtgApp {
     pub fn open_path(&mut self, p: PathBuf) {
         match ttg_core::project::load(&p) {
             Ok(project) => {
+                self.catalog.ensure_native_types(&project);
                 self.project = project;
                 self.ensure_provider_settings();
                 self.path = Some(p.clone());

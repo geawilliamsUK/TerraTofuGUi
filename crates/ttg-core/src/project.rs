@@ -74,6 +74,7 @@ mod tests {
                 parent: None,
                 manual: false,
                 providers: Vec::new(),
+                extra: Default::default(),
             },
         );
         let s = to_string(&p).unwrap();

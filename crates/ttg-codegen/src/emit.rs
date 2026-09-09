@@ -667,18 +667,158 @@ impl<'a> Emitter<'a> {
         let mut builder = Block::builder(kind)
             .add_label(b.resource.as_str())
             .add_label(local);
+        let extra = e.extra_args(self.provider, &b.key).cloned().unwrap_or_default();
         for (k, src) in &b.args {
+            if extra.contains_key(k) {
+                continue; // an extra argument overrides what the mapping sets
+            }
             let at = format!("{} \"{}\" / {}.{}", e.resource_type, e.name, b.resource, k);
             if let Some(expr) = self.resolve(e, m, src, &at, item)? {
                 builder = builder.add_attribute((k.as_str(), expr));
             }
         }
         for n in &b.nested {
+            if extra.contains_key(&n.block) {
+                continue;
+            }
             for nb in self.build_nested(e, m, n, &b.resource, item)? {
                 builder = builder.add_block(nb);
             }
         }
+        if !extra.is_empty() {
+            let schema = ttg_schema::index().resource(self.provider, &b.resource).cloned();
+            let at = format!(
+                "{} \"{}\" / {} extra arguments",
+                e.resource_type, e.name, b.resource
+            );
+            builder = self.apply_extras(builder, &extra, schema.as_ref(), &at)?;
+        }
         Ok(builder.build())
+    }
+
+    /// Merge extra arguments into a block: nested blocks per the schema, everything else
+    /// as attributes.
+    fn apply_extras(
+        &mut self,
+        mut builder: hcl::structure::BlockBuilder,
+        extra: &ttg_core::ExtraArgs,
+        schema: Option<&ttg_schema::BlockSchema>,
+        at: &str,
+    ) -> Result<hcl::structure::BlockBuilder, GenError> {
+        for (k, v) in extra {
+            let nested = schema.and_then(|s| s.blocks.get(k));
+            match (nested, v) {
+                (Some(ns), serde_json::Value::Object(o)) => {
+                    builder = builder.add_block(self.json_block(k, o, Some(ns.block()), at)?);
+                }
+                (Some(ns), serde_json::Value::Array(items)) => {
+                    for it in items {
+                        if let serde_json::Value::Object(o) = it {
+                            builder = builder.add_block(self.json_block(k, o, Some(ns.block()), at)?);
+                        } else {
+                            return Err(GenError::Emit(format!(
+                                "{at}: nested block '{k}' items must be objects"
+                            )));
+                        }
+                    }
+                }
+                (_, v) => {
+                    let expr = self.json_expr(v, &format!("{at}.{k}"))?;
+                    builder = builder.add_attribute((k.as_str(), expr));
+                }
+            }
+        }
+        Ok(builder)
+    }
+
+    fn json_block(
+        &mut self,
+        name: &str,
+        o: &serde_json::Map<String, serde_json::Value>,
+        schema: Option<&ttg_schema::BlockSchema>,
+        at: &str,
+    ) -> Result<Block, GenError> {
+        let mut b = Block::builder(name);
+        for (k, v) in o {
+            let nested = schema.and_then(|s| s.blocks.get(k));
+            match (nested, v) {
+                (Some(ns), serde_json::Value::Object(inner)) => {
+                    b = b.add_block(self.json_block(k, inner, Some(ns.block()), at)?);
+                }
+                (Some(ns), serde_json::Value::Array(items)) => {
+                    for it in items {
+                        if let serde_json::Value::Object(inner) = it {
+                            b = b.add_block(self.json_block(k, inner, Some(ns.block()), at)?);
+                        }
+                    }
+                }
+                (_, v) => {
+                    let expr = self.json_expr(v, &format!("{at}.{name}.{k}"))?;
+                    b = b.add_attribute((k.as_str(), expr));
+                }
+            }
+        }
+        Ok(b.build())
+    }
+
+    /// JSON -> HCL expression, honouring `{"$ref": …}` and `{"$raw": …}`.
+    fn json_expr(&mut self, v: &serde_json::Value, at: &str) -> Result<Expression, GenError> {
+        Ok(match v {
+            serde_json::Value::Null => Expression::Null,
+            serde_json::Value::Bool(b) => Expression::Bool(*b),
+            serde_json::Value::Number(n) => {
+                if let Some(i) = n.as_i64() {
+                    Expression::Number(Number::from(i))
+                } else {
+                    Number::from_f64(n.as_f64().unwrap_or(0.0))
+                        .map(Expression::Number)
+                        .unwrap_or(Expression::Null)
+                }
+            }
+            serde_json::Value::String(s) => Expression::String(s.clone()),
+            serde_json::Value::Array(items) => {
+                let mut out = Vec::new();
+                for it in items {
+                    out.push(self.json_expr(it, at)?);
+                }
+                Expression::Array(out)
+            }
+            serde_json::Value::Object(o) => {
+                if let Some(raw) = o.get("$raw").and_then(|r| r.as_str()) {
+                    return Ok(raw_expr(raw));
+                }
+                if let Some(r) = o.get("$ref") {
+                    let key = r
+                        .get("entity")
+                        .and_then(|x| x.as_str())
+                        .ok_or_else(|| GenError::Emit(format!("{at}: $ref needs an \"entity\"")))?;
+                    let attr = r.get("attr").and_then(|x| x.as_str()).unwrap_or("id");
+                    let block = r.get("block").and_then(|x| x.as_str());
+                    let id = self
+                        .p
+                        .entity(key)
+                        .map(|e| e.id.to_string())
+                        .or_else(|| {
+                            self.p
+                                .entities()
+                                .iter()
+                                .find(|e| e.name.eq_ignore_ascii_case(key))
+                                .map(|e| e.id.to_string())
+                        })
+                        .ok_or_else(|| GenError::Emit(format!("{at}: $ref to unknown resource \"{key}\"")))?;
+                    return self.reference(&id, block, attr, at)?.ok_or_else(|| {
+                        GenError::Emit(format!(
+                            "{at}: $ref target \"{key}\" produces nothing for this provider"
+                        ))
+                    });
+                }
+                let mut obj = Object::new();
+                for (k, v) in o {
+                    obj.insert(object_key(k), self.json_expr(v, &format!("{at}.{k}"))?);
+                }
+                Expression::Object(obj)
+            }
+        })
     }
 
     /// A nested block definition yields zero or more blocks (more than one when it has

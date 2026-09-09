@@ -53,6 +53,7 @@ impl TtgApp {
             "providers": if let Some(n) = self.project.nodes.get(id) { n.providers.clone() } else { self.project.containers[id].providers.clone() },
             "config": e.config,
             "provider_config": e.provider_config,
+            "extra": e.extra,
         })
     }
 
@@ -123,9 +124,62 @@ impl TtgApp {
                 provider_config,
                 manual,
                 providers,
+                extra,
+                extra_provider,
+                extra_block,
             } => {
                 self.check_providers(providers.as_deref())?;
                 let r = self.agent_entity_update(&entity, name, config, provider_config, manual)?;
+                if let Some(extra) = extra {
+                    let id = self.resolve(&entity)?;
+                    let prov = extra_provider.unwrap_or(self.project.settings.target_provider.clone());
+                    let type_id = self.project.entity(&id).unwrap().resource_type.to_string();
+                    let m = self
+                        .catalog
+                        .mapping(&type_id, &prov)
+                        .ok_or_else(|| format!("{type_id} has no {prov} mapping"))?;
+                    let block = extra_block.unwrap_or_else(|| {
+                        m.blocks
+                            .iter()
+                            .find(|b| b.key == "main")
+                            .or(m.blocks.first())
+                            .map(|b| b.key.clone())
+                            .unwrap_or("main".into())
+                    });
+                    if !m.blocks.iter().any(|b| b.key == block) {
+                        return Err(format!(
+                            "{type_id}/{prov} has no block \"{block}\" (blocks: {})",
+                            m.blocks
+                                .iter()
+                                .map(|b| b.key.clone())
+                                .collect::<Vec<_>>()
+                                .join(", ")
+                        ));
+                    }
+                    let before = self.snapshot();
+                    if let Some(map) = self.project.extra_args_mut(&id, &prov, &block) {
+                        for (k, v) in extra {
+                            if v.is_null() {
+                                map.remove(&k);
+                            } else {
+                                map.insert(k, v);
+                            }
+                        }
+                    }
+                    self.project.prune_extras(&id);
+                    self.finish(before);
+                    self.flash(&id);
+                    self.refresh_diagnostics();
+                    let mine: Vec<String> = self
+                        .diagnostics
+                        .iter()
+                        .filter(|d| d.entity.as_deref() == Some(id.as_str()))
+                        .map(|d| format!("{:?}: {}", d.severity, d.message))
+                        .collect();
+                    return Ok(
+                        json!({"status": "updated", "entity": self.entity_json(&id), "diagnostics": mine}),
+                    );
+                }
                 if let Some(tags) = providers {
                     let id = self.resolve(&entity)?;
                     let before = self.snapshot();
@@ -316,6 +370,38 @@ impl TtgApp {
                 self.active_view = None;
                 self.set_filter(f);
                 Ok(json!({"status": "view applied", "hidden": self.hidden_count()}))
+            }
+            AgentCommand::SchemaSearch { provider, query } => {
+                let prov = provider.unwrap_or(self.project.settings.target_provider.clone());
+                let ps = ttg_schema::index()
+                    .provider(&prov)
+                    .ok_or_else(|| format!("no schema for provider \"{prov}\""))?;
+                let hits: Vec<J> = ps
+                    .search(&query, 40)
+                    .into_iter()
+                    .map(|r| json!({"resource": r, "type_id": format!("{}{prov}:{r}", ttg_catalog::load::NATIVE_PREFIX)}))
+                    .collect();
+                Ok(json!({"provider": prov, "version": ps.version, "hits": hits}))
+            }
+            AgentCommand::SchemaShow { provider, resource } => {
+                let prov = provider.unwrap_or(self.project.settings.target_provider.clone());
+                let b = ttg_schema::index()
+                    .resource(&prov, &resource)
+                    .ok_or_else(|| format!("no {resource} on {prov}"))?;
+                fn block_json(b: &ttg_schema::BlockSchema) -> J {
+                    json!({
+                        "attributes": b.attributes.iter().map(|(k, a)| (k.clone(), json!({
+                            "type": a.kind().label(), "required": a.required(), "read_only": a.read_only(),
+                            "sensitive": a.sensitive(), "description": a.description(),
+                        }))).collect::<Map<_, _>>(),
+                        "blocks": b.blocks.iter().map(|(k, n)| (k.clone(), json!({
+                            "nesting": n.nesting(), "required": n.required(), "block": block_json(n.block()),
+                        }))).collect::<Map<_, _>>(),
+                    })
+                }
+                Ok(
+                    json!({"provider": prov, "resource": resource, "required": b.required(), "schema": block_json(b)}),
+                )
             }
             AgentCommand::ViewActivate { name } => {
                 if name.eq_ignore_ascii_case("all") {

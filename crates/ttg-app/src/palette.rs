@@ -20,6 +20,51 @@ pub fn show(app: &mut TtgApp, ui: &mut Ui) {
     let concrete = app.concrete_mode();
 
     egui::ScrollArea::vertical().show(ui, |ui| {
+        // Native provider resources: searchable, from the bundled schema index.
+        if filter.len() >= 2 {
+            if let Some(ps) = ttg_schema::index().provider(&provider) {
+                let hits = ps.search(&filter, 25);
+                if !hits.is_empty() {
+                    let pname = app.provider_display_name();
+                    egui::CollapsingHeader::new(format!("{pname} resources (native, {})", hits.len()))
+                        .default_open(true)
+                        .show(ui, |ui| {
+                            ui.label(
+                                RichText::new("Any provider resource, with every argument from the schema. Not portable: it belongs to this provider only.")
+                                    .small()
+                                    .color(Color32::from_gray(110)),
+                            );
+                            for h in hits {
+                                let tid = format!("{}{provider}:{h}", ttg_catalog::load::NATIVE_PREFIX);
+                                let id = ui.id().with(("pal-native", &tid));
+                                let resp = ui
+                                    .dnd_drag_source(id, PaletteItem { type_id: tid.clone() }, |ui| {
+                                        egui::Frame::new()
+                                            .fill(Color32::from_gray(252))
+                                            .stroke(egui::Stroke::new(1.0, Color32::from_gray(215)))
+                                            .corner_radius(4)
+                                            .inner_margin(6)
+                                            .show(ui, |ui| {
+                                                ui.set_min_width(ui.available_width());
+                                                ui.horizontal(|ui| {
+                                                    ui.label(RichText::new("TF").monospace().small().color(Color32::from_gray(90)));
+                                                    ui.label(RichText::new(h).monospace());
+                                                });
+                                            });
+                                    })
+                                    .response;
+                                if resp.clicked() {
+                                    let center = app.canvas_rect.center();
+                                    let w = app.camera.to_world(app.canvas_rect.min, center)
+                                        - Vec2::new(NODE_W / 2.0, NODE_H / 2.0);
+                                    app.add_at = Some((tid.clone(), w));
+                                }
+                                ui.add_space(2.0);
+                            }
+                        });
+                }
+            }
+        }
         for cat in app.catalog.categories() {
             let items: Vec<(String, String, String, Option<MappingStatus>)> = app
                 .catalog

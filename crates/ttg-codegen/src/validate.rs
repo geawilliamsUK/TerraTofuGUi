@@ -179,3 +179,58 @@ pub fn run(dir: &Path, tool: Tool) -> Outcome {
         },
     }
 }
+
+/// Run `<tool> providers schema -json` for the given providers (`(namespace/name,
+/// version constraint)` pairs) in a scratch directory, using the shared plugin cache.
+/// The lock file is appended after a `//LOCK` line so the caller can read exact versions.
+pub fn dump_provider_schemas(tool: Tool, providers: &[(String, String)]) -> Result<String, String> {
+    let Some(bin) = find_binary(tool) else {
+        return Err(format!("`{}` not found", Profile::new(tool).binary()));
+    };
+    let dir = std::env::temp_dir().join(format!("ttg-schema-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
+    let mut tf = String::from("terraform {\n  required_providers {\n");
+    for (src, ver) in providers {
+        let local = src.rsplit('/').next().unwrap_or(src);
+        tf.push_str(&format!(
+            "    {local} = {{ source = \"{src}\", version = \"{ver}\" }}\n"
+        ));
+    }
+    tf.push_str("  }\n}\n");
+    std::fs::write(dir.join("main.tf"), tf).map_err(|e| e.to_string())?;
+    let cache = plugin_cache_dir();
+    let cli_config = cli_config_file(&cache);
+    let mut init = Command::new(&bin);
+    init.args(["init", "-backend=false", "-input=false", "-no-color"])
+        .env("TF_PLUGIN_CACHE_DIR", &cache)
+        .current_dir(&dir);
+    if let Some(cfg) = &cli_config {
+        init.env("TF_CLI_CONFIG_FILE", cfg);
+        init.env("TOFU_CLI_CONFIG_FILE", cfg);
+    }
+    let out = init.output().map_err(|e| format!("init: {e}"))?;
+    if !out.status.success() {
+        return Err(format!(
+            "init failed:\n{}{}",
+            String::from_utf8_lossy(&out.stdout),
+            String::from_utf8_lossy(&out.stderr)
+        ));
+    }
+    let out = Command::new(&bin)
+        .args(["providers", "schema", "-json"])
+        .current_dir(&dir)
+        .output()
+        .map_err(|e| format!("providers schema: {e}"))?;
+    if !out.status.success() {
+        return Err(format!(
+            "providers schema failed:\n{}",
+            String::from_utf8_lossy(&out.stderr)
+        ));
+    }
+    let lock = std::fs::read_to_string(dir.join(".terraform.lock.hcl")).unwrap_or_default();
+    let _ = std::fs::remove_dir_all(&dir);
+    let mut json = String::from_utf8_lossy(&out.stdout).to_string();
+    json.push_str("\n//LOCK\n");
+    json.push_str(&lock);
+    Ok(json)
+}

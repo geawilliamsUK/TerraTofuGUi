@@ -84,6 +84,29 @@ pub struct EntityUpdateArgs {
     pub manual: Option<bool>,
     #[schemars(description = "Provider layers this entity belongs to; [] = every provider")]
     pub providers: Option<Vec<String>>,
+    #[schemars(
+        description = "Extra provider arguments merged into the generated block, keyed by argument name (see schema_show). Values: JSON scalars/lists/objects, {\"$ref\": {\"entity\": \"<id or name>\", \"attr\": \"id\"}} for a reference, {\"$raw\": \"<hcl>\"} for raw HCL; null removes. For native resources this is where every argument goes"
+    )]
+    pub extra: Option<serde_json::Map<String, serde_json::Value>>,
+    #[schemars(description = "Provider the extra arguments are for; defaults to the target provider")]
+    pub extra_provider: Option<String>,
+    #[schemars(description = "Block key the extra arguments apply to; defaults to the primary block")]
+    pub extra_block: Option<String>,
+}
+
+#[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
+pub struct SchemaSearchArgs {
+    #[schemars(description = "Provider id; defaults to the target provider")]
+    pub provider: Option<String>,
+    #[schemars(description = "Space-separated terms matched against resource type names, e.g. `sqs queue`")]
+    pub query: String,
+}
+
+#[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
+pub struct SchemaShowArgs {
+    pub provider: Option<String>,
+    #[schemars(description = "Resource type, e.g. `aws_s3_bucket_policy`")]
+    pub resource: String,
 }
 
 #[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
@@ -289,6 +312,28 @@ impl TtgServer {
     }
 
     #[tool(
+        description = "Search the provider schema for resource types (all 1,500+ AWS / 1,100+ Azure resources). Add one with entity_add using type_id `native:<provider>:<resource>`; then set its arguments with entity_update.extra."
+    )]
+    async fn schema_search(&self, Parameters(a): Parameters<SchemaSearchArgs>) -> CallToolResult {
+        self.run(AgentCommand::SchemaSearch {
+            provider: a.provider,
+            query: a.query,
+        })
+        .await
+    }
+
+    #[tool(
+        description = "Every argument and nested block of a provider resource type, with types, required flags and descriptions."
+    )]
+    async fn schema_show(&self, Parameters(a): Parameters<SchemaShowArgs>) -> CallToolResult {
+        self.run(AgentCommand::SchemaShow {
+            provider: a.provider,
+            resource: a.resource,
+        })
+        .await
+    }
+
+    #[tool(
         description = "Current diagnostics (errors block export; warnings become manual steps) for the target provider."
     )]
     async fn diagnostics(&self) -> CallToolResult {
@@ -369,6 +414,9 @@ impl TtgServer {
             provider_config: a.provider_config,
             manual: a.manual,
             providers: a.providers,
+            extra: a.extra,
+            extra_provider: a.extra_provider,
+            extra_block: a.extra_block,
         })
         .await
     }
@@ -602,7 +650,7 @@ impl ServerHandler for TtgServer {
              you make it and every write is one undo step. Start with project_summary and \
              catalog_types. Entities can be addressed by id or by display name. Never call \
              project_save without the user asking. Prefer entity_set_parent over explicit \
-             network_membership links to containers: containment implies membership. One              diagram serves every provider: tag an entity or link with `providers` to keep it              out of the other provider's export (provider-only types are tagged automatically).",
+             network_membership links to containers: containment implies membership. One              diagram serves every provider: tag an entity or link with `providers` to keep it              out of the other provider's export (provider-only types are tagged automatically).              Curated types cover the portable concepts; for anything else use schema_search and add              a native resource (`native:<provider>:<type>`), setting its arguments via              entity_update.extra. Extra arguments on curated types add or override provider              arguments and are validated against the schema.",
         )
     }
 }

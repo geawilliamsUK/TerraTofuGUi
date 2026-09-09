@@ -19,6 +19,7 @@ mod inspector;
 mod mcp;
 mod menu;
 mod palette;
+mod schema_editor;
 mod views;
 
 use std::path::PathBuf;

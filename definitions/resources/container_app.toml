@@ -1,0 +1,287 @@
+# Abstract type: Container App  (schema_version 2)
+#
+# A container that runs from an image without you managing servers or a cluster.
+#   AWS:   ECS on Fargate — aws_ecs_cluster + aws_ecs_task_definition + aws_ecs_service.
+#          Needs subnets (awsvpc networking) and a role (task + execution role).
+#   Azure: azurerm_container_app_environment + azurerm_container_app (Consumption).
+#
+# Relations: 'Runs as' role (required), 'Subnets' (AWS required, Azure optional VNet
+# integration), 'Security group' (AWS), 'Logs to' log group, 'Sends to' queues/topics.
+
+schema_version = 2
+
+[resource]
+type = "container_app"
+category = "container"
+display_name = "Container App"
+description = "A serverless container from an image (ECS Fargate / Azure Container Apps). Link the role it runs as, subnets (AWS) and a log group."
+kind = "node"
+allowed_parents = ["resource_group", "virtual_network"]
+icon = "APP"
+
+[[fields]]
+name = "image"
+label = "Image"
+type = "string"
+required = true
+default = "public.ecr.aws/nginx/nginx:latest"
+description = "Container image reference."
+
+[[fields]]
+name = "size"
+label = "Size"
+type = "enum"
+required = true
+options = ["small", "medium", "large", "xlarge"]
+default = "small"
+description = "small = 0.25 vCPU / 0.5 GB, medium = 0.5 / 1, large = 1 / 2, xlarge = 2 / 4."
+
+[[fields]]
+name = "port"
+label = "Container port"
+type = "int"
+required = true
+default = 80
+
+[[fields]]
+name = "replicas"
+label = "Replicas"
+type = "int"
+required = true
+default = 1
+
+[[fields]]
+name = "public"
+label = "Public ingress"
+type = "bool"
+default = false
+description = "Reachable from the internet (Azure: external ingress; AWS: public IP on the tasks, front it with a load balancer for production)."
+
+[[relations]]
+kind = "iam_binding"
+label = "Runs as role / identity"
+targets = ["iam_role"]
+cardinality = "one"
+
+[[relations]]
+kind = "network_membership"
+label = "Subnets"
+targets = ["subnet"]
+cardinality = "many"
+
+[[relations]]
+kind = "attribute_reference"
+label = "Security group (AWS)"
+targets = ["security_group"]
+cardinality = "optional"
+
+[[relations]]
+kind = "logs_to"
+label = "Logs to"
+targets = ["log_group"]
+cardinality = "optional"
+
+[[relations]]
+kind = "sends_to"
+label = "Sends to"
+targets = ["event_queue", "topic"]
+cardinality = "many"
+
+# ---------------------------------------------------------------- AWS
+[providers.aws]
+status = "partial"
+file = "container"
+
+[[providers.aws.checks]]
+when = { relation = "network_membership", absent = true }
+severity = "error"
+message = "\"{name}\" needs at least one subnet on AWS (Fargate tasks run inside a VPC)"
+
+[[providers.aws.blocks]]
+key = "cluster"
+resource = "aws_ecs_cluster"
+
+[providers.aws.blocks.args]
+name = { template = "{name}-cluster", transform = "kebab" }
+tags = { object = { Name = { field = "name" } } }
+
+[[providers.aws.blocks]]
+key = "task"
+resource = "aws_ecs_task_definition"
+
+[providers.aws.blocks.args]
+family                   = { field = "name", transform = "kebab" }
+requires_compatibilities = { value = ["FARGATE"] }
+network_mode             = { value = "awsvpc" }
+cpu                      = { map = "size", table = { small = "256", medium = "512", large = "1024", xlarge = "2048" } }
+memory                   = { map = "size", table = { small = "512", medium = "1024", large = "2048", xlarge = "4096" } }
+execution_role_arn       = { relation = "iam_binding", attr = "arn" }
+task_role_arn            = { relation = "iam_binding", attr = "arn" }
+
+[providers.aws.blocks.args.container_definitions]
+func = "jsonencode"
+
+[[providers.aws.blocks.args.container_definitions.args]]
+[[providers.aws.blocks.args.container_definitions.args.list]]
+[providers.aws.blocks.args.container_definitions.args.list.object]
+name         = { field = "name", transform = "kebab" }
+image        = { field = "image" }
+essential    = { value = true }
+portMappings = { list = [ { object = { containerPort = { field = "port" }, protocol = { value = "tcp" } } } ] }
+environment  = { list = [ { if = { relation = "sends_to", target_type = "event_queue" }, then = { object = { name = { value = "QUEUE_URL" }, value = { relation = "sends_to", target_type = "event_queue", attr = "url" } } } }, { if = { relation = "sends_to", target_type = "topic" }, then = { object = { name = { value = "TOPIC_ARN" }, value = { relation = "sends_to", target_type = "topic", attr = "arn" } } } } ] }
+logConfiguration = { if = { relation = "logs_to" }, then = { object = { logDriver = { value = "awslogs" }, options = { object = { "awslogs-group" = { relation = "logs_to", attr = "name" }, "awslogs-region" = { var = "region" }, "awslogs-stream-prefix" = { value = "app" } } } } } }
+
+[[providers.aws.blocks]]
+key = "main"
+resource = "aws_ecs_service"
+
+[providers.aws.blocks.args]
+name            = { field = "name", transform = "kebab" }
+cluster         = { self_block = "cluster", attr = "id" }
+task_definition = { self_block = "task", attr = "arn" }
+desired_count   = { field = "replicas" }
+launch_type     = { value = "FARGATE" }
+
+[[providers.aws.blocks.nested]]
+block = "network_configuration"
+
+[providers.aws.blocks.nested.args]
+subnets          = { relation = "network_membership", attr = "id", wrap = "list" }
+security_groups  = { relation = "attribute_reference", target_type = "security_group", attr = "id", wrap = "list" }
+assign_public_ip = { field = "public" }
+
+[providers.aws.outputs]
+service_name = { attr = "name", description = "ECS service name" }
+cluster_arn  = { block = "cluster", attr = "arn", description = "ECS cluster ARN" }
+
+[[providers.aws.manual_steps]]
+title = "Front the service with a load balancer for real public traffic"
+when = { field = "public" }
+body = """
+`assign_public_ip = true` gives each task a public IP that changes on every deployment.
+For a stable public entry point add a Load Balancer whose target group uses `target_type
+= "ip"` and add a `load_balancer` block to the ECS service pointing at it.
+"""
+
+[[providers.aws.manual_steps]]
+title = "Give the role the ECS task execution permissions"
+body = """
+Fargate needs the linked role to be assumable by `ecs-tasks.amazonaws.com` with the
+`AmazonECSTaskExecutionRolePolicy` (pull images, write logs). Set the role's trusted
+service to `container` if your Role definition supports it, or attach the policy by hand.
+"""
+
+# ---------------------------------------------------------------- Azure
+[providers.azure]
+status = "partial"
+file = "container"
+
+[[providers.azure.blocks]]
+key = "env"
+resource = "azurerm_container_app_environment"
+
+[providers.azure.blocks.args]
+name                       = { template = "{name}-env", transform = "kebab" }
+location                   = { var = "location" }
+resource_group_name        = { ancestor = "resource_group", attr = "name" }
+log_analytics_workspace_id = { relation = "logs_to", attr = "id" }
+infrastructure_subnet_id   = { relation = "network_membership", attr = "id" }
+
+[[providers.azure.blocks]]
+key = "main"
+resource = "azurerm_container_app"
+
+[providers.azure.blocks.args]
+name                         = { field = "name", transform = "kebab" }
+container_app_environment_id = { self_block = "env", attr = "id" }
+resource_group_name          = { ancestor = "resource_group", attr = "name" }
+revision_mode                = { value = "Single" }
+tags                         = { object = { Name = { field = "name" } } }
+
+[[providers.azure.blocks.nested]]
+block = "template"
+
+[providers.azure.blocks.nested.args]
+min_replicas = { field = "replicas" }
+max_replicas = { field = "replicas" }
+
+[[providers.azure.blocks.nested.nested]]
+block = "container"
+
+[providers.azure.blocks.nested.nested.args]
+name   = { field = "name", transform = "kebab" }
+image  = { field = "image" }
+cpu    = { map = "size", table = { small = 0.25, medium = 0.5, large = 1.0, xlarge = 2.0 } }
+memory = { map = "size", table = { small = "0.5Gi", medium = "1Gi", large = "2Gi", xlarge = "4Gi" } }
+
+[[providers.azure.blocks.nested.nested.nested]]
+block = "env"
+when = { relation = "sends_to", target_type = "event_queue" }
+
+[providers.azure.blocks.nested.nested.nested.args]
+name  = { value = "QUEUE_NAME" }
+value = { relation = "sends_to", target_type = "event_queue", attr = "name" }
+
+[[providers.azure.blocks.nested]]
+block = "ingress"
+
+[providers.azure.blocks.nested.args]
+external_enabled = { field = "public" }
+target_port      = { field = "port" }
+
+[[providers.azure.blocks.nested.nested]]
+block = "traffic_weight"
+
+[providers.azure.blocks.nested.nested.args]
+percentage      = { value = 100 }
+latest_revision = { value = true }
+
+[[providers.azure.blocks.nested]]
+block = "identity"
+when = { relation = "iam_binding" }
+
+[providers.azure.blocks.nested.args]
+type         = { value = "UserAssigned" }
+identity_ids = { relation = "iam_binding", attr = "id", wrap = "list" }
+
+[[providers.azure.blocks]]
+key = "send"
+resource = "azurerm_role_assignment"
+for_each_relation = "sends_to"
+for_each_target_type = "event_queue"
+
+[providers.azure.blocks.args]
+scope                = { target = "id" }
+role_definition_name = { value = "Azure Service Bus Data Sender" }
+principal_id         = { relation = "iam_binding", attr = "principal_id" }
+
+# A linked Security Group becomes the NSG of the environment subnet(s).
+[[providers.azure.blocks]]
+key = "nsg"
+resource = "azurerm_subnet_network_security_group_association"
+for_each_relation = "network_membership"
+when = { relation = "attribute_reference", target_type = "security_group" }
+
+[providers.azure.blocks.args]
+subnet_id                 = { target = "id" }
+network_security_group_id = { relation = "attribute_reference", target_type = "security_group", attr = "id" }
+
+[providers.azure.outputs]
+fqdn = { attr = "latest_revision_fqdn", description = "Latest revision FQDN" }
+
+[[providers.azure.manual_steps]]
+title = "Subnet for VNet integration must be delegated and /23 or larger"
+when = { relation = "network_membership" }
+body = """
+Container Apps environments need a dedicated subnet (at least /23 for Consumption)
+delegated to `Microsoft.App/environments`. Set the subnet's Azure **Delegation** field
+accordingly, and note that the environment uses the *first* linked subnet.
+"""
+
+[[providers.azure.manual_steps]]
+title = "Allow the identity to pull the image"
+when = { relation = "iam_binding" }
+body = """
+If the image lives in a private registry (Azure Container Registry), grant the linked
+identity `AcrPull` on the registry, or add a `registry` block with credentials.
+"""

@@ -53,6 +53,7 @@ pub fn new_token() -> String {
 /// A request from the agent, executed on the UI thread. Names may be entity ids or
 /// display names (case-insensitive); the executor resolves them.
 #[derive(Debug, Clone)]
+#[allow(clippy::large_enum_variant)]
 pub enum AgentCommand {
     ProjectGet,
     ProjectSummary,
@@ -87,6 +88,17 @@ pub enum AgentCommand {
         provider_config: Option<serde_json::Map<String, serde_json::Value>>,
         manual: Option<bool>,
         providers: Option<Vec<String>>,
+        extra: Option<serde_json::Map<String, serde_json::Value>>,
+        extra_provider: Option<String>,
+        extra_block: Option<String>,
+    },
+    SchemaSearch {
+        provider: Option<String>,
+        query: String,
+    },
+    SchemaShow {
+        provider: Option<String>,
+        resource: String,
     },
     EntityMove {
         entity: String,
@@ -195,6 +207,8 @@ impl AgentCommand {
                 | AgentCommand::ReachTo { .. }
                 | AgentCommand::ExportPreview { .. }
                 | AgentCommand::Screenshot
+                | AgentCommand::SchemaSearch { .. }
+                | AgentCommand::SchemaShow { .. }
         )
     }
 }

@@ -78,6 +78,18 @@ const BUILTIN_RESOURCES: &[(&str, &str)] = &[
         include_str!("../../../definitions/resources/servicebus_namespace.toml"),
     ),
     (
+        "resources/private_endpoint.toml",
+        include_str!("../../../definitions/resources/private_endpoint.toml"),
+    ),
+    (
+        "resources/container_app.toml",
+        include_str!("../../../definitions/resources/container_app.toml"),
+    ),
+    (
+        "resources/alarm.toml",
+        include_str!("../../../definitions/resources/alarm.toml"),
+    ),
+    (
         "resources/container_registry.toml",
         include_str!("../../../definitions/resources/container_registry.toml"),
     ),
@@ -283,6 +295,7 @@ pub fn category_label(cat: &str) -> String {
         "load_balancer" => "Load Balancer".into(),
         "container" => "Container / Kubernetes".into(),
         "secrets" => "Secrets Management".into(),
+        "native" => "Provider resources (native)".into(),
         other => {
             let mut s = other.replace('_', " ");
             if let Some(f) = s.get_mut(0..1) {
@@ -290,6 +303,107 @@ pub fn category_label(cat: &str) -> String {
             }
             s
         }
+    }
+}
+
+/// Prefix of synthetic type ids for native provider resources: `native:<provider>:<tf type>`.
+pub const NATIVE_PREFIX: &str = "native:";
+
+/// Split a native type id into (provider id, resource type).
+pub fn native_parts(type_id: &str) -> Option<(&str, &str)> {
+    let rest = type_id.strip_prefix(NATIVE_PREFIX)?;
+    rest.split_once(':')
+}
+
+impl Catalog {
+    /// Make sure a synthetic definition exists for a native provider resource type
+    /// (`native:aws:aws_s3_bucket_policy`). The definition emits exactly one block whose
+    /// arguments all come from the entity's extra arguments, scoped to that provider.
+    /// Returns false when the id is malformed or the provider is unknown.
+    pub fn ensure_native(&mut self, type_id: &str) -> bool {
+        if self.resources.contains_key(type_id) {
+            return true;
+        }
+        let Some((provider, tf_type)) = native_parts(type_id) else {
+            return false;
+        };
+        if !self.providers.contains_key(provider) {
+            return false;
+        }
+        let containers: Vec<String> = self
+            .resources
+            .values()
+            .filter(|r| r.resource.kind == ResourceKind::Container)
+            .map(|r| r.resource.type_id.clone())
+            .collect();
+        let mut providers = IndexMap::new();
+        providers.insert(
+            provider.to_string(),
+            ProviderMapping {
+                status: MappingStatus::Full,
+                file: Some("native".into()),
+                notes: format!(
+                    "Native {tf_type}: every argument is set in the Arguments section below and checked against the provider schema."
+                ),
+                fields: Vec::new(),
+                variables: Vec::new(),
+                blocks: vec![BlockDef {
+                    key: "main".into(),
+                    resource: tf_type.to_string(),
+                    when: None,
+                    for_each_field: None,
+                    for_each_relation: None,
+                    for_each_target_type: None,
+                    args: IndexMap::new(),
+                    nested: Vec::new(),
+                }],
+                data: Vec::new(),
+                outputs: IndexMap::new(),
+                manual_steps: Vec::new(),
+                checks: Vec::new(),
+            },
+        );
+        let def = ResourceDef {
+            schema_version: 2,
+            resource: ResourceMeta {
+                type_id: type_id.to_string(),
+                category: "native".into(),
+                display_name: tf_type.to_string(),
+                description: format!(
+                    "Native {tf_type} resource. Not portable: it exists only on {provider}. Arguments come straight from the provider schema."
+                ),
+                kind: ResourceKind::Node,
+                allowed_parents: containers,
+                icon: "TF".into(),
+                expects_incoming: false,
+                network_agnostic: false,
+                providers: vec![provider.to_string()],
+            },
+            fields: Vec::new(),
+            relations: Vec::new(),
+            providers,
+        };
+        self.resources.insert(type_id.to_string(), def);
+        self.sources
+            .insert(type_id.to_string(), "native (provider schema)".into());
+        true
+    }
+
+    /// Ensure definitions for every native type a project uses.
+    pub fn ensure_native_types(&mut self, p: &ttg_core::Project) {
+        let types: Vec<String> = p
+            .entities()
+            .iter()
+            .filter(|e| e.resource_type.starts_with(NATIVE_PREFIX))
+            .map(|e| e.resource_type.to_string())
+            .collect();
+        for t in types {
+            self.ensure_native(&t);
+        }
+    }
+
+    pub fn is_native(type_id: &str) -> bool {
+        type_id.starts_with(NATIVE_PREFIX)
     }
 }
 

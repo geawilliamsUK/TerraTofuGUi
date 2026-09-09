@@ -384,6 +384,7 @@ mod tests {
             parent: parent.map(|s| s.to_string()),
             manual: false,
             providers: Vec::new(),
+            extra: Default::default(),
         }
     }
     fn sz(_: &Project, _: &str) -> Size {
@@ -406,6 +407,7 @@ mod tests {
                 parent: None,
                 manual: false,
                 providers: Vec::new(),
+                extra: Default::default(),
             },
         );
         for (id, par) in [("a", None), ("b", Some("c")), ("d", Some("c"))] {

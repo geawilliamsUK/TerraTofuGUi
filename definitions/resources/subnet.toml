@@ -70,9 +70,9 @@ status = "full"
 name = "delegation"
 label = "Delegation"
 type = "enum"
-options = ["none", "web_serverfarms", "postgres_flexible", "mysql_flexible"]
+options = ["none", "web_serverfarms", "postgres_flexible", "mysql_flexible", "app_environments"]
 default = "none"
-description = "Delegate the subnet to a service (required for VNet-integrated functions and database servers)."
+description = "Delegate the subnet to a service (required for VNet-integrated functions, database servers and Container Apps environments)."
 
 [[providers.azure.blocks]]
 key = "main"
@@ -95,8 +95,8 @@ name = { value = "delegation" }
 block = "service_delegation"
 
 [providers.azure.blocks.nested.nested.args]
-name    = { map = "delegation", table = { web_serverfarms = "Microsoft.Web/serverFarms", postgres_flexible = "Microsoft.DBforPostgreSQL/flexibleServers", mysql_flexible = "Microsoft.DBforMySQL/flexibleServers" } }
-actions = { map = "delegation", table = { web_serverfarms = ["Microsoft.Network/virtualNetworks/subnets/action"], postgres_flexible = ["Microsoft.Network/virtualNetworks/subnets/join/action"], mysql_flexible = ["Microsoft.Network/virtualNetworks/subnets/join/action"] } }
+name    = { map = "delegation", table = { web_serverfarms = "Microsoft.Web/serverFarms", postgres_flexible = "Microsoft.DBforPostgreSQL/flexibleServers", mysql_flexible = "Microsoft.DBforMySQL/flexibleServers", app_environments = "Microsoft.App/environments" } }
+actions = { map = "delegation", table = { web_serverfarms = ["Microsoft.Network/virtualNetworks/subnets/action"], postgres_flexible = ["Microsoft.Network/virtualNetworks/subnets/join/action"], mysql_flexible = ["Microsoft.Network/virtualNetworks/subnets/join/action"], app_environments = ["Microsoft.Network/virtualNetworks/subnets/join/action"] } }
 
 [providers.azure.outputs]
 id = { attr = "id", description = "Subnet id" }

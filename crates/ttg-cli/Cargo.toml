@@ -13,5 +13,7 @@ path = "src/main.rs"
 ttg-core = { path = "../ttg-core" }
 ttg-catalog = { path = "../ttg-catalog" }
 ttg-codegen = { path = "../ttg-codegen" }
+ttg-schema = { path = "../ttg-schema" }
+serde_json.workspace = true
 anyhow.workspace = true
 clap.workspace = true
