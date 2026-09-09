@@ -59,6 +59,7 @@ cardinality = "one"
 [[relations]]
 kind = "sends_to"
 label = "Notifies topic"
+providers = ["aws"]
 targets = ["topic"]
 cardinality = "optional"
 
@@ -140,6 +141,32 @@ required = true
 options = ["Average", "Total", "Maximum", "Minimum", "Count"]
 default = "Average"
 
+[[providers.azure.fields]]
+name = "notify_email"
+label = "Notify email"
+type = "string"
+pattern = "^[^@\\s]+@[^@\\s]+\\.[^@\\s]+$"
+pattern_hint = "an email address"
+description = "Azure notifies through an action group rather than a topic: when set, an action group with this email receiver is generated and attached to the alert."
+
+# Action group with an email receiver, when an address is given.
+[[providers.azure.blocks]]
+key = "ag"
+resource = "azurerm_monitor_action_group"
+when = { provider_field = "notify_email" }
+
+[providers.azure.blocks.args]
+name                = { template = "{name}-actions", transform = "kebab" }
+resource_group_name = { ancestor = "resource_group", attr = "name" }
+short_name          = { value = "ttgalarm" }
+
+[[providers.azure.blocks.nested]]
+block = "email_receiver"
+
+[providers.azure.blocks.nested.args]
+name          = { value = "email" }
+email_address = { provider_field = "notify_email" }
+
 [[providers.azure.blocks]]
 key = "main"
 resource = "azurerm_monitor_metric_alert"
@@ -162,6 +189,13 @@ wrap = "list"
 fallback = { relation = "attribute_reference", target_type = "relational_database", block = "pg", attr = "id", wrap = "list", fallback = { relation = "attribute_reference", target_type = "relational_database", block = "my", attr = "id", wrap = "list", fallback = { relation = "attribute_reference", target_type = "function", attr = "id", wrap = "list", fallback = { relation = "attribute_reference", target_type = "event_queue", block = "ns", attr = "id", wrap = "list", fallback = { relation = "attribute_reference", target_type = "event_queue", ancestor = "servicebus_namespace", attr = "id", wrap = "list", fallback = { relation = "attribute_reference", target_type = "container_app", attr = "id", wrap = "list", fallback = { relation = "attribute_reference", target_type = "load_balancer", attr = "id", wrap = "list" } } } } } } }
 
 [[providers.azure.blocks.nested]]
+block = "action"
+when = { provider_field = "notify_email" }
+
+[providers.azure.blocks.nested.args]
+action_group_id = { self_block = "ag", attr = "id" }
+
+[[providers.azure.blocks.nested]]
 block = "criteria"
 
 [providers.azure.blocks.nested.args]
@@ -174,19 +208,16 @@ threshold        = { field = "threshold" }
 [providers.azure.outputs]
 id = { attr = "id", description = "Metric alert id" }
 
-[[providers.azure.manual_steps]]
-title = "Notifications need an action group"
-when = { relation = "sends_to" }
-body = """
-Azure Monitor notifies through an *action group*, not a Service Bus topic. Create an
-`azurerm_monitor_action_group` (email, webhook, or a Service Bus action to the linked
-topic) and add an `action { action_group_id = … }` block to the alert.
-"""
+[[providers.azure.checks]]
+when = { field = "evaluation_periods", not_equals = "1" }
+message = "\"{name}\": Azure metric alerts evaluate a single window, so 'Consecutive periods' is approximated by the window size (use a dynamic-threshold alert for N-of-M behaviour)"
 
 [[providers.azure.manual_steps]]
-title = "Evaluation periods are not directly configurable"
+title = "Notifications need an action group"
+when = { all = [ { relation = "sends_to" }, { provider_field = "notify_email", absent = true } ] }
 body = """
-Azure metric alerts evaluate one window; "consecutive periods" has no direct equivalent.
-Use a larger window size, or a dynamic-threshold alert with `number_of_evaluation_periods`
-if you need N-of-M behaviour.
+Azure Monitor notifies through an *action group*, not a Service Bus topic. Set the Azure
+**Notify email** field to generate an action group with an email receiver, or create an
+`azurerm_monitor_action_group` with a webhook / Logic App that forwards to the linked topic
+and add an `action { action_group_id = … }` block to the alert.
 """

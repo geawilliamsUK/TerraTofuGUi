@@ -82,9 +82,10 @@ const NETWORKED: &[&str] = &[
     "kubernetes_cluster",
     "autoscaling_group",
     "function",
+    "container_app",
 ];
 
-fn is_managed(t: &str) -> bool {
+pub(crate) fn is_managed(t: &str) -> bool {
     MANAGED.contains(&t)
 }
 
@@ -92,7 +93,7 @@ fn is_managed(t: &str) -> bool {
 pub fn initiates(t: &str) -> bool {
     matches!(
         t,
-        "function" | "compute_instance" | "autoscaling_group" | "kubernetes_cluster"
+        "function" | "compute_instance" | "autoscaling_group" | "kubernetes_cluster" | "container_app"
     )
 }
 fn is_networked(t: &str) -> bool {
@@ -260,6 +261,7 @@ pub fn listening_port(e: &EntityRef) -> Option<i64> {
         ),
         "cache" => Some(6379),
         "load_balancer" => e.field("listener_port").and_then(|v| v.as_int()),
+        "container_app" => e.field("port").and_then(|v| v.as_int()),
         "kubernetes_cluster" => Some(443),
         _ => None,
     }
@@ -267,6 +269,84 @@ pub fn listening_port(e: &EntityRef) -> Option<i64> {
 
 fn subnet_cidr(p: &Project, subnet: &str) -> Option<String> {
     p.entity(subnet)?.field("cidr_block").map(|v| v.display())
+}
+
+/// The peering that connects networks `a` and `b`, if the diagram has one. A peering
+/// sits inside one network and links ("Peers with") the other.
+fn peering_between(p: &Project, cat: &Catalog, a: &str, b: &str) -> Option<Id> {
+    p.entities()
+        .into_iter()
+        .filter(|e| e.resource_type == "network_peering")
+        .find(|pe| {
+            let local = p
+                .ancestor_of_type(pe.id, "virtual_network")
+                .map(|c| c.id.as_str());
+            let remote = relation_targets(p, cat, pe, Relation::AttributeReference)
+                .into_iter()
+                .find(|t| p.entity(t).is_some_and(|x| x.resource_type == "virtual_network"));
+            match (local, remote) {
+                (Some(l), Some(r)) => (l == a && r == b) || (l == b && r == a),
+                _ => false,
+            }
+        })
+        .map(|e| e.id.to_string())
+}
+
+/// AWS needs an explicit route: does one of the subnet's route tables route through
+/// `peering` (route table linked from the peering's "Route tables")?
+fn subnet_routes_via_peering(p: &Project, cat: &Catalog, subnet: &str, peering: &str) -> bool {
+    let Some(pe) = p.entity(peering) else {
+        return false;
+    };
+    relation_targets(p, cat, &pe, Relation::Attachment)
+        .iter()
+        .filter_map(|rt| p.entity(rt))
+        .filter(|rt| rt.resource_type == "route_table")
+        .any(|rt| {
+            relation_targets(p, cat, &rt, Relation::Attachment)
+                .iter()
+                .any(|s| s == subnet)
+        })
+}
+
+/// A private endpoint in network `vnet` that fronts `target`.
+pub(crate) fn private_endpoint_in(p: &Project, cat: &Catalog, vnet: &str, target: &str) -> Option<Id> {
+    p.entities()
+        .into_iter()
+        .filter(|e| e.resource_type == "private_endpoint")
+        .find(|pe| {
+            relation_targets(p, cat, pe, Relation::AttributeReference)
+                .iter()
+                .any(|t| t == target)
+                && subnets_of(p, cat, pe)
+                    .iter()
+                    .any(|s| vnet_of_subnet(p, cat, s).as_deref() == Some(vnet))
+        })
+        .map(|e| e.id.to_string())
+}
+
+/// Load balancers that forward to `target` (LB "Forwards to" instance, or an autoscaling
+/// group "Registered with" the LB).
+fn load_balancers_for(p: &Project, cat: &Catalog, target: &str) -> Vec<Id> {
+    let mut out: Vec<Id> = p
+        .entities()
+        .into_iter()
+        .filter(|e| e.resource_type == "load_balancer")
+        .filter(|lb| {
+            relation_targets(p, cat, lb, Relation::Attachment)
+                .iter()
+                .any(|t| t == target)
+        })
+        .map(|e| e.id.to_string())
+        .collect();
+    if let Some(t) = p.entity(target) {
+        for lb in relation_targets(p, cat, &t, Relation::Attachment) {
+            if p.entity(&lb).is_some_and(|x| x.resource_type == "load_balancer") && !out.contains(&lb) {
+                out.push(lb);
+            }
+        }
+    }
+    out
 }
 
 /// Compute the posture of every resource for a provider.
@@ -358,6 +438,9 @@ fn exposure(
         "load_balancer" if e.field("scheme").map(|v| v.display()) == Some("internet_facing".into()) => {
             return Some("internet-facing load balancer".into());
         }
+        "container_app" if e.field("public").and_then(|v| v.as_bool()).unwrap_or(false) => {
+            return Some("public ingress".into());
+        }
         "relational_database" | "cache" if provider == "azure" && subnets.is_empty() => {
             return Some("public endpoint (no subnet linked)".into());
         }
@@ -394,11 +477,11 @@ fn exposure(
     })
 }
 
-/// Paths from one resource to every other managed or networked resource.
+/// Paths from one resource to every other managed or networked resource. A target that
+/// cannot be reached directly is retried through a load balancer that forwards to it.
 pub fn paths_from(full: &Project, cat: &Catalog, reach: &Reach, source: &str) -> Vec<Path> {
     let layer = crate::layers::project_for(full, cat, &reach.provider);
     let p = &layer;
-    let pol = policy(&reach.provider);
     let Some(src) = p.entity(source) else {
         return vec![];
     };
@@ -411,215 +494,304 @@ pub fn paths_from(full: &Project, cat: &Catalog, reach: &Reach, source: &str) ->
             continue;
         }
         let Some(tgt) = p.entity(tid) else { continue };
-        let linked = p
-            .edges_from(source)
-            .any(|e| &e.target == tid && e.relation != Relation::DependsOn);
+        let mut path = direct_path(p, cat, reach, &src, sp, &tgt, tp);
+        if path.status != Status::Ok && !tp.managed && tgt.resource_type != "load_balancer" {
+            for lb in load_balancers_for(p, cat, tid) {
+                let (Some(lbe), Some(lp)) = (p.entity(&lb), reach.posture.get(&lb)) else {
+                    continue;
+                };
+                let first = direct_path(p, cat, reach, &src, sp, &lbe, lp);
+                if first.status != Status::Ok {
+                    path.notes
+                        .push(format!("via load balancer \"{}\": {}", lbe.name, first.reason));
+                    continue;
+                }
+                let second = direct_path(p, cat, reach, &lbe, lp, &tgt, tp);
+                if second.status == Status::Ok {
+                    let mut hops = first.hops.clone();
+                    hops.push(lb.clone());
+                    hops.extend(second.hops.iter().cloned());
+                    path = Path {
+                        target: tid.clone(),
+                        status: Status::Ok,
+                        hops,
+                        reason: format!("via load balancer \"{}\": {}", lbe.name, second.reason),
+                        notes: second.notes.clone(),
+                    };
+                    break;
+                }
+                path.notes
+                    .push(format!("via load balancer \"{}\": {}", lbe.name, second.reason));
+            }
+        }
+        out.push(path);
+    }
+    out
+}
 
-        if tp.managed {
-            // Reached over the provider API: needs a way out of the network + a link.
-            let (net_ok, hops, reason) = match &sp.egress {
-                Egress::Unrestricted | Egress::NotNeeded => (true, vec![], String::new()),
-                Egress::Via(h) => (true, h.clone(), String::new()),
-                Egress::Blocked(r) => (false, vec![], r.clone()),
-            };
-            let (status, reason, mut notes) = if !net_ok {
-                (
+/// One hop: can `src` talk to `tgt` without an intermediary (other than gateways,
+/// peerings and private endpoints, which are part of the network fabric)?
+fn direct_path(
+    p: &Project,
+    cat: &Catalog,
+    reach: &Reach,
+    src: &EntityRef,
+    sp: &Posture,
+    tgt: &EntityRef,
+    tp: &Posture,
+) -> Path {
+    let pol = policy(&reach.provider);
+    let tid = tgt.id.to_string();
+    let linked = p
+        .edges_from(src.id)
+        .any(|e| e.target == tid && e.relation != Relation::DependsOn);
+    let path = |status: Status, hops: Vec<Id>, reason: String, notes: Vec<String>| Path {
+        target: tid.clone(),
+        status,
+        hops,
+        reason,
+        notes,
+    };
+    let sv = sp.subnets.iter().filter_map(|s| vnet_of_subnet(p, cat, s)).next();
+    let pe = sv.as_deref().and_then(|v| private_endpoint_in(p, cat, v, &tid));
+    let name_of = |id: &str| p.entity(id).map(|x| x.name.to_string()).unwrap_or_default();
+
+    if tp.managed {
+        // A private endpoint in the source's network bypasses egress altogether.
+        if let Some(pe) = pe {
+            let pe_name = name_of(&pe);
+            if !linked {
+                return path(
                     Status::Blocked,
-                    format!("no route out of the network: {reason}"),
                     vec![],
-                )
-            } else if !linked {
-                (
-                    Status::Blocked,
                     format!(
-                        "network path exists but there is no link from \"{}\" to \"{}\", so it gets no permission or address",
+                        "private endpoint \"{pe_name}\" exists but there is no link from \"{}\" to \"{}\", so it gets no permission or address",
                         src.name, tgt.name
                     ),
                     vec![],
+                );
+            }
+            let mut hops: Vec<Id> = sp.subnets.first().cloned().into_iter().collect();
+            hops.push(pe);
+            return path(
+                Status::Ok,
+                hops,
+                format!("over private endpoint \"{pe_name}\""),
+                vec![],
+            );
+        }
+        // Reached over the provider API: needs a way out of the network + a link.
+        let (net_ok, hops, reason) = match &sp.egress {
+            Egress::Unrestricted | Egress::NotNeeded => (true, vec![], String::new()),
+            Egress::Via(h) => (true, h.clone(), String::new()),
+            Egress::Blocked(r) => (false, vec![], r.clone()),
+        };
+        if !net_ok {
+            return path(
+                Status::Blocked,
+                hops,
+                format!("no route out of the network: {reason}"),
+                vec![],
+            );
+        }
+        if !linked {
+            return path(
+                Status::Blocked,
+                hops,
+                format!(
+                    "network path exists but there is no link from \"{}\" to \"{}\", so it gets no permission or address",
+                    src.name, tgt.name
+                ),
+                vec![],
+            );
+        }
+        let mut notes = vec![];
+        if sp.egress == Egress::Unrestricted {
+            notes.push("source is outside the network; no NAT or gateway involved".into());
+        }
+        return path(Status::Ok, hops, "reachable over the provider API".into(), notes);
+    }
+
+    // Networked target.
+    let via_pe = |pe: Id| {
+        let pe_name = name_of(&pe);
+        let mut hops: Vec<Id> = sp.subnets.first().cloned().into_iter().collect();
+        hops.push(pe);
+        path(
+            Status::Ok,
+            hops,
+            format!("over private endpoint \"{pe_name}\""),
+            vec![],
+        )
+    };
+    if tp.subnets.is_empty() {
+        if let Some(pe) = pe {
+            return via_pe(pe);
+        }
+        // e.g. a function outside the network, or an Azure public database.
+        let status = if tp.exposed.is_some() {
+            Status::Ok
+        } else {
+            Status::Unknown
+        };
+        let reason = match &tp.exposed {
+            Some(how) => format!("reached through its {how}"),
+            None => "target is outside the network and has no public entry point".into(),
+        };
+        return path(status, vec![], reason, vec![]);
+    }
+    if sp.subnets.is_empty() {
+        // Source outside the network: only public entry points count.
+        return match &tp.exposed {
+            Some(how) => path(Status::Ok, vec![], format!("via its {how}"), vec![]),
+            None => path(
+                Status::Blocked,
+                vec![],
+                format!(
+                    "\"{}\" is outside the network and \"{}\" is private",
+                    src.name, tgt.name
+                ),
+                vec![],
+            ),
+        };
+    }
+    // Both inside networks: the same one, or two networks joined by a peering.
+    let tv = tp.subnets.iter().filter_map(|s| vnet_of_subnet(p, cat, s)).next();
+    let mut fabric: Vec<Id> = Vec::new();
+    if let (Some(svn), Some(tvn)) = (sv.as_deref(), tv.as_deref()) {
+        if svn != tvn {
+            if let Some(pe) = pe {
+                return via_pe(pe);
+            }
+            let Some(peer) = peering_between(p, cat, svn, tvn) else {
+                return path(
+                    Status::Blocked,
+                    vec![],
+                    "different virtual networks (no peering or private endpoint in the diagram)".into(),
+                    vec![],
+                );
+            };
+            let peer_name = name_of(&peer);
+            if reach.provider == "aws" {
+                let s_ok = sp
+                    .subnets
+                    .iter()
+                    .any(|s| subnet_routes_via_peering(p, cat, s, &peer));
+                let t_ok = tp
+                    .subnets
+                    .iter()
+                    .any(|s| subnet_routes_via_peering(p, cat, s, &peer));
+                if !s_ok || !t_ok {
+                    let side = if !s_ok { src.name } else { tgt.name };
+                    return path(
+                        Status::Blocked,
+                        vec![peer.clone()],
+                        format!(
+                            "peering \"{peer_name}\" exists but the route table of \"{side}\"'s subnet is not linked to it (no route across the peering)"
+                        ),
+                        vec![],
+                    );
+                }
+            }
+            fabric.push(peer);
+        }
+    }
+    let port = listening_port(tgt);
+    let mut notes = Vec::new();
+    // Source egress rule (AWS only).
+    let src_egress_ok = pol.egress_default_allow
+        || sp.security_group.is_none()
+        || rules_of(p, sp.security_group.as_deref().unwrap())
+            .iter()
+            .any(|r| {
+                !r.ingress
+                    && rule_matches_port(r, port)
+                    && (r.cidr == "0.0.0.0/0"
+                        || tp
+                            .subnets
+                            .iter()
+                            .any(|s| subnet_cidr(p, s).is_some_and(|c| cidr_covers(&r.cidr, &c)))
+                        || tp.security_group.as_deref() == Some(r.source_group.as_str()))
+            });
+    if !src_egress_ok {
+        return path(
+            Status::Blocked,
+            vec![],
+            format!(
+                "\"{}\"'s security group has no egress rule allowing {}",
+                src.name,
+                port.map(|x| format!("port {x}")).unwrap_or("this traffic".into())
+            ),
+            notes,
+        );
+    }
+    // Target ingress rule.
+    let (status, reason) = match tp.security_group.as_deref() {
+        None => {
+            if pol.intra_network_default_allow {
+                (
+                    Status::Ok,
+                    "allowed by the network's default rules (no security group on the target)".into(),
                 )
             } else {
-                (Status::Ok, "reachable over the provider API".into(), vec![])
-            };
-            if status == Status::Ok && sp.egress == Egress::Unrestricted {
-                notes.push("source is outside the network; no NAT or gateway involved".into());
+                (
+                    Status::Unknown,
+                    format!(
+                        "\"{}\" has no security group; the VPC default group applies",
+                        tgt.name
+                    ),
+                )
             }
-            out.push(Path {
-                target: tid.clone(),
-                status,
-                hops,
-                reason,
-                notes,
-            });
-            continue;
         }
-
-        // Networked target.
-        if tp.subnets.is_empty() {
-            // e.g. a function outside the network, or an Azure public database.
-            let status = if tp.exposed.is_some() {
-                Status::Ok
-            } else {
-                Status::Unknown
-            };
-            let reason = match &tp.exposed {
-                Some(how) => format!("reached through its {how}"),
-                None => "target is outside the network and has no public entry point".into(),
-            };
-            out.push(Path {
-                target: tid.clone(),
-                status,
-                hops: vec![],
-                reason,
-                notes: vec![],
+        Some(tsg) => {
+            let matched = rules_of(p, tsg).into_iter().find(|r| {
+                r.ingress
+                    && rule_matches_port(r, port)
+                    && (r.cidr == "0.0.0.0/0"
+                        || (!r.source_group.is_empty()
+                            && sp.security_group.as_deref() == Some(r.source_group.as_str()))
+                        || (!r.cidr.is_empty()
+                            && sp
+                                .subnets
+                                .iter()
+                                .any(|s| subnet_cidr(p, s).is_some_and(|c| cidr_covers(&r.cidr, &c)))))
             });
-            continue;
-        }
-        if sp.subnets.is_empty() {
-            // Source outside the network: only public entry points count.
-            let (status, reason) = match &tp.exposed {
-                Some(how) => (Status::Ok, format!("via its {how}")),
+            match matched {
+                Some(r) if !r.source_group.is_empty() => (
+                    Status::Ok,
+                    format!("allowed by \"{}\": rule from security group", name_of(tsg)),
+                ),
+                Some(r) => (
+                    Status::Ok,
+                    format!("allowed by \"{}\": rule from {}", name_of(tsg), r.cidr),
+                ),
                 None => (
                     Status::Blocked,
                     format!(
-                        "\"{}\" is outside the network and \"{}\" is private",
-                        src.name, tgt.name
+                        "\"{}\" has no ingress rule allowing {} from \"{}\"",
+                        name_of(tsg),
+                        port.map(|x| format!("port {x}")).unwrap_or("this traffic".into()),
+                        src.name
                     ),
                 ),
-            };
-            out.push(Path {
-                target: tid.clone(),
-                status,
-                hops: vec![],
-                reason,
-                notes: vec![],
-            });
-            continue;
-        }
-        // Both inside networks: must be the same one.
-        let sv = sp.subnets.iter().filter_map(|s| vnet_of_subnet(p, cat, s)).next();
-        let tv = tp.subnets.iter().filter_map(|s| vnet_of_subnet(p, cat, s)).next();
-        if sv.is_some() && tv.is_some() && sv != tv {
-            out.push(Path {
-                target: tid.clone(),
-                status: Status::Blocked,
-                hops: vec![],
-                reason: "different virtual networks (no peering in the diagram)".into(),
-                notes: vec![],
-            });
-            continue;
-        }
-        let port = listening_port(&tgt);
-        let mut notes = Vec::new();
-        // Source egress rule (AWS only).
-        let src_egress_ok = pol.egress_default_allow
-            || sp.security_group.is_none()
-            || rules_of(p, sp.security_group.as_deref().unwrap())
-                .iter()
-                .any(|r| {
-                    !r.ingress
-                        && rule_matches_port(r, port)
-                        && (r.cidr == "0.0.0.0/0"
-                            || tp
-                                .subnets
-                                .iter()
-                                .any(|s| subnet_cidr(p, s).is_some_and(|c| cidr_covers(&r.cidr, &c)))
-                            || tp.security_group.as_deref() == Some(r.source_group.as_str()))
-                });
-        if !src_egress_ok {
-            out.push(Path {
-                target: tid.clone(),
-                status: Status::Blocked,
-                hops: vec![],
-                reason: format!(
-                    "\"{}\"'s security group has no egress rule allowing {}",
-                    src.name,
-                    port.map(|x| format!("port {x}")).unwrap_or("this traffic".into())
-                ),
-                notes,
-            });
-            continue;
-        }
-        // Target ingress rule.
-        let (status, reason) = match tp.security_group.as_deref() {
-            None => {
-                if pol.intra_network_default_allow {
-                    (
-                        Status::Ok,
-                        "allowed by the network's default rules (no security group on the target)".into(),
-                    )
-                } else {
-                    (
-                        Status::Unknown,
-                        format!(
-                            "\"{}\" has no security group; the VPC default group applies",
-                            tgt.name
-                        ),
-                    )
-                }
             }
-            Some(tsg) => {
-                let matched = rules_of(p, tsg).into_iter().find(|r| {
-                    r.ingress
-                        && rule_matches_port(r, port)
-                        && (r.cidr == "0.0.0.0/0"
-                            || (!r.source_group.is_empty()
-                                && sp.security_group.as_deref() == Some(r.source_group.as_str()))
-                            || (!r.cidr.is_empty()
-                                && sp
-                                    .subnets
-                                    .iter()
-                                    .any(|s| subnet_cidr(p, s).is_some_and(|c| cidr_covers(&r.cidr, &c)))))
-                });
-                match matched {
-                    Some(r) if !r.source_group.is_empty() => (
-                        Status::Ok,
-                        format!(
-                            "allowed by \"{}\": rule from security group",
-                            p.entity(tsg).map(|x| x.name).unwrap_or("")
-                        ),
-                    ),
-                    Some(r) => (
-                        Status::Ok,
-                        format!(
-                            "allowed by \"{}\": rule from {}",
-                            p.entity(tsg).map(|x| x.name).unwrap_or(""),
-                            r.cidr
-                        ),
-                    ),
-                    None => (
-                        Status::Blocked,
-                        format!(
-                            "\"{}\" has no ingress rule allowing {} from \"{}\"",
-                            p.entity(tsg).map(|x| x.name).unwrap_or(""),
-                            port.map(|x| format!("port {x}")).unwrap_or("this traffic".into()),
-                            src.name
-                        ),
-                    ),
-                }
-            }
-        };
-        if status == Status::Ok && !linked && tgt.resource_type == "relational_database" {
-            notes.push(format!(
-                "no 'Uses' link from \"{}\", so it receives no host name or credentials",
-                src.name
-            ));
         }
-        let mut hops: Vec<Id> = Vec::new();
-        if let Some(s) = sp.subnets.first() {
-            hops.push(s.clone());
-        }
-        if let Some(sg) = &tp.security_group {
-            hops.push(sg.clone());
-        }
-        out.push(Path {
-            target: tid.clone(),
-            status,
-            hops,
-            reason,
-            notes,
-        });
+    };
+    if status == Status::Ok && !linked && tgt.resource_type == "relational_database" {
+        notes.push(format!(
+            "no 'Uses' link from \"{}\", so it receives no host name or credentials",
+            src.name
+        ));
     }
-    out
+    let mut hops: Vec<Id> = Vec::new();
+    if let Some(s) = sp.subnets.first() {
+        hops.push(s.clone());
+    }
+    hops.extend(fabric);
+    if let Some(sg) = &tp.security_group {
+        hops.push(sg.clone());
+    }
+    path(status, hops, reason, notes)
 }
 
 /// Who can reach `target`: every initiating resource, with the path it would take.

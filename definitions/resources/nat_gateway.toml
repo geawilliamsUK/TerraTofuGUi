@@ -21,6 +21,7 @@ icon = "NAT"
 [[relations]]
 kind = "network_membership"
 label = "Lives in subnet"
+providers = ["aws"]
 targets = ["subnet"]
 cardinality = "one"
 

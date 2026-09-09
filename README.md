@@ -13,10 +13,10 @@ provider — never a single "portable" HCL file, because no such thing can exist
 
 ![TerraTofu GUI with the three-tier example open](docs/screenshot.png)
 
-Status: **Phase 2 catalog** — 30 curated abstract types mapped for AWS and Azure, plus
+Status: **Phase 2 catalog** — 31 curated abstract types mapped for AWS and Azure, plus
 every native provider resource through the bundled schema index (see "Beyond the
 curated catalog"). Curated: networking (Virtual Network, Subnet, Internet Gateway, NAT
-Gateway, Route Table, Security Group, Private Endpoint), compute (Compute Instance,
+Gateway, Route Table, Security Group, Private Endpoint, Network Peering), compute (Compute Instance,
 Autoscaling Group, Load Balancer), data (Relational Database, NoSQL Table, Cache, Object
 Storage), serverless (Function, Event Queue, Topic, the Azure-only Storage Queue and
 Service Bus Namespace), containers (Container App,
@@ -136,8 +136,12 @@ OpenTofu installed, so a definition change that produces invalid HCL fails the b
   listens on. With nothing selected it shows the network posture: an orange ring and
   inbound arrow on anything exposed to the internet, a dot for resources with or without
   an outbound path. The inspector lists "Can reach" / "Reached by" with a *path* button
-  that filters the canvas to just that path. The same analysis is available headless
-  with `ttg reach <project> --from <name>`.
+  that filters the canvas to just that path. Paths follow the network fabric: across a
+  Network Peering (on AWS only once both sides' route tables are linked to it), over a
+  Private Endpoint in the source's network (no NAT needed), and through a Load Balancer
+  when the target only admits the balancer's group. The same analysis is available
+  headless with `ttg reach <project> --from <name>`; `examples/hub-spoke.ttg.json` shows
+  all three.
 
 ![Reachability overlay from the job runner](docs/screenshot-reachability.png)
 

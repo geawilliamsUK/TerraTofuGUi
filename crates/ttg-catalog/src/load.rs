@@ -129,6 +129,10 @@ const BUILTIN_RESOURCES: &[(&str, &str)] = &[
         "resources/cache.toml",
         include_str!("../../../definitions/resources/cache.toml"),
     ),
+    (
+        "resources/network_peering.toml",
+        include_str!("../../../definitions/resources/network_peering.toml"),
+    ),
 ];
 
 const BUILTIN_PROVIDERS: &[(&str, &str)] = &[

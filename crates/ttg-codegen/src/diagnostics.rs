@@ -588,6 +588,16 @@ pub fn run(full: &Project, cat: &Catalog, provider: &str) -> Vec<Diagnostic> {
             let Some(t) = p.entity(&edge.target) else {
                 continue;
             };
+            // Relations declared for other providers only are silently ignored here.
+            let scoped_elsewhere = def.relations.iter().any(|r| {
+                r.kind == edge.relation.key()
+                    && r.targets.iter().any(|x| x == t.resource_type)
+                    && !r.providers.is_empty()
+                    && !r.providers.iter().any(|x| x == provider)
+            });
+            if scoped_elsewhere {
+                continue;
+            }
             let is_consumed = consumed.iter().any(|c| {
                 c.relation == edge.relation.key()
                     && c.target_type.as_deref().is_none_or(|tt| tt == t.resource_type)
@@ -725,12 +735,48 @@ pub fn condition_holds(
     c: &Condition,
     item: Option<(&Record, usize)>,
 ) -> bool {
+    condition_holds_for(p, cat, provider, e, c, item, None)
+}
+
+/// [`condition_holds`] with the current relation target of a repeated block, so
+/// `target_shares_ancestor` conditions can be decided.
+pub fn condition_holds_for(
+    p: &Project,
+    cat: &Catalog,
+    provider: &str,
+    e: &EntityRef,
+    c: &Condition,
+    item: Option<(&Record, usize)>,
+    target: Option<&str>,
+) -> bool {
     match c {
         Condition::Relation(r) => {
-            let present = Relation::from_key(&r.relation)
-                .map(|k| !relation_targets_of_type(p, cat, e, k, r.target_type.as_deref()).is_empty())
-                .unwrap_or(false);
+            let targets = Relation::from_key(&r.relation)
+                .map(|k| relation_targets_of_type(p, cat, e, k, r.target_type.as_deref()))
+                .unwrap_or_default();
+            let present = targets.iter().any(|t| {
+                let Some(te) = p.entity(t) else { return false };
+                let v = if let Some(f) = &r.target_field {
+                    field_or_default(cat, provider, &te, f, false)
+                } else if let Some(f) = &r.target_provider_field {
+                    field_or_default(cat, provider, &te, f, true)
+                } else {
+                    return true;
+                };
+                cond_value(v.as_ref(), &r.equals, &r.not_equals)
+            });
             present != r.absent
+        }
+        Condition::Target(t) => {
+            let Some(tid) = target else { return false };
+            let mine = p
+                .ancestor_of_type(e.id, &t.target_shares_ancestor)
+                .map(|c| c.id.as_str());
+            let theirs = p
+                .ancestor_of_type(tid, &t.target_shares_ancestor)
+                .map(|c| c.id.as_str());
+            let same = mine.is_some() && mine == theirs;
+            same != t.absent
         }
         Condition::Field(f) => {
             if f.absent {
@@ -763,11 +809,11 @@ pub fn condition_holds(
         Condition::All(a) => a
             .all
             .iter()
-            .all(|c| condition_holds(p, cat, provider, e, c, item)),
+            .all(|c| condition_holds_for(p, cat, provider, e, c, item, target)),
         Condition::Any(a) => a
             .any
             .iter()
-            .any(|c| condition_holds(p, cat, provider, e, c, item)),
+            .any(|c| condition_holds_for(p, cat, provider, e, c, item, target)),
     }
 }
 
@@ -1169,19 +1215,97 @@ fn network_checks(p: &Project, cat: &Catalog, provider: &str, out: &mut Vec<Diag
             }
         }
     }
-    // Functions in subnets need an outbound route to reach queues, secrets and storage.
-    for f in entities.iter().filter(|e| e.resource_type == "function") {
-        for s in relation_targets(p, cat, f, Relation::NetworkMembership) {
-            if !egress_subnets.contains(&s) {
+    // Azure: a subnet delegated to Container Apps environments must be /23 or larger.
+    if provider == "azure" {
+        for s in &subnets {
+            let delegated = s
+                .provider_field("azure", "delegation")
+                .map(|v| v.display())
+                .as_deref()
+                == Some("app_environments");
+            let prefix = s
+                .field("cidr_block")
+                .and_then(|v| v.as_str().map(|x| x.to_string()))
+                .and_then(|c| c.split_once('/').and_then(|(_, l)| l.parse::<u32>().ok()));
+            if delegated && prefix.is_some_and(|l| l > 23) {
                 push(
-                    f.id,
+                    s.id,
                     Severity::Warning,
                     format!(
-                        "runs in subnet \"{}\" which has no default route via a NAT or Internet Gateway; it will not reach queues, secrets or storage outside the network",
-                        name_of(&s)
+                        "is delegated to Container Apps environments but /{} is too small: Azure needs /23 or larger",
+                        prefix.unwrap()
                     ),
                 );
             }
+        }
+    }
+
+    // Functions and container apps in subnets need an outbound route to reach queues,
+    // secrets and storage, unless every such link goes over a private endpoint in the
+    // same network.
+    for f in entities
+        .iter()
+        .filter(|e| e.resource_type == "function" || e.resource_type == "container_app")
+    {
+        let subnets = relation_targets(p, cat, f, Relation::NetworkMembership);
+        let Some(s) = subnets.iter().find(|s| !egress_subnets.contains(*s)) else {
+            continue;
+        };
+        if subnets.iter().any(|s| egress_subnets.contains(s)) {
+            continue; // another subnet has a way out
+        }
+        let vnet = relation_targets(p, cat, &p.entity(s).unwrap(), Relation::NetworkMembership)
+            .into_iter()
+            .next();
+        let managed_targets: Vec<Id> = p
+            .edges_from(f.id)
+            .filter(|e| e.relation != Relation::DependsOn)
+            .map(|e| e.target.clone())
+            .filter(|t| {
+                p.entity(t)
+                    .is_some_and(|x| crate::reach::is_managed(x.resource_type))
+            })
+            .collect();
+        let uncovered: Vec<String> = managed_targets
+            .iter()
+            .filter(|t| {
+                vnet.as_deref()
+                    .is_none_or(|v| crate::reach::private_endpoint_in(p, cat, v, t).is_none())
+            })
+            .map(|t| name_of(t))
+            .collect();
+        if managed_targets.is_empty() {
+            push(
+                f.id,
+                Severity::Info,
+                format!(
+                    "runs in subnet \"{}\" which has no default route via a NAT or Internet Gateway; fine while it only talks to resources inside the network or over private endpoints",
+                    name_of(s)
+                ),
+            );
+        } else if uncovered.is_empty() {
+            push(
+                f.id,
+                Severity::Info,
+                format!(
+                    "runs in subnet \"{}\" with no default route; its managed-service links all go over private endpoints in the network",
+                    name_of(s)
+                ),
+            );
+        } else {
+            push(
+                f.id,
+                Severity::Warning,
+                format!(
+                    "runs in subnet \"{}\" which has no default route via a NAT or Internet Gateway; it will not reach {} (add a NAT route or a private endpoint in this network)",
+                    name_of(s),
+                    uncovered
+                        .iter()
+                        .map(|n| format!("\"{n}\""))
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                ),
+            );
         }
     }
 }

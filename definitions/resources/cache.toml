@@ -27,12 +27,14 @@ default = "small"
 [[relations]]
 kind = "network_membership"
 label = "Subnets"
+providers = ["aws"]
 targets = ["subnet"]
 cardinality = "many"
 
 [[relations]]
 kind = "attribute_reference"
 label = "Uses security group"
+providers = ["aws"]
 targets = ["security_group"]
 cardinality = "optional"
 

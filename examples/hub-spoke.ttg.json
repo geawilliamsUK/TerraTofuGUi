@@ -1,0 +1,693 @@
+{
+  "schema_version": 1,
+  "name": "hub-spoke",
+  "settings": {
+    "tool": "opentofu",
+    "target_provider": "aws",
+    "provider_settings": {
+      "aws": {
+        "region": "eu-west-2"
+      },
+      "azure": {
+        "location": "uksouth"
+      }
+    },
+    "backend": null,
+    "state_encryption": false
+  },
+  "containers": {
+    "rg": {
+      "id": "rg",
+      "name": "hub-spoke",
+      "container_type": "resource_group",
+      "config": {},
+      "provider_config": {},
+      "position": {
+        "x": 40,
+        "y": 40
+      },
+      "size": {
+        "w": 1900,
+        "h": 900
+      },
+      "parent": null,
+      "manual": false
+    },
+    "vnet-hub": {
+      "id": "vnet-hub",
+      "name": "hub",
+      "container_type": "virtual_network",
+      "config": {
+        "cidr_block": "10.30.0.0/16"
+      },
+      "provider_config": {},
+      "position": {
+        "x": 80,
+        "y": 100
+      },
+      "size": {
+        "w": 1050,
+        "h": 780
+      },
+      "parent": "rg",
+      "manual": false
+    },
+    "vnet-spoke": {
+      "id": "vnet-spoke",
+      "name": "spoke",
+      "container_type": "virtual_network",
+      "config": {
+        "cidr_block": "10.31.0.0/16"
+      },
+      "provider_config": {},
+      "position": {
+        "x": 1180,
+        "y": 100
+      },
+      "size": {
+        "w": 720,
+        "h": 640
+      },
+      "parent": "rg",
+      "manual": false
+    }
+  },
+  "nodes": {
+    "sub-hub-pub": {
+      "id": "sub-hub-pub",
+      "name": "hub public",
+      "resource_type": "subnet",
+      "config": {
+        "cidr_block": "10.30.0.0/24"
+      },
+      "provider_config": {
+        "aws": {
+          "availability_zone": "eu-west-2a",
+          "map_public_ip": true
+        }
+      },
+      "position": {
+        "x": 120,
+        "y": 160
+      },
+      "parent": "vnet-hub",
+      "manual": false
+    },
+    "sub-hub-app": {
+      "id": "sub-hub-app",
+      "name": "hub app",
+      "resource_type": "subnet",
+      "config": {
+        "cidr_block": "10.30.1.0/24"
+      },
+      "provider_config": {
+        "aws": {
+          "availability_zone": "eu-west-2a"
+        }
+      },
+      "position": {
+        "x": 120,
+        "y": 300
+      },
+      "parent": "vnet-hub",
+      "manual": false
+    },
+    "sub-hub-db-a": {
+      "id": "sub-hub-db-a",
+      "name": "hub db a",
+      "resource_type": "subnet",
+      "config": {
+        "cidr_block": "10.30.2.0/24"
+      },
+      "provider_config": {
+        "aws": {
+          "availability_zone": "eu-west-2a"
+        },
+        "azure": {
+          "delegation": "postgres_flexible"
+        }
+      },
+      "position": {
+        "x": 120,
+        "y": 440
+      },
+      "parent": "vnet-hub",
+      "manual": false
+    },
+    "sub-hub-db-b": {
+      "id": "sub-hub-db-b",
+      "name": "hub db b",
+      "resource_type": "subnet",
+      "config": {
+        "cidr_block": "10.30.3.0/24"
+      },
+      "provider_config": {
+        "aws": {
+          "availability_zone": "eu-west-2b"
+        }
+      },
+      "position": {
+        "x": 120,
+        "y": 580
+      },
+      "parent": "vnet-hub",
+      "manual": false
+    },
+    "igw": {
+      "id": "igw",
+      "name": "igw",
+      "resource_type": "internet_gateway",
+      "config": {},
+      "provider_config": {},
+      "position": {
+        "x": 400,
+        "y": 160
+      },
+      "parent": "vnet-hub",
+      "manual": false
+    },
+    "nat": {
+      "id": "nat",
+      "name": "nat",
+      "resource_type": "nat_gateway",
+      "config": {},
+      "provider_config": {},
+      "position": {
+        "x": 400,
+        "y": 240
+      },
+      "parent": "vnet-hub",
+      "manual": false
+    },
+    "rt-hub-pub": {
+      "id": "rt-hub-pub",
+      "name": "hub public routes",
+      "resource_type": "route_table",
+      "config": {},
+      "provider_config": {},
+      "position": {
+        "x": 650,
+        "y": 160
+      },
+      "parent": "vnet-hub",
+      "manual": false
+    },
+    "rt-hub-app": {
+      "id": "rt-hub-app",
+      "name": "hub app routes",
+      "resource_type": "route_table",
+      "config": {},
+      "provider_config": {},
+      "position": {
+        "x": 650,
+        "y": 300
+      },
+      "parent": "vnet-hub",
+      "manual": false
+    },
+    "sg-lb": {
+      "id": "sg-lb",
+      "name": "lb sg",
+      "resource_type": "security_group",
+      "config": {
+        "rules": [
+          {
+            "name": "http-in",
+            "direction": "ingress",
+            "protocol": "tcp",
+            "from_port": 80,
+            "to_port": 80,
+            "cidr": "10.0.0.0/8",
+            "source_group": ""
+          },
+          {
+            "name": "all-out",
+            "direction": "egress",
+            "protocol": "all",
+            "from_port": 0,
+            "to_port": 0,
+            "cidr": "0.0.0.0/0",
+            "source_group": ""
+          }
+        ]
+      },
+      "provider_config": {},
+      "position": {
+        "x": 400,
+        "y": 380
+      },
+      "parent": "vnet-hub",
+      "manual": false
+    },
+    "sg-web": {
+      "id": "sg-web",
+      "name": "web sg",
+      "resource_type": "security_group",
+      "config": {
+        "rules": [
+          {
+            "name": "http-from-lb",
+            "direction": "ingress",
+            "protocol": "tcp",
+            "from_port": 80,
+            "to_port": 80,
+            "cidr": "",
+            "source_group": "sg-lb"
+          },
+          {
+            "name": "all-out",
+            "direction": "egress",
+            "protocol": "all",
+            "from_port": 0,
+            "to_port": 0,
+            "cidr": "0.0.0.0/0",
+            "source_group": ""
+          }
+        ]
+      },
+      "provider_config": {},
+      "position": {
+        "x": 400,
+        "y": 520
+      },
+      "parent": "vnet-hub",
+      "manual": false
+    },
+    "sg-db": {
+      "id": "sg-db",
+      "name": "db sg",
+      "resource_type": "security_group",
+      "config": {
+        "rules": [
+          {
+            "name": "pg-in",
+            "direction": "ingress",
+            "protocol": "tcp",
+            "from_port": 5432,
+            "to_port": 5432,
+            "cidr": "10.0.0.0/8",
+            "source_group": ""
+          },
+          {
+            "name": "all-out",
+            "direction": "egress",
+            "protocol": "all",
+            "from_port": 0,
+            "to_port": 0,
+            "cidr": "0.0.0.0/0",
+            "source_group": ""
+          }
+        ]
+      },
+      "provider_config": {},
+      "position": {
+        "x": 400,
+        "y": 660
+      },
+      "parent": "vnet-hub",
+      "manual": false
+    },
+    "lb-web": {
+      "id": "lb-web",
+      "name": "web lb",
+      "resource_type": "load_balancer",
+      "config": {
+        "scheme": "internal",
+        "protocol": "http",
+        "listener_port": 80,
+        "target_port": 80
+      },
+      "provider_config": {},
+      "position": {
+        "x": 880,
+        "y": 380
+      },
+      "parent": "vnet-hub",
+      "manual": false
+    },
+    "vm-web": {
+      "id": "vm-web",
+      "name": "web",
+      "resource_type": "compute_instance",
+      "config": {
+        "size": "small"
+      },
+      "provider_config": {
+        "aws": {
+          "ami": ""
+        },
+        "azure": {
+          "admin_username": "azureuser",
+          "image": "ubuntu-22.04"
+        }
+      },
+      "position": {
+        "x": 880,
+        "y": 520
+      },
+      "parent": "vnet-hub",
+      "manual": false
+    },
+    "db-hub": {
+      "id": "db-hub",
+      "name": "jobs db",
+      "resource_type": "relational_database",
+      "config": {
+        "engine": "postgres",
+        "size": "small",
+        "storage": "32",
+        "database_name": "jobs",
+        "admin_username": "dbadmin"
+      },
+      "provider_config": {
+        "azure": {
+          "server_name": "hubspoke-jobs-x7q2"
+        }
+      },
+      "position": {
+        "x": 880,
+        "y": 660
+      },
+      "parent": "vnet-hub",
+      "manual": false
+    },
+    "obj-hub": {
+      "id": "obj-hub",
+      "name": "reports",
+      "resource_type": "object_storage",
+      "config": {
+        "versioning": false
+      },
+      "provider_config": {
+        "aws": {
+          "bucket_name": "hub-spoke-reports-x7q2"
+        },
+        "azure": {
+          "account_name": "hubspokereportsx7q2",
+          "container_name": "reports",
+          "replication": "LRS"
+        }
+      },
+      "position": {
+        "x": 650,
+        "y": 800
+      },
+      "parent": "rg",
+      "manual": false
+    },
+    "sub-spoke-app": {
+      "id": "sub-spoke-app",
+      "name": "spoke app",
+      "resource_type": "subnet",
+      "config": {
+        "cidr_block": "10.31.1.0/24"
+      },
+      "provider_config": {
+        "aws": {
+          "availability_zone": "eu-west-2a"
+        },
+        "azure": {
+          "delegation": "web_serverfarms"
+        }
+      },
+      "position": {
+        "x": 1220,
+        "y": 160
+      },
+      "parent": "vnet-spoke",
+      "manual": false
+    },
+    "sub-spoke-pe": {
+      "id": "sub-spoke-pe",
+      "name": "spoke endpoints",
+      "resource_type": "subnet",
+      "config": {
+        "cidr_block": "10.31.2.0/24"
+      },
+      "provider_config": {
+        "aws": {
+          "availability_zone": "eu-west-2b"
+        }
+      },
+      "position": {
+        "x": 1220,
+        "y": 300
+      },
+      "parent": "vnet-spoke",
+      "manual": false
+    },
+    "rt-spoke": {
+      "id": "rt-spoke",
+      "name": "spoke routes",
+      "resource_type": "route_table",
+      "config": {},
+      "provider_config": {},
+      "position": {
+        "x": 1500,
+        "y": 160
+      },
+      "parent": "vnet-spoke",
+      "manual": false
+    },
+    "peer": {
+      "id": "peer",
+      "name": "spoke to hub",
+      "resource_type": "network_peering",
+      "config": {},
+      "provider_config": {},
+      "position": {
+        "x": 1500,
+        "y": 300
+      },
+      "parent": "vnet-spoke",
+      "manual": false
+    },
+    "sg-fn": {
+      "id": "sg-fn",
+      "name": "worker sg",
+      "resource_type": "security_group",
+      "config": {
+        "rules": [
+          {
+            "name": "all-out",
+            "direction": "egress",
+            "protocol": "all",
+            "from_port": 0,
+            "to_port": 0,
+            "cidr": "0.0.0.0/0",
+            "source_group": ""
+          }
+        ]
+      },
+      "provider_config": {},
+      "position": {
+        "x": 1220,
+        "y": 440
+      },
+      "parent": "vnet-spoke",
+      "manual": false
+    },
+    "fn-worker": {
+      "id": "fn-worker",
+      "name": "worker",
+      "resource_type": "function",
+      "config": {
+        "runtime": "python3.12",
+        "handler": "app.handler",
+        "memory_mb": 512,
+        "timeout_seconds": 60,
+        "http_trigger": false
+      },
+      "provider_config": {
+        "azure": {
+          "app_name": "hubspoke-worker-x7q2",
+          "storage_account_name": "hubspokeworkerx7q2"
+        }
+      },
+      "position": {
+        "x": 1500,
+        "y": 440
+      },
+      "parent": "vnet-spoke",
+      "manual": false
+    },
+    "role-worker": {
+      "id": "role-worker",
+      "name": "worker role",
+      "resource_type": "iam_role",
+      "config": {
+        "trusted_service": "serverless",
+        "permissions": "none"
+      },
+      "provider_config": {},
+      "position": {
+        "x": 1500,
+        "y": 800
+      },
+      "parent": "rg",
+      "manual": false
+    },
+    "pe-reports": {
+      "id": "pe-reports",
+      "name": "reports endpoint",
+      "resource_type": "private_endpoint",
+      "config": {
+        "subresource": "blob"
+      },
+      "provider_config": {
+        "aws": {
+          "service": "s3"
+        }
+      },
+      "position": {
+        "x": 1500,
+        "y": 580
+      },
+      "parent": "vnet-spoke",
+      "manual": false
+    }
+  },
+  "edges": [
+    {
+      "source": "nat",
+      "relation": "network_membership",
+      "target": "sub-hub-pub"
+    },
+    {
+      "source": "rt-hub-pub",
+      "relation": "attribute_reference",
+      "target": "igw"
+    },
+    {
+      "source": "rt-hub-pub",
+      "relation": "attachment",
+      "target": "sub-hub-pub"
+    },
+    {
+      "source": "rt-hub-app",
+      "relation": "attribute_reference",
+      "target": "nat"
+    },
+    {
+      "source": "rt-hub-app",
+      "relation": "attachment",
+      "target": "sub-hub-app"
+    },
+    {
+      "source": "rt-hub-app",
+      "relation": "attachment",
+      "target": "sub-hub-db-a"
+    },
+    {
+      "source": "rt-hub-app",
+      "relation": "attachment",
+      "target": "sub-hub-db-b"
+    },
+    {
+      "source": "lb-web",
+      "relation": "network_membership",
+      "target": "sub-hub-app"
+    },
+    {
+      "source": "lb-web",
+      "relation": "network_membership",
+      "target": "sub-hub-pub"
+    },
+    {
+      "source": "lb-web",
+      "relation": "attribute_reference",
+      "target": "sg-lb"
+    },
+    {
+      "source": "lb-web",
+      "relation": "attachment",
+      "target": "vm-web"
+    },
+    {
+      "source": "vm-web",
+      "relation": "network_membership",
+      "target": "sub-hub-app"
+    },
+    {
+      "source": "vm-web",
+      "relation": "attribute_reference",
+      "target": "sg-web"
+    },
+    {
+      "source": "db-hub",
+      "relation": "network_membership",
+      "target": "sub-hub-db-a"
+    },
+    {
+      "source": "db-hub",
+      "relation": "network_membership",
+      "target": "sub-hub-db-b"
+    },
+    {
+      "source": "db-hub",
+      "relation": "attribute_reference",
+      "target": "sg-db"
+    },
+    {
+      "source": "rt-spoke",
+      "relation": "attachment",
+      "target": "sub-spoke-app"
+    },
+    {
+      "source": "rt-spoke",
+      "relation": "attachment",
+      "target": "sub-spoke-pe"
+    },
+    {
+      "source": "peer",
+      "relation": "attribute_reference",
+      "target": "vnet-hub"
+    },
+    {
+      "source": "peer",
+      "relation": "attachment",
+      "target": "rt-spoke"
+    },
+    {
+      "source": "peer",
+      "relation": "attachment",
+      "target": "rt-hub-app"
+    },
+    {
+      "source": "fn-worker",
+      "relation": "network_membership",
+      "target": "sub-spoke-app"
+    },
+    {
+      "source": "fn-worker",
+      "relation": "attribute_reference",
+      "target": "sg-fn"
+    },
+    {
+      "source": "fn-worker",
+      "relation": "attribute_reference",
+      "target": "db-hub"
+    },
+    {
+      "source": "fn-worker",
+      "relation": "attachment",
+      "target": "obj-hub"
+    },
+    {
+      "source": "fn-worker",
+      "relation": "iam_binding",
+      "target": "role-worker"
+    },
+    {
+      "source": "pe-reports",
+      "relation": "network_membership",
+      "target": "sub-spoke-pe"
+    },
+    {
+      "source": "pe-reports",
+      "relation": "attribute_reference",
+      "target": "obj-hub"
+    }
+  ],
+  "views": []
+}

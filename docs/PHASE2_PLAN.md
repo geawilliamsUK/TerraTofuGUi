@@ -210,6 +210,19 @@ Done on 2026-09-08 (items 2–5 of the visual-clarity order):
 
 Next: the v2 (one graph per provider) discussion.
 
+Done on 2026-09-09 (polish sweep):
+
+- ~~Reachability gaps~~: paths cross a `network_peering` (new curated type; AWS needs the
+  route tables linked, Azure routes by itself), go over a `private_endpoint` in the
+  source's network, and are retried through a load balancer that forwards to the
+  target (`reach::direct_path` + hop composition). Example: `hub-spoke.ttg.json`.
+- ~~Azure partial mappings~~: function code deploy (`zip_deploy_file` + run-from-package),
+  database firewall rule from an allowed range, alarm action group with an email
+  receiver, ECS task-execution role (`trusted_service = "container"`), VMSS NSG. Subnet
+  delegation and Container Apps /23 sizing are design-time checks instead of manual
+  steps. Relations can be scoped with `providers = [...]` so AWS-only links (LB security
+  group, NAT subnet, peering route tables) stop producing Azure "cannot express" noise.
+
 Still open:
 
 - Edge routing that actually avoids crossing nodes (obstacle-aware; the current router

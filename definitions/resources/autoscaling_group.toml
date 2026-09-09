@@ -204,8 +204,9 @@ storage_account_type = { value = "Standard_LRS" }
 block = "network_interface"
 
 [providers.azure.blocks.nested.args]
-name    = { value = "primary" }
-primary = { value = true }
+name                      = { value = "primary" }
+primary                   = { value = true }
+network_security_group_id = { relation = "attribute_reference", target_type = "security_group", attr = "id", optional = true }
 
 [[providers.azure.blocks.nested.nested]]
 block = "ip_configuration"

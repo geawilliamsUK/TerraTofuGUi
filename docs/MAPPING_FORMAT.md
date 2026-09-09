@@ -61,9 +61,13 @@ label = "Belongs to network"
 targets = ["virtual_network"]
 cardinality = "one"           # one (required, exactly one) | optional | many
 via_parent = true             # containment in a target container satisfies it
+providers = ["aws"]           # v2, optional: only this provider's mapping uses the link
 ```
 
-`depends_on` edges are always allowed and never need declaring.
+`depends_on` edges are always allowed and never need declaring. A relation scoped with
+`providers` (a load balancer's security group, a peering's route tables) is simply not
+the other providers' business: their mappings neither consume it nor warn that they
+cannot, and the inspector labels it accordingly.
 
 ---
 
@@ -268,6 +272,13 @@ provider field has no value, conditions use the field's declared `default`;
 "no value at all" (defaults do not count). `{ ancestor = "servicebus_namespace" }` holds
 when the entity is drawn inside a container of that type (`absent = true` inverts), so a
 mapping can create a helper resource only when no enclosing container provides it.
+
+**Conditions on targets.** `{ relation = "network_membership", target_provider_field =
+"delegation", equals = "postgres_flexible" }` (or `target_field`) counts only targets whose
+field matches, so a check can say "no linked subnet is delegated". Inside a
+`for_each_relation` block, `{ target_shares_ancestor = "virtual_network" }` holds when the
+current target sits in the same container of that type as the entity itself; a peering
+uses it to route each linked route table towards *the other* network.
 
 **Referencing a target's container.** `{ relation = "sends_to", target_type = "event_queue",
 ancestor = "servicebus_namespace", attr = "default_primary_connection_string" }` resolves

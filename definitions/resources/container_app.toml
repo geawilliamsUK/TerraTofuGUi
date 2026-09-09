@@ -25,7 +25,7 @@ label = "Image"
 type = "string"
 required = true
 default = "public.ecr.aws/nginx/nginx:latest"
-description = "Container image reference."
+description = "Container image reference. Private registries (ECR / ACR) need pull rights for the linked role or identity (AcrPull on Azure)."
 
 [[fields]]
 name = "size"
@@ -165,16 +165,23 @@ For a stable public entry point add a Load Balancer whose target group uses `tar
 
 [[providers.aws.manual_steps]]
 title = "Give the role the ECS task execution permissions"
+when = { relation = "iam_binding", target_field = "trusted_service", not_equals = "container" }
 body = """
 Fargate needs the linked role to be assumable by `ecs-tasks.amazonaws.com` with the
-`AmazonECSTaskExecutionRolePolicy` (pull images, write logs). Set the role's trusted
-service to `container` if your Role definition supports it, or attach the policy by hand.
+`AmazonECSTaskExecutionRolePolicy` (pull images, write logs). Set the linked Role's
+**Assumable by** field to `container` and both are generated.
 """
 
 # ---------------------------------------------------------------- Azure
 [providers.azure]
-status = "partial"
+status = "full"
 file = "container"
+
+# VNet integration needs a subnet delegated to Microsoft.App/environments (and /23 or
+# larger: checked by the built-in network checks).
+[[providers.azure.checks]]
+when = { all = [ { relation = "network_membership" }, { relation = "network_membership", target_provider_field = "delegation", equals = "app_environments", absent = true } ] }
+message = "\"{name}\" is VNet-integrated but no linked subnet is delegated to app_environments (set the subnet's Azure Delegation field; the environment uses the first linked subnet)"
 
 [[providers.azure.blocks]]
 key = "env"
@@ -269,19 +276,3 @@ network_security_group_id = { relation = "attribute_reference", target_type = "s
 [providers.azure.outputs]
 fqdn = { attr = "latest_revision_fqdn", description = "Latest revision FQDN" }
 
-[[providers.azure.manual_steps]]
-title = "Subnet for VNet integration must be delegated and /23 or larger"
-when = { relation = "network_membership" }
-body = """
-Container Apps environments need a dedicated subnet (at least /23 for Consumption)
-delegated to `Microsoft.App/environments`. Set the subnet's Azure **Delegation** field
-accordingly, and note that the environment uses the *first* linked subnet.
-"""
-
-[[providers.azure.manual_steps]]
-title = "Allow the identity to pull the image"
-when = { relation = "iam_binding" }
-body = """
-If the image lives in a private registry (Azure Container Registry), grant the linked
-identity `AcrPull` on the registry, or add a `registry` block with credentials.
-"""

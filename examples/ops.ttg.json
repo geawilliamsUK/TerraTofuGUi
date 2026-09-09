@@ -47,7 +47,7 @@
       },
       "size": {
         "w": 900,
-        "h": 420
+        "h": 560
       },
       "parent": "rg-ops",
       "manual": false
@@ -59,7 +59,7 @@
       "name": "apps",
       "resource_type": "subnet",
       "config": {
-        "cidr_block": "10.20.1.0/24"
+        "cidr_block": "10.20.0.0/23"
       },
       "provider_config": {
         "aws": {
@@ -257,7 +257,8 @@
         "azure": {
           "metric_namespace": "Microsoft.App/containerApps",
           "metric_name": "UsageNanoCores",
-          "aggregation": "Average"
+          "aggregation": "Average",
+          "notify_email": "ops@example.com"
         }
       },
       "position": {
@@ -265,6 +266,78 @@
         "y": 300
       },
       "parent": "rg-ops",
+      "manual": false
+    },
+    "sub-pub": {
+      "id": "sub-pub",
+      "name": "public",
+      "resource_type": "subnet",
+      "config": {
+        "cidr_block": "10.20.4.0/24"
+      },
+      "provider_config": {
+        "aws": {
+          "availability_zone": "eu-west-2a",
+          "map_public_ip": true
+        }
+      },
+      "position": {
+        "x": 120,
+        "y": 440
+      },
+      "parent": "vnet-ops",
+      "manual": false
+    },
+    "igw": {
+      "id": "igw",
+      "name": "igw",
+      "resource_type": "internet_gateway",
+      "config": {},
+      "provider_config": {},
+      "position": {
+        "x": 350,
+        "y": 440
+      },
+      "parent": "vnet-ops",
+      "manual": false
+    },
+    "nat": {
+      "id": "nat",
+      "name": "nat",
+      "resource_type": "nat_gateway",
+      "config": {},
+      "provider_config": {},
+      "position": {
+        "x": 560,
+        "y": 440
+      },
+      "parent": "vnet-ops",
+      "manual": false
+    },
+    "rt-pub": {
+      "id": "rt-pub",
+      "name": "public routes",
+      "resource_type": "route_table",
+      "config": {},
+      "provider_config": {},
+      "position": {
+        "x": 770,
+        "y": 440
+      },
+      "parent": "vnet-ops",
+      "manual": false
+    },
+    "rt-app": {
+      "id": "rt-app",
+      "name": "private routes",
+      "resource_type": "route_table",
+      "config": {},
+      "provider_config": {},
+      "position": {
+        "x": 650,
+        "y": 300
+      },
+      "parent": "vnet-ops",
       "manual": false
     }
   },
@@ -313,6 +386,36 @@
       "source": "alm-cpu",
       "target": "tp-alerts",
       "relation": "sends_to"
+    },
+    {
+      "source": "nat",
+      "relation": "network_membership",
+      "target": "sub-pub"
+    },
+    {
+      "source": "rt-pub",
+      "relation": "attribute_reference",
+      "target": "igw"
+    },
+    {
+      "source": "rt-pub",
+      "relation": "attachment",
+      "target": "sub-pub"
+    },
+    {
+      "source": "rt-app",
+      "relation": "attribute_reference",
+      "target": "nat"
+    },
+    {
+      "source": "rt-app",
+      "relation": "attachment",
+      "target": "sub-app"
+    },
+    {
+      "source": "rt-app",
+      "relation": "attachment",
+      "target": "sub-pe"
     }
   ]
 }

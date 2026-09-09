@@ -1,4 +1,4 @@
-# Abstract type: IAM Role
+# Abstract type: IAM Role  (schema_version 2)
 #
 # An identity that workloads assume. The abstract model expresses WHO may assume it
 # (`trusted_service`) and a coarse permission level (`permissions`).
@@ -12,7 +12,7 @@
 #
 # Demonstrates the `func` source (jsonencode of a policy document) and block-level `when`.
 
-schema_version = 1
+schema_version = 2
 
 [resource]
 type = "iam_role"
@@ -28,9 +28,9 @@ name = "trusted_service"
 label = "Assumable by"
 type = "enum"
 required = true
-options = ["compute", "serverless"]
+options = ["compute", "serverless", "container"]
 default = "compute"
-description = "Which kind of workload may assume this role."
+description = "Which kind of workload may assume this role: virtual machines, functions, or container apps (ECS tasks)."
 
 [[fields]]
 name = "permissions"
@@ -65,7 +65,7 @@ Version = { value = "2012-10-17" }
 [providers.aws.blocks.args.assume_role_policy.args.object.Statement.list.object]
 Effect    = { value = "Allow" }
 Action    = { value = "sts:AssumeRole" }
-Principal = { object = { Service = { map = "trusted_service", table = { compute = "ec2.amazonaws.com", serverless = "lambda.amazonaws.com" } } } }
+Principal = { object = { Service = { map = "trusted_service", table = { compute = "ec2.amazonaws.com", serverless = "lambda.amazonaws.com", container = "ecs-tasks.amazonaws.com" } } } }
 
 # Instance profile: only needed when EC2 assumes the role.
 [[providers.aws.blocks]]
@@ -86,6 +86,16 @@ when = { field = "permissions", not_equals = "none" }
 [providers.aws.blocks.args]
 role       = { self_block = "main", attr = "name" }
 policy_arn = { map = "permissions", table = { read_only = "arn:aws:iam::aws:policy/ReadOnlyAccess", admin = "arn:aws:iam::aws:policy/AdministratorAccess" } }
+
+# ECS task execution: pull images and write logs.
+[[providers.aws.blocks]]
+key = "exec_policy"
+resource = "aws_iam_role_policy_attachment"
+when = { field = "trusted_service", equals = "container" }
+
+[providers.aws.blocks.args]
+role       = { self_block = "main", attr = "name" }
+policy_arn = { value = "arn:aws:iam::aws:policy/service-role/AmazonECSTaskExecutionRolePolicy" }
 
 [providers.aws.outputs]
 arn = { attr = "arn", description = "Role ARN" }
@@ -119,6 +129,7 @@ principal_id = { attr = "principal_id", description = "Service principal object 
 
 [[providers.azure.manual_steps]]
 title = "Check the role assignment scope"
+when = { field = "permissions", not_equals = "none" }
 body = """
 The generated `azurerm_role_assignment` is scoped to the enclosing resource group. If the
 identity must reach resources in other resource groups or subscriptions, add further
@@ -127,6 +138,7 @@ identity must reach resources in other resource groups or subscriptions, add fur
 
 [[providers.azure.manual_steps]]
 title = "Deploying principal needs role-assignment rights"
+when = { field = "permissions", not_equals = "none" }
 body = """
 Creating role assignments requires the identity running `apply` to hold **Owner** or
 **User Access Administrator** on the resource group. A plain Contributor will get a 403 on

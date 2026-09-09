@@ -105,6 +105,14 @@ pub fn catalog(cat: &Catalog) -> Vec<String> {
         }
         // relations
         for r in &def.relations {
+            for pid in &r.providers {
+                if !cat.providers.contains_key(pid) {
+                    errs.push(where_(&format!(
+                        "relation '{}': providers entry '{pid}' is not a known provider",
+                        r.kind
+                    )));
+                }
+            }
             if r.min_targets.is_some() {
                 uses_v2 = true;
             }
@@ -363,10 +371,40 @@ fn for_each_items(ctx: &SourceCtx, field: &str) -> Result<Vec<String>, String> {
 fn check_condition(ctx: &mut SourceCtx, c: &Condition, errs: &mut Vec<String>) {
     match c {
         Condition::Relation(r) => {
-            if r.absent {
+            if r.absent || r.target_field.is_some() || r.target_provider_field.is_some() {
                 ctx.v2 = true;
             }
+            if r.target_field.is_some() && r.target_provider_field.is_some() {
+                errs.push(format!(
+                    "{}when: target_field and target_provider_field cannot be combined",
+                    ctx.what
+                ));
+            }
+            if (r.equals.is_some() || r.not_equals.is_some())
+                && r.target_field.is_none()
+                && r.target_provider_field.is_none()
+            {
+                errs.push(format!(
+                    "{}when: equals / not_equals on a relation condition need target_field or target_provider_field",
+                    ctx.what
+                ));
+            }
             check_relation_ref(ctx, "when", &r.relation, r.target_type.as_deref(), errs);
+        }
+        Condition::Target(t) => {
+            ctx.v2 = true;
+            if !ctx.in_relation {
+                errs.push(format!(
+                    "{}when target_shares_ancestor is only valid inside a for_each_relation block",
+                    ctx.what
+                ));
+            }
+            if !ctx.cat.is_container(&t.target_shares_ancestor) {
+                errs.push(format!(
+                    "{}when target_shares_ancestor '{}' is not a container type",
+                    ctx.what, t.target_shares_ancestor
+                ));
+            }
         }
         Condition::Field(f) => {
             if f.absent {

@@ -306,8 +306,10 @@ storage_account_name       = { if = { relation = "attachment", target_type = "ob
 storage_account_access_key = { if = { relation = "attachment", target_type = "object_storage" }, then = { relation = "attachment", target_type = "object_storage", attr = "primary_access_key" }, else = { self_block = "sa", attr = "primary_access_key" } }
 service_plan_id            = { self_block = "plan", attr = "id" }
 virtual_network_subnet_id  = { relation = "network_membership", attr = "id", optional = true }
+zip_deploy_file            = { entity_var = "package", description = "Path to the deployment zip for function \"{name}\"." }
 
 [providers.azure.blocks.args.app_settings]
+object.WEBSITE_RUN_FROM_PACKAGE = { value = "1" }
 object.QUEUE_NAME            = { relation = "sends_to", target_type = "event_queue", attr = "name" }
 object.SERVICEBUS_CONNECTION = { relation = "sends_to", target_type = "event_queue", block = "ns", attr = "default_primary_connection_string", fallback = { relation = "sends_to", target_type = "event_queue", ancestor = "servicebus_namespace", attr = "default_primary_connection_string" } }
 object.TOPIC_NAME            = { relation = "sends_to", target_type = "topic", attr = "name" }
@@ -457,22 +459,16 @@ category = { value = "FunctionAppLogs" }
 [providers.azure.outputs]
 hostname = { attr = "default_hostname", description = "Function app host name (HTTP triggers are served here)" }
 
-[[providers.azure.manual_steps]]
-title = "Deploy the function code"
-body = """
-The function app is created empty. Publish the project with
-`func azure functionapp publish <app name>` or a zip deploy. Queue triggers use the
-`AzureWebJobsServiceBus` connection app setting and the `TRIGGER_QUEUE_NAME` queue
-(Storage Queue triggers: `StorageQueueConnection` and `TRIGGER_STORAGE_QUEUE_NAME`); HTTP
-triggers are defined in the function project itself.
-"""
+[[providers.azure.checks]]
+when = { all = [ { relation = "network_membership" }, { relation = "network_membership", target_provider_field = "delegation", equals = "web_serverfarms", absent = true } ] }
+message = "\"{name}\" is VNet-integrated but no linked subnet is delegated to web_serverfarms (set the subnet's Azure Delegation field; a subnet carries one delegation, so keep databases in another subnet)"
 
 [[providers.azure.manual_steps]]
-title = "Delegate the subnet to Microsoft.Web/serverFarms"
-when = { relation = "network_membership" }
+title = "Queue trigger bindings"
+when = { any = [ { relation = "attribute_reference", target_type = "event_queue" }, { relation = "attribute_reference", target_type = "storage_queue" } ] }
 body = """
-VNet integration needs the linked subnet delegated to `Microsoft.Web/serverFarms` and a
-plan that supports it (the generated plan uses `EP1`). Set the subnet's Azure
-**Delegation** field to `web_serverfarms`. A subnet can only carry one delegation, so the
-database's delegated subnet must be a different one.
+The deployment package (the `package` variable, deployed with `WEBSITE_RUN_FROM_PACKAGE`)
+must bind its queue trigger to the generated settings: Service Bus triggers use the
+`AzureWebJobsServiceBus` connection and the `TRIGGER_QUEUE_NAME` queue; Storage Queue
+triggers use `StorageQueueConnection` and `TRIGGER_STORAGE_QUEUE_NAME`.
 """

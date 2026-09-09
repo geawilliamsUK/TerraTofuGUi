@@ -144,6 +144,12 @@ pattern = "^[a-z0-9][a-z0-9-]{1,61}[a-z0-9]$"
 pattern_hint = "3-63 lowercase letters, digits and hyphens; globally unique"
 unique_scope = "database_server"
 
+[[providers.azure.fields]]
+name = "public_access_cidr"
+label = "Allow public access from (CIDR)"
+type = "cidr"
+description = "Only used when no subnet is linked: an IPv4 range allowed through the server firewall (e.g. an office range). Empty means no client can connect."
+
 [[providers.azure.variables]]
 name = "db_password"
 type = "string"
@@ -247,26 +253,48 @@ server_name         = { self_block = "my", attr = "name" }
 charset             = { value = "utf8mb4" }
 collation           = { value = "utf8mb4_unicode_ci" }
 
+# Public servers: a firewall rule for the allowed range, when one is given.
+[[providers.azure.blocks]]
+key = "pgfw"
+resource = "azurerm_postgresql_flexible_server_firewall_rule"
+when = { all = [ { field = "engine", equals = "postgres" }, { relation = "network_membership", absent = true }, { provider_field = "public_access_cidr" } ] }
+
+[providers.azure.blocks.args]
+name             = { value = "allowed-range" }
+server_id        = { self_block = "pg", attr = "id" }
+start_ip_address = { func = "cidrhost", args = [ { provider_field = "public_access_cidr" }, { value = 0 } ] }
+end_ip_address   = { func = "cidrhost", args = [ { provider_field = "public_access_cidr" }, { value = -1 } ] }
+
+[[providers.azure.blocks]]
+key = "myfw"
+resource = "azurerm_mysql_flexible_server_firewall_rule"
+when = { all = [ { field = "engine", equals = "mysql" }, { relation = "network_membership", absent = true }, { provider_field = "public_access_cidr" } ] }
+
+[providers.azure.blocks.args]
+name                = { value = "allowed-range" }
+resource_group_name = { ancestor = "resource_group", attr = "name" }
+server_name         = { self_block = "my", attr = "name" }
+start_ip_address    = { func = "cidrhost", args = [ { provider_field = "public_access_cidr" }, { value = 0 } ] }
+end_ip_address      = { func = "cidrhost", args = [ { provider_field = "public_access_cidr" }, { value = -1 } ] }
+
+[[providers.azure.checks]]
+when = { all = [ { field = "engine", equals = "postgres" }, { relation = "network_membership" }, { relation = "network_membership", target_provider_field = "delegation", equals = "postgres_flexible", absent = true } ] }
+message = "\"{name}\" is VNet-integrated but no linked subnet is delegated to postgres_flexible (set the subnet's Azure Delegation field; only the first linked subnet is used)"
+
+[[providers.azure.checks]]
+when = { all = [ { field = "engine", equals = "mysql" }, { relation = "network_membership" }, { relation = "network_membership", target_provider_field = "delegation", equals = "mysql_flexible", absent = true } ] }
+message = "\"{name}\" is VNet-integrated but no linked subnet is delegated to mysql_flexible (set the subnet's Azure Delegation field; only the first linked subnet is used)"
+
 [providers.azure.outputs]
 postgres_fqdn = { block = "pg", attr = "fqdn", description = "PostgreSQL server host name" }
 mysql_fqdn    = { block = "my", attr = "fqdn", description = "MySQL server host name" }
 
 [[providers.azure.manual_steps]]
 title = "Open network access to the database server"
-when = { relation = "network_membership", absent = true }
+when = { all = [ { relation = "network_membership", absent = true }, { provider_field = "public_access_cidr", absent = true } ] }
 body = """
 No subnet is linked, so the flexible server is created with public network access and
 **no** firewall rules; no client can connect yet. Either link a subnet (VNet integration is
-then generated) or add `azurerm_*_flexible_server_firewall_rule` resources for the
-addresses that need access.
-"""
-
-[[providers.azure.manual_steps]]
-title = "Delegate the database subnet"
-when = { relation = "network_membership" }
-body = """
-VNet integration requires the linked subnet to be delegated to the flexible-server
-service and used by nothing else. Set the subnet's Azure **Delegation** field to
-`postgres_flexible` (or `mysql_flexible`), and keep functions and VMs in other subnets.
-Only the first linked subnet is used on Azure.
+then generated), set the Azure **Allow public access from** range (a firewall rule is
+generated), or add `azurerm_*_flexible_server_firewall_rule` resources by hand.
 """

@@ -5,8 +5,12 @@
     "tool": "opentofu",
     "target_provider": "aws",
     "provider_settings": {
-      "aws": { "region": "eu-west-2" },
-      "azure": { "location": "uksouth" }
+      "aws": {
+        "region": "eu-west-2"
+      },
+      "azure": {
+        "location": "uksouth"
+      }
     },
     "backend": null,
     "state_encryption": false
@@ -18,8 +22,14 @@
       "container_type": "resource_group",
       "config": {},
       "provider_config": {},
-      "position": { "x": 40, "y": 40 },
-      "size": { "w": 1560, "h": 900 },
+      "position": {
+        "x": 40,
+        "y": 40
+      },
+      "size": {
+        "w": 1560,
+        "h": 900
+      },
       "parent": null,
       "manual": false
     },
@@ -27,10 +37,22 @@
       "id": "vnet-5e6f7a8b",
       "name": "main",
       "container_type": "virtual_network",
-      "config": { "cidr_block": "10.0.0.0/16" },
-      "provider_config": { "aws": { "enable_dns_hostnames": true } },
-      "position": { "x": 80, "y": 100 },
-      "size": { "w": 1180, "h": 800 },
+      "config": {
+        "cidr_block": "10.0.0.0/16"
+      },
+      "provider_config": {
+        "aws": {
+          "enable_dns_hostnames": true
+        }
+      },
+      "position": {
+        "x": 80,
+        "y": 100
+      },
+      "size": {
+        "w": 1180,
+        "h": 800
+      },
       "parent": "rg-1a2b3c4d",
       "manual": false
     }
@@ -42,7 +64,10 @@
       "resource_type": "internet_gateway",
       "config": {},
       "provider_config": {},
-      "position": { "x": 120, "y": 160 },
+      "position": {
+        "x": 120,
+        "y": 160
+      },
       "parent": "vnet-5e6f7a8b",
       "manual": false
     },
@@ -52,7 +77,10 @@
       "resource_type": "nat_gateway",
       "config": {},
       "provider_config": {},
-      "position": { "x": 340, "y": 160 },
+      "position": {
+        "x": 340,
+        "y": 160
+      },
       "parent": "vnet-5e6f7a8b",
       "manual": false
     },
@@ -62,7 +90,10 @@
       "resource_type": "route_table",
       "config": {},
       "provider_config": {},
-      "position": { "x": 560, "y": 160 },
+      "position": {
+        "x": 560,
+        "y": 160
+      },
       "parent": "vnet-5e6f7a8b",
       "manual": false
     },
@@ -72,7 +103,10 @@
       "resource_type": "route_table",
       "config": {},
       "provider_config": {},
-      "position": { "x": 780, "y": 160 },
+      "position": {
+        "x": 780,
+        "y": 160
+      },
       "parent": "vnet-5e6f7a8b",
       "manual": false
     },
@@ -80,9 +114,19 @@
       "id": "subnet-9c0d1e2f",
       "name": "web a",
       "resource_type": "subnet",
-      "config": { "cidr_block": "10.0.1.0/24" },
-      "provider_config": { "aws": { "map_public_ip": true, "availability_zone": "eu-west-2a" } },
-      "position": { "x": 120, "y": 300 },
+      "config": {
+        "cidr_block": "10.0.1.0/24"
+      },
+      "provider_config": {
+        "aws": {
+          "map_public_ip": true,
+          "availability_zone": "eu-west-2a"
+        }
+      },
+      "position": {
+        "x": 120,
+        "y": 300
+      },
       "parent": "vnet-5e6f7a8b",
       "manual": false
     },
@@ -90,9 +134,19 @@
       "id": "subnet-0d1e2f3a",
       "name": "web b",
       "resource_type": "subnet",
-      "config": { "cidr_block": "10.0.3.0/24" },
-      "provider_config": { "aws": { "map_public_ip": true, "availability_zone": "eu-west-2b" } },
-      "position": { "x": 120, "y": 400 },
+      "config": {
+        "cidr_block": "10.0.3.0/24"
+      },
+      "provider_config": {
+        "aws": {
+          "map_public_ip": true,
+          "availability_zone": "eu-west-2b"
+        }
+      },
+      "position": {
+        "x": 120,
+        "y": 400
+      },
       "parent": "vnet-5e6f7a8b",
       "manual": false
     },
@@ -100,9 +154,21 @@
       "id": "subnet-3a4b5c6d",
       "name": "data a",
       "resource_type": "subnet",
-      "config": { "cidr_block": "10.0.2.0/24" },
-      "provider_config": { "aws": { "availability_zone": "eu-west-2a" } },
-      "position": { "x": 120, "y": 580 },
+      "config": {
+        "cidr_block": "10.0.2.0/24"
+      },
+      "provider_config": {
+        "aws": {
+          "availability_zone": "eu-west-2a"
+        },
+        "azure": {
+          "delegation": "postgres_flexible"
+        }
+      },
+      "position": {
+        "x": 120,
+        "y": 580
+      },
       "parent": "vnet-5e6f7a8b",
       "manual": false
     },
@@ -110,9 +176,18 @@
       "id": "subnet-4b5c6d7e",
       "name": "data b",
       "resource_type": "subnet",
-      "config": { "cidr_block": "10.0.4.0/24" },
-      "provider_config": { "aws": { "availability_zone": "eu-west-2b" } },
-      "position": { "x": 120, "y": 680 },
+      "config": {
+        "cidr_block": "10.0.4.0/24"
+      },
+      "provider_config": {
+        "aws": {
+          "availability_zone": "eu-west-2b"
+        }
+      },
+      "position": {
+        "x": 120,
+        "y": 680
+      },
       "parent": "vnet-5e6f7a8b",
       "manual": false
     },
@@ -120,9 +195,17 @@
       "id": "lb-1e2f3a4b",
       "name": "web lb",
       "resource_type": "load_balancer",
-      "config": { "scheme": "internet_facing", "protocol": "http", "listener_port": 80, "target_port": 80 },
+      "config": {
+        "scheme": "internet_facing",
+        "protocol": "http",
+        "listener_port": 80,
+        "target_port": 80
+      },
       "provider_config": {},
-      "position": { "x": 560, "y": 340 },
+      "position": {
+        "x": 560,
+        "y": 340
+      },
       "parent": "vnet-5e6f7a8b",
       "manual": false
     },
@@ -130,12 +213,22 @@
       "id": "vm-7e8f9a0b",
       "name": "app server",
       "resource_type": "compute_instance",
-      "config": { "size": "small" },
-      "provider_config": {
-        "aws": { "ami": "" },
-        "azure": { "admin_username": "azureuser", "image": "ubuntu-22.04" }
+      "config": {
+        "size": "small"
       },
-      "position": { "x": 780, "y": 340 },
+      "provider_config": {
+        "aws": {
+          "ami": ""
+        },
+        "azure": {
+          "admin_username": "azureuser",
+          "image": "ubuntu-22.04"
+        }
+      },
+      "position": {
+        "x": 780,
+        "y": 340
+      },
       "parent": "vnet-5e6f7a8b",
       "manual": false
     },
@@ -145,14 +238,49 @@
       "resource_type": "security_group",
       "config": {
         "rules": [
-          { "name": "ssh", "direction": "ingress", "protocol": "tcp", "from_port": 22, "to_port": 22, "cidr": "10.0.0.0/16", "description": "SSH from inside the network" },
-          { "name": "http", "direction": "ingress", "protocol": "tcp", "from_port": 80, "to_port": 80, "cidr": "0.0.0.0/0", "description": "HTTP from anywhere" },
-          { "name": "ephemeral", "direction": "ingress", "protocol": "tcp", "from_port": 1024, "to_port": 65535, "cidr": "10.0.0.0/16", "description": "" },
-          { "name": "all-out", "direction": "egress", "protocol": "all", "from_port": 0, "to_port": 0, "cidr": "0.0.0.0/0", "description": "All outbound" }
+          {
+            "name": "ssh",
+            "direction": "ingress",
+            "protocol": "tcp",
+            "from_port": 22,
+            "to_port": 22,
+            "cidr": "10.0.0.0/16",
+            "description": "SSH from inside the network"
+          },
+          {
+            "name": "http",
+            "direction": "ingress",
+            "protocol": "tcp",
+            "from_port": 80,
+            "to_port": 80,
+            "cidr": "0.0.0.0/0",
+            "description": "HTTP from anywhere"
+          },
+          {
+            "name": "ephemeral",
+            "direction": "ingress",
+            "protocol": "tcp",
+            "from_port": 1024,
+            "to_port": 65535,
+            "cidr": "10.0.0.0/16",
+            "description": ""
+          },
+          {
+            "name": "all-out",
+            "direction": "egress",
+            "protocol": "all",
+            "from_port": 0,
+            "to_port": 0,
+            "cidr": "0.0.0.0/0",
+            "description": "All outbound"
+          }
         ]
       },
       "provider_config": {},
-      "position": { "x": 1000, "y": 340 },
+      "position": {
+        "x": 1000,
+        "y": 340
+      },
       "parent": "vnet-5e6f7a8b",
       "manual": false
     },
@@ -160,9 +288,22 @@
       "id": "db-3c4d5e6f",
       "name": "app db",
       "resource_type": "relational_database",
-      "config": { "engine": "postgres", "size": "small", "storage": "32", "database_name": "app", "admin_username": "dbadmin" },
-      "provider_config": { "azure": { "server_name": "threetier-appdb-x7q2" } },
-      "position": { "x": 780, "y": 620 },
+      "config": {
+        "engine": "postgres",
+        "size": "small",
+        "storage": "32",
+        "database_name": "app",
+        "admin_username": "dbadmin"
+      },
+      "provider_config": {
+        "azure": {
+          "server_name": "threetier-appdb-x7q2"
+        }
+      },
+      "position": {
+        "x": 780,
+        "y": 620
+      },
       "parent": "vnet-5e6f7a8b",
       "manual": false
     },
@@ -172,12 +313,31 @@
       "resource_type": "security_group",
       "config": {
         "rules": [
-          { "name": "postgres", "direction": "ingress", "protocol": "tcp", "from_port": 5432, "to_port": 5432, "cidr": "10.0.0.0/16", "description": "PostgreSQL from inside the network" },
-          { "name": "all-out", "direction": "egress", "protocol": "all", "from_port": 0, "to_port": 0, "cidr": "0.0.0.0/0", "description": "All outbound" }
+          {
+            "name": "postgres",
+            "direction": "ingress",
+            "protocol": "tcp",
+            "from_port": 5432,
+            "to_port": 5432,
+            "cidr": "10.0.0.0/16",
+            "description": "PostgreSQL from inside the network"
+          },
+          {
+            "name": "all-out",
+            "direction": "egress",
+            "protocol": "all",
+            "from_port": 0,
+            "to_port": 0,
+            "cidr": "0.0.0.0/0",
+            "description": "All outbound"
+          }
         ]
       },
       "provider_config": {},
-      "position": { "x": 1000, "y": 620 },
+      "position": {
+        "x": 1000,
+        "y": 620
+      },
       "parent": "vnet-5e6f7a8b",
       "manual": false
     },
@@ -185,12 +345,23 @@
       "id": "obj-1c2d3e4f",
       "name": "assets",
       "resource_type": "object_storage",
-      "config": { "versioning": true },
-      "provider_config": {
-        "aws": { "bucket_name": "three-tier-assets-x7q2" },
-        "azure": { "account_name": "threetierassetsx7q2", "container_name": "assets", "replication": "LRS" }
+      "config": {
+        "versioning": true
       },
-      "position": { "x": 1340, "y": 340 },
+      "provider_config": {
+        "aws": {
+          "bucket_name": "three-tier-assets-x7q2"
+        },
+        "azure": {
+          "account_name": "threetierassetsx7q2",
+          "container_name": "assets",
+          "replication": "LRS"
+        }
+      },
+      "position": {
+        "x": 1340,
+        "y": 340
+      },
       "parent": "rg-1a2b3c4d",
       "manual": false
     },
@@ -198,31 +369,109 @@
       "id": "role-5a6b7c8d",
       "name": "app role",
       "resource_type": "iam_role",
-      "config": { "trusted_service": "compute", "permissions": "read_only" },
+      "config": {
+        "trusted_service": "compute",
+        "permissions": "read_only"
+      },
       "provider_config": {},
-      "position": { "x": 1340, "y": 620 },
+      "position": {
+        "x": 1340,
+        "y": 620
+      },
       "parent": "rg-1a2b3c4d",
       "manual": false
     }
   },
   "edges": [
-    { "source": "nat-7a8b9c0d", "target": "subnet-9c0d1e2f", "relation": "network_membership" },
-    { "source": "rt-8b9c0d1e", "target": "igw-6f7a8b9c", "relation": "attribute_reference" },
-    { "source": "rt-8b9c0d1e", "target": "subnet-9c0d1e2f", "relation": "attachment" },
-    { "source": "rt-8b9c0d1e", "target": "subnet-0d1e2f3a", "relation": "attachment" },
-    { "source": "rt-9c0d1e2f", "target": "nat-7a8b9c0d", "relation": "attribute_reference" },
-    { "source": "rt-9c0d1e2f", "target": "subnet-3a4b5c6d", "relation": "attachment" },
-    { "source": "rt-9c0d1e2f", "target": "subnet-4b5c6d7e", "relation": "attachment" },
-    { "source": "lb-1e2f3a4b", "target": "subnet-9c0d1e2f", "relation": "network_membership" },
-    { "source": "lb-1e2f3a4b", "target": "subnet-0d1e2f3a", "relation": "network_membership" },
-    { "source": "lb-1e2f3a4b", "target": "sg-2b3c4d5e", "relation": "attribute_reference" },
-    { "source": "lb-1e2f3a4b", "target": "vm-7e8f9a0b", "relation": "attachment" },
-    { "source": "vm-7e8f9a0b", "target": "subnet-9c0d1e2f", "relation": "network_membership" },
-    { "source": "vm-7e8f9a0b", "target": "role-5a6b7c8d", "relation": "iam_binding" },
-    { "source": "vm-7e8f9a0b", "target": "obj-1c2d3e4f", "relation": "attribute_reference" },
-    { "source": "vm-7e8f9a0b", "target": "sg-2b3c4d5e", "relation": "attribute_reference" },
-    { "source": "db-3c4d5e6f", "target": "subnet-3a4b5c6d", "relation": "network_membership" },
-    { "source": "db-3c4d5e6f", "target": "subnet-4b5c6d7e", "relation": "network_membership" },
-    { "source": "db-3c4d5e6f", "target": "sg-4d5e6f7a", "relation": "attribute_reference" }
+    {
+      "source": "nat-7a8b9c0d",
+      "target": "subnet-9c0d1e2f",
+      "relation": "network_membership"
+    },
+    {
+      "source": "rt-8b9c0d1e",
+      "target": "igw-6f7a8b9c",
+      "relation": "attribute_reference"
+    },
+    {
+      "source": "rt-8b9c0d1e",
+      "target": "subnet-9c0d1e2f",
+      "relation": "attachment"
+    },
+    {
+      "source": "rt-8b9c0d1e",
+      "target": "subnet-0d1e2f3a",
+      "relation": "attachment"
+    },
+    {
+      "source": "rt-9c0d1e2f",
+      "target": "nat-7a8b9c0d",
+      "relation": "attribute_reference"
+    },
+    {
+      "source": "rt-9c0d1e2f",
+      "target": "subnet-3a4b5c6d",
+      "relation": "attachment"
+    },
+    {
+      "source": "rt-9c0d1e2f",
+      "target": "subnet-4b5c6d7e",
+      "relation": "attachment"
+    },
+    {
+      "source": "lb-1e2f3a4b",
+      "target": "subnet-9c0d1e2f",
+      "relation": "network_membership"
+    },
+    {
+      "source": "lb-1e2f3a4b",
+      "target": "subnet-0d1e2f3a",
+      "relation": "network_membership"
+    },
+    {
+      "source": "lb-1e2f3a4b",
+      "target": "sg-2b3c4d5e",
+      "relation": "attribute_reference"
+    },
+    {
+      "source": "lb-1e2f3a4b",
+      "target": "vm-7e8f9a0b",
+      "relation": "attachment"
+    },
+    {
+      "source": "vm-7e8f9a0b",
+      "target": "subnet-9c0d1e2f",
+      "relation": "network_membership"
+    },
+    {
+      "source": "vm-7e8f9a0b",
+      "target": "role-5a6b7c8d",
+      "relation": "iam_binding"
+    },
+    {
+      "source": "vm-7e8f9a0b",
+      "target": "obj-1c2d3e4f",
+      "relation": "attribute_reference"
+    },
+    {
+      "source": "vm-7e8f9a0b",
+      "target": "sg-2b3c4d5e",
+      "relation": "attribute_reference"
+    },
+    {
+      "source": "db-3c4d5e6f",
+      "target": "subnet-3a4b5c6d",
+      "relation": "network_membership"
+    },
+    {
+      "source": "db-3c4d5e6f",
+      "target": "subnet-4b5c6d7e",
+      "relation": "network_membership"
+    },
+    {
+      "source": "db-3c4d5e6f",
+      "target": "sg-4d5e6f7a",
+      "relation": "attribute_reference"
+    }
   ]
 }

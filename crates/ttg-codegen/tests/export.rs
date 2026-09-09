@@ -61,8 +61,8 @@ fn three_tier_azure_terraform() {
     assert!(g.files["providers.tf"].contains("features {}"));
     assert_eq!(
         g.manual_steps.len(),
-        6,
-        "role: 2 partial steps; db: 1 (delegate subnet); lb, nat, vm: 1 unconsumed edge each"
+        3,
+        "role: 2 partial steps; vm: 1 unconsumed edge (lb / nat links are AWS-only relations)"
     );
 }
 
@@ -287,10 +287,14 @@ fn platform_example_covers_the_broad_catalog() {
     assert!(f("serverless.tf").contains("python_version = \"3.12\""));
     assert!(f("compute.tf").contains("load_balancer_backend_address_pool_ids = [\n        azurerm_lb_backend_address_pool.workers_lb_pool.id\n      ]"));
     assert!(f("outputs.tf").contains("sensitive   = true"));
-    assert!(az
-        .manual_steps
-        .iter()
-        .any(|m| m.title.contains("Deploy the function code")));
+    assert!(
+        !az.manual_steps
+            .iter()
+            .any(|m| m.title.contains("Deploy the function code")),
+        "code deploy is generated (zip_deploy_file) rather than a manual step"
+    );
+    assert!(f("serverless.tf").contains("zip_deploy_file"));
+    assert!(f("serverless.tf").contains("WEBSITE_RUN_FROM_PACKAGE"));
 }
 
 #[test]
@@ -341,7 +345,8 @@ fn job_pipeline_wires_functions_to_everything() {
         !sls.contains("resource \"azurerm_storage_account\""),
         "no implicit storage accounts"
     );
-    assert!(sls.contains("AzureWebJobsServiceBus = azurerm_servicebus_namespace.jobs_queue_ns.default_primary_connection_string"));
+    let flat = sls.split_whitespace().collect::<Vec<_>>().join(" ");
+    assert!(flat.contains("AzureWebJobsServiceBus = azurerm_servicebus_namespace.jobs_queue_ns.default_primary_connection_string"));
     assert!(sls.contains("role_definition_name = \"Azure Service Bus Data Sender\""));
     assert!(sls.contains("role_definition_name = \"Key Vault Secrets User\""));
     let db = f("database.tf");
@@ -355,10 +360,18 @@ fn job_pipeline_wires_functions_to_everything() {
             .any(|m| m.title.contains("Open network access")),
         "conditional manual step is skipped when a subnet is linked"
     );
-    assert!(az
-        .manual_steps
-        .iter()
-        .any(|m| m.title.contains("Delegate the database subnet")));
+    assert!(
+        !az.manual_steps
+            .iter()
+            .any(|m| m.title.contains("Delegate the database subnet")),
+        "delegation is a design-time check now, not a manual step"
+    );
+    assert!(
+        !az.diagnostics
+            .iter()
+            .any(|d| d.message.contains("delegated to postgres_flexible")),
+        "the example's db subnet is delegated"
+    );
 }
 
 #[test]
@@ -835,4 +848,125 @@ fn extra_arguments_and_native_resources() {
     let text = ttg_core::project::to_string(&p).unwrap();
     let back = ttg_core::project::load_str(&text).unwrap();
     assert_eq!(back.nodes["nat-policy"].extra, p.nodes["nat-policy"].extra);
+}
+
+#[test]
+fn reachability_crosses_peerings_load_balancers_and_private_endpoints() {
+    use ttg_codegen::reach::{analyse, paths_from, Status};
+    let cat = Catalog::builtin();
+    let p = example("hub-spoke.ttg.json");
+    let name = |id: &str| p.entity(id).map(|e| e.name.to_string()).unwrap_or_default();
+    let hops =
+        |path: &ttg_codegen::reach::Path| -> Vec<String> { path.hops.iter().map(|h| name(h)).collect() };
+
+    for provider in ["aws", "azure"] {
+        let r = analyse(&p, &cat, provider);
+        let paths = paths_from(&p, &cat, &r, "fn-worker");
+        let get = |t: &str| paths.iter().find(|x| x.target == t).unwrap();
+
+        // Database in the peered hub: through the peering, allowed by the db group's CIDR rule.
+        let db = get("db-hub");
+        assert_eq!(db.status, Status::Ok, "{provider}: {}", db.reason);
+        assert_eq!(hops(db), ["spoke app", "spoke to hub", "db sg"]);
+
+        // Web instance only accepts the load balancer's group: reached through the LB.
+        let web = get("vm-web");
+        assert_eq!(web.status, Status::Ok, "{provider}: {}", web.reason);
+        assert!(
+            web.reason.starts_with("via load balancer \"web lb\""),
+            "{}",
+            web.reason
+        );
+        assert!(hops(web).contains(&"web lb".to_string()));
+
+        // Storage over the private endpoint although the spoke has no NAT.
+        let obj = get("obj-hub");
+        assert_eq!(obj.status, Status::Ok, "{provider}: {}", obj.reason);
+        assert_eq!(hops(obj), ["spoke app", "reports endpoint"]);
+    }
+
+    // AWS needs routes: unlink the hub route table from the peering and the db path breaks.
+    let mut p2 = p.clone();
+    p2.edges
+        .retain(|e| !(e.source == "peer" && e.target == "rt-hub-app"));
+    let r2 = analyse(&p2, &cat, "aws");
+    let db = paths_from(&p2, &cat, &r2, "fn-worker")
+        .into_iter()
+        .find(|x| x.target == "db-hub")
+        .unwrap();
+    assert_eq!(db.status, Status::Blocked);
+    assert!(db.reason.contains("route table of \"jobs db\""), "{}", db.reason);
+    // Azure routes across peerings by itself.
+    let r2az = analyse(&p2, &cat, "azure");
+    assert_eq!(
+        paths_from(&p2, &cat, &r2az, "fn-worker")
+            .into_iter()
+            .find(|x| x.target == "db-hub")
+            .unwrap()
+            .status,
+        Status::Ok
+    );
+
+    // No peering at all: blocked with a hint.
+    let mut p3 = p.clone();
+    p3.remove_entity("peer");
+    let r3 = analyse(&p3, &cat, "azure");
+    let db = paths_from(&p3, &cat, &r3, "fn-worker")
+        .into_iter()
+        .find(|x| x.target == "db-hub")
+        .unwrap();
+    assert_eq!(db.status, Status::Blocked);
+    assert!(db.reason.contains("no peering"), "{}", db.reason);
+
+    // Without the private endpoint the storage link needs egress the spoke lacks.
+    let mut p4 = p.clone();
+    p4.remove_entity("pe-reports");
+    let r4 = analyse(&p4, &cat, "aws");
+    let obj = paths_from(&p4, &cat, &r4, "fn-worker")
+        .into_iter()
+        .find(|x| x.target == "obj-hub")
+        .unwrap();
+    assert_eq!(obj.status, Status::Blocked);
+    assert!(obj.reason.contains("no route out"), "{}", obj.reason);
+
+    // Without the LB forwarding link the instance is unreachable, and the note says why.
+    let mut p5 = p.clone();
+    p5.edges
+        .retain(|e| !(e.source == "lb-web" && e.target == "vm-web"));
+    let r5 = analyse(&p5, &cat, "aws");
+    let web = paths_from(&p5, &cat, &r5, "fn-worker")
+        .into_iter()
+        .find(|x| x.target == "vm-web")
+        .unwrap();
+    assert_eq!(web.status, Status::Blocked);
+
+    // Peering routes: one aws_route per linked table, each towards the other network;
+    // Azure gets both directions. Provider-scoped relations do not warn elsewhere.
+    let norm = |s: &str| s.split_whitespace().collect::<Vec<_>>().join(" ");
+    let g = ttg_codegen::emit::generate(&p, &cat, "aws", ttg_core::Tool::OpenTofu).unwrap();
+    let net = norm(&g.files["network.tf"]);
+    assert!(net.contains("resource \"aws_vpc_peering_connection\" \"spoke_to_hub\""));
+    assert!(net.contains("route_table_id = aws_route_table.spoke_routes.id destination_cidr_block = aws_vpc.hub.cidr_block"), "{net}");
+    assert!(net.contains("route_table_id = aws_route_table.hub_app_routes.id destination_cidr_block = aws_vpc.spoke.cidr_block"), "{net}");
+    let g = ttg_codegen::emit::generate(&p, &cat, "azure", ttg_core::Tool::OpenTofu).unwrap();
+    let net = &g.files["network.tf"];
+    assert_eq!(
+        net.matches("resource \"azurerm_virtual_network_peering\"")
+            .count(),
+        2
+    );
+    assert!(
+        !g.diagnostics
+            .iter()
+            .any(|d| d.message.contains("cannot express 'Attached to'")),
+        "{:?}",
+        g.diagnostics
+    );
+    // The spoke worker has no NAT but its only managed link goes over the endpoint.
+    assert!(g
+        .diagnostics
+        .iter()
+        .any(|d| d.entity.as_deref() == Some("fn-worker")
+            && d.severity == ttg_codegen::diagnostics::Severity::Info
+            && d.message.contains("private endpoints")));
 }

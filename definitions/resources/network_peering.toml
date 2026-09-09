@@ -1,0 +1,100 @@
+# Abstract type: Network Peering  (schema_version 2)
+#
+# Joins the Virtual Network the node is drawn in to another one, so resources in the
+# two networks can talk over private addresses. The peering is drawn inside one network
+# ("local") and links the other ("Peers with").
+#   AWS:   aws_vpc_peering_connection (auto-accepted, same account and region) plus one
+#          aws_route per linked route table: tables in the local VPC get a route to the
+#          peer's CIDR, tables in the peer VPC get a route back.
+#   Azure: two azurerm_virtual_network_peering resources (one per direction). Azure
+#          routes across peerings automatically, so route tables are not needed.
+#
+# Reachability treats resources in the two networks as connected once the peering exists
+# (and, on AWS, once both sides' route tables are linked to it).
+
+schema_version = 2
+
+[resource]
+type = "network_peering"
+category = "network"
+display_name = "Network Peering"
+description = "Joins the network this sits in to another network. Link 'Peers with' the other network; on AWS also link the route tables (both sides) that should route across the peering."
+kind = "node"
+allowed_parents = ["virtual_network"]
+icon = "PEER"
+
+[[relations]]
+kind = "attribute_reference"
+label = "Peers with"
+targets = ["virtual_network"]
+cardinality = "one"
+
+[[relations]]
+kind = "attachment"
+label = "Route tables (AWS)"
+providers = ["aws"]
+targets = ["route_table"]
+cardinality = "many"
+
+# ---------------------------------------------------------------- AWS
+[providers.aws]
+status = "full"
+
+[[providers.aws.checks]]
+when = { relation = "attachment", absent = true }
+message = "\"{name}\": no route tables are linked, so nothing routes across the peering on AWS (link the route tables of both networks)"
+
+[[providers.aws.blocks]]
+key = "main"
+resource = "aws_vpc_peering_connection"
+
+[providers.aws.blocks.args]
+vpc_id      = { ancestor = "virtual_network", attr = "id" }
+peer_vpc_id = { relation = "attribute_reference", attr = "id" }
+auto_accept = { value = true }
+tags        = { object = { Name = { field = "name" } } }
+
+# One route per linked route table, towards whichever network is on the other side.
+[[providers.aws.blocks]]
+key = "route"
+resource = "aws_route"
+for_each_relation = "attachment"
+
+[providers.aws.blocks.args]
+route_table_id            = { target = "id" }
+destination_cidr_block    = { if = { target_shares_ancestor = "virtual_network" }, then = { relation = "attribute_reference", attr = "cidr_block" }, else = { ancestor = "virtual_network", attr = "cidr_block" } }
+vpc_peering_connection_id = { self_block = "main", attr = "id" }
+
+[providers.aws.outputs]
+id = { attr = "id", description = "VPC peering connection id" }
+
+# ---------------------------------------------------------------- Azure
+[providers.azure]
+status = "full"
+
+[[providers.azure.blocks]]
+key = "main"
+resource = "azurerm_virtual_network_peering"
+
+[providers.azure.blocks.args]
+name                         = { template = "{name}-out", transform = "kebab" }
+resource_group_name          = { ancestor = "resource_group", attr = "name" }
+virtual_network_name         = { ancestor = "virtual_network", attr = "name" }
+remote_virtual_network_id    = { relation = "attribute_reference", attr = "id" }
+allow_virtual_network_access = { value = true }
+allow_forwarded_traffic      = { value = true }
+
+[[providers.azure.blocks]]
+key = "back"
+resource = "azurerm_virtual_network_peering"
+
+[providers.azure.blocks.args]
+name                         = { template = "{name}-back", transform = "kebab" }
+resource_group_name          = { relation = "attribute_reference", ancestor = "resource_group", attr = "name" }
+virtual_network_name         = { relation = "attribute_reference", attr = "name" }
+remote_virtual_network_id    = { ancestor = "virtual_network", attr = "id" }
+allow_virtual_network_access = { value = true }
+allow_forwarded_traffic      = { value = true }
+
+[providers.azure.outputs]
+id = { attr = "id", description = "Peering id (local to remote)" }

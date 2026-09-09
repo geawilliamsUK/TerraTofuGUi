@@ -645,13 +645,14 @@ impl<'a> Emitter<'a> {
     }
 
     fn cond_holds(&self, e: &EntityRef<'a>, c: &Condition, item: Option<ItemCtx<'_>>) -> bool {
-        diagnostics::condition_holds(
+        diagnostics::condition_holds_for(
             self.p,
             self.cat,
             self.provider,
             e,
             c,
             item.and_then(|i| i.record.map(|r| (r, i.index))),
+            item.and_then(|i| i.target),
         )
     }
 
@@ -1312,6 +1313,18 @@ impl<'a> Emitter<'a> {
                     && c.target_type.as_deref().is_none_or(|tt| tt == t.resource_type)
             });
             if edge.relation != Relation::DependsOn && is_consumed {
+                continue;
+            }
+            // Relations declared for other providers only are simply not this provider's business.
+            let scoped_elsewhere = self.cat.resource(e.resource_type).is_some_and(|def| {
+                def.relations.iter().any(|r| {
+                    r.kind == edge.relation.key()
+                        && r.targets.iter().any(|x| x == t.resource_type)
+                        && !r.providers.is_empty()
+                        && !r.providers.iter().any(|x| x == self.provider)
+                })
+            });
+            if edge.relation != Relation::DependsOn && scoped_elsewhere {
                 continue;
             }
             let tname = t.name.to_string();

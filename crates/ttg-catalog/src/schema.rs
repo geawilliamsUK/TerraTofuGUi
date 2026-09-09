@@ -141,6 +141,10 @@ pub struct RelationDef {
     /// Warn when fewer targets than this are linked (e.g. RDS wants two subnets) (v2).
     #[serde(default)]
     pub min_targets: Option<usize>,
+    /// Providers this relation is meaningful for (v2). Other providers neither consume
+    /// it nor warn that they cannot; empty means every provider.
+    #[serde(default)]
+    pub providers: Vec<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Default)]
@@ -333,6 +337,18 @@ pub enum Condition {
     /// `{ ancestor = "servicebus_namespace" }` — the entity sits inside a container of
     /// that type (`absent = true` inverts) (v2).
     Ancestor(CondAncestor),
+    /// `{ target_shares_ancestor = "virtual_network" }` — inside a `for_each_relation`
+    /// block: the current target sits in the same container of that type as the entity
+    /// itself (`absent = true` inverts) (v2).
+    Target(CondTarget),
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct CondTarget {
+    pub target_shares_ancestor: String,
+    #[serde(default)]
+    pub absent: bool,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -364,6 +380,16 @@ pub struct CondRelation {
     /// Invert: holds when there is NO such target (v2).
     #[serde(default)]
     pub absent: bool,
+    /// Only count targets whose abstract field / provider field matches `equals` /
+    /// `not_equals` (v2). With neither, the field must be set and truthy.
+    #[serde(default)]
+    pub target_field: Option<String>,
+    #[serde(default)]
+    pub target_provider_field: Option<String>,
+    #[serde(default)]
+    pub equals: Option<String>,
+    #[serde(default)]
+    pub not_equals: Option<String>,
 }
 #[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]

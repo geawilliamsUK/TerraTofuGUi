@@ -45,6 +45,7 @@ cardinality = "one"
 [[relations]]
 kind = "attachment"
 label = "Security group (AWS)"
+providers = ["aws"]
 targets = ["security_group"]
 cardinality = "optional"
 
