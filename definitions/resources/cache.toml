@@ -102,3 +102,24 @@ minimum_tls_version = { value = "1.2" }
 
 [providers.azure.outputs]
 hostname = { attr = "hostname", description = "Redis host name" }
+
+# ---------------------------------------------------------------- GCP
+[providers.gcp]
+status = "full"
+notes = "Memorystore for Redis (Basic tier) on the network the cache is drawn in."
+
+[[providers.gcp.blocks]]
+key = "main"
+resource = "google_redis_instance"
+
+[providers.gcp.blocks.args]
+name               = { field = "name", transform = "kebab" }
+tier               = { value = "BASIC" }
+memory_size_gb     = { map = "size", table = { small = 1, medium = 4, large = 16 } }
+region             = { var = "region" }
+redis_version      = { value = "REDIS_7_0" }
+authorized_network = { relation = "network_membership", ancestor = "virtual_network", attr = "id", fallback = { ancestor = "virtual_network", attr = "id", optional = true } }
+
+[providers.gcp.outputs]
+host = { attr = "host", description = "Redis host" }
+port = { attr = "port", description = "Redis port" }

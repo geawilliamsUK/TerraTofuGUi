@@ -1,0 +1,37 @@
+# Provider definition: Google Cloud Platform
+#
+# Resources belong to a project (the `project` variable) and a region / zone; there is
+# no required container. The Resource Group container is logical on GCP (a Google
+# project is set up outside the diagram, or with a native `google_project` resource).
+
+schema_version = 1
+
+[provider]
+id = "gcp"
+display_name = "Google Cloud"
+description = "hashicorp/google provider, 6.x series."
+source_namespace = "hashicorp"
+source_name = "google"
+version_constraint = "~> 6.0"
+
+[[variables]]
+name = "project"
+type = "string"
+description = "Google Cloud project id to deploy into."
+
+[[variables]]
+name = "region"
+type = "string"
+description = "Default region for regional resources."
+default = "europe-west2"
+
+[[variables]]
+name = "zone"
+type = "string"
+description = "Default zone for zonal resources (instances, disks)."
+default = "europe-west2-a"
+
+[provider_block.args]
+project = { var = "project" }
+region  = { var = "region" }
+zone    = { var = "zone" }

@@ -33,12 +33,14 @@ description = "Which endpoint of the service to expose privately: blob/file/queu
 [[relations]]
 kind = "network_membership"
 label = "Subnet"
+providers = ["aws", "azure"]
 targets = ["subnet"]
 cardinality = "one"
 
 [[relations]]
 kind = "attribute_reference"
 label = "Connects to"
+providers = ["aws", "azure"]
 targets = ["object_storage", "relational_database", "key_vault", "event_queue", "servicebus_namespace", "nosql_table"]
 cardinality = "one"
 
@@ -137,3 +139,8 @@ message = "\"{name}\" connects to a storage account: the sub-resource should be 
 [[providers.azure.checks]]
 when = { all = [ { relation = "attribute_reference", target_type = "key_vault" }, { field = "subresource", not_equals = "vault" } ] }
 message = "\"{name}\" connects to a Key Vault: the sub-resource should be vault"
+
+# ---------------------------------------------------------------- GCP
+[providers.gcp]
+status = "logical"
+notes = "Every generated subnet has Private Google Access, so managed services are reached privately already; a linked Cloud SQL instance gets its private IP through the database's own private-services-access connection. Nothing is generated."

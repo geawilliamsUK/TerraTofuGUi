@@ -74,6 +74,7 @@ cardinality = "one"
 [[relations]]
 kind = "attribute_reference"
 label = "Uses (queue trigger, database, security group)"
+providers = ["aws", "azure"]
 targets = ["event_queue", "storage_queue", "relational_database", "security_group"]
 cardinality = "many"
 
@@ -92,6 +93,7 @@ cardinality = "many"
 [[relations]]
 kind = "logs_to"
 label = "Logs to"
+providers = ["aws", "azure"]
 targets = ["log_group"]
 cardinality = "optional"
 
@@ -471,4 +473,199 @@ The deployment package (the `package` variable, deployed with `WEBSITE_RUN_FROM_
 must bind its queue trigger to the generated settings: Service Bus triggers use the
 `AzureWebJobsServiceBus` connection and the `TRIGGER_QUEUE_NAME` queue; Storage Queue
 triggers use `StorageQueueConnection` and `TRIGGER_STORAGE_QUEUE_NAME`.
+"""
+
+# ---------------------------------------------------------------- GCP
+[providers.gcp]
+status = "partial"
+notes = "Cloud Functions (2nd gen). The deployment zip is uploaded to a source bucket; Pub/Sub queues trigger through an event trigger; VPC integration goes through a Serverless VPC Access connector."
+
+[[providers.gcp.fields]]
+name = "entry_point"
+label = "Entry point"
+type = "string"
+default = "handler"
+description = "Name of the exported function in the source (the abstract handler's last segment, usually)."
+
+# Source bucket unless the function is attached to an Object Storage node.
+[[providers.gcp.blocks]]
+key = "src_bucket"
+resource = "google_storage_bucket"
+when = { relation = "attachment", target_type = "object_storage", absent = true }
+
+[providers.gcp.blocks.args]
+name                        = { func = "format", args = [ { value = "%s-%s-src" }, { var = "project" }, { field = "name", transform = "kebab" } ] }
+location                    = { var = "region" }
+uniform_bucket_level_access = { value = true }
+force_destroy               = { value = true }
+
+[[providers.gcp.blocks]]
+key = "source"
+resource = "google_storage_bucket_object"
+
+[providers.gcp.blocks.args]
+name   = { template = "{name}-source", transform = "kebab" }
+bucket = { if = { relation = "attachment", target_type = "object_storage" }, then = { relation = "attachment", target_type = "object_storage", attr = "name" }, else = { self_block = "src_bucket", attr = "name" } }
+source = { entity_var = "package", description = "Path to the deployment zip for function \"{name}\"." }
+
+# Serverless VPC Access connector when the function is placed in a subnet.
+[[providers.gcp.blocks]]
+key = "connector"
+resource = "google_vpc_access_connector"
+when = { relation = "network_membership" }
+
+[providers.gcp.blocks.args]
+name   = { template = "{name}-vpc", transform = "kebab" }
+region = { var = "region" }
+
+[[providers.gcp.blocks.nested]]
+block = "subnet"
+
+[providers.gcp.blocks.nested.args]
+name = { relation = "network_membership", attr = "name" }
+
+[[providers.gcp.blocks]]
+key = "main"
+resource = "google_cloudfunctions2_function"
+
+[providers.gcp.blocks.args]
+name     = { field = "name", transform = "kebab" }
+location = { var = "region" }
+
+[[providers.gcp.blocks.nested]]
+block = "build_config"
+
+[providers.gcp.blocks.nested.args]
+runtime     = { map = "runtime", table = { "python3.12" = "python312", "nodejs20.x" = "nodejs20" } }
+entry_point = { provider_field = "entry_point", fallback = { value = "handler" } }
+
+[[providers.gcp.blocks.nested.nested]]
+block = "source"
+
+[[providers.gcp.blocks.nested.nested.nested]]
+block = "storage_source"
+
+[providers.gcp.blocks.nested.nested.nested.args]
+bucket = { self_block = "source", attr = "bucket" }
+object = { self_block = "source", attr = "name" }
+
+[[providers.gcp.blocks.nested]]
+block = "service_config"
+
+[providers.gcp.blocks.nested.args]
+available_memory              = { func = "format", args = [ { value = "%dM" }, { field = "memory_mb" } ] }
+timeout_seconds               = { field = "timeout_seconds" }
+service_account_email         = { relation = "iam_binding", attr = "email" }
+ingress_settings              = { if = { field = "http_trigger" }, then = { value = "ALLOW_ALL" }, else = { value = "ALLOW_INTERNAL_ONLY" } }
+vpc_connector                 = { if = { relation = "network_membership" }, then = { self_block = "connector", attr = "id" } }
+vpc_connector_egress_settings = { if = { relation = "network_membership" }, then = { value = "ALL_TRAFFIC" } }
+
+[providers.gcp.blocks.nested.args.environment_variables]
+object.QUEUE_TOPIC         = { relation = "sends_to", target_type = "event_queue", attr = "id" }
+object.TOPIC               = { relation = "sends_to", target_type = "topic", attr = "id" }
+object.TRIGGER_SUBSCRIPTION = { relation = "attribute_reference", target_type = "event_queue", block = "sub", attr = "id" }
+object.BUCKET              = { relation = "attachment", target_type = "object_storage", attr = "name" }
+object.DB_HOST             = { relation = "attribute_reference", target_type = "relational_database", attr = "private_ip_address", fallback = { relation = "attribute_reference", target_type = "relational_database", attr = "public_ip_address" } }
+object.DB_NAME             = { relation = "attribute_reference", target_type = "relational_database", block = "db", attr = "name" }
+object.DB_USER             = { relation = "attribute_reference", target_type = "relational_database", block = "user", attr = "name" }
+object.SECRETS             = { if = { relation = "reads" }, then = { func = "jsonencode", args = [ { func = "zipmap", args = [ { relation = "reads", attr = "secret_id", wrap = "list" }, { relation = "reads", attr = "id", wrap = "list" } ] } ] } }
+
+# Pub/Sub trigger from the linked queue's topic.
+[[providers.gcp.blocks.nested]]
+block = "event_trigger"
+when = { relation = "attribute_reference", target_type = "event_queue" }
+
+[providers.gcp.blocks.nested.args]
+event_type            = { value = "google.cloud.pubsub.topic.v1.messagePublished" }
+pubsub_topic          = { relation = "attribute_reference", target_type = "event_queue", attr = "id" }
+trigger_region        = { var = "region" }
+retry_policy          = { value = "RETRY_POLICY_RETRY" }
+service_account_email = { relation = "iam_binding", attr = "email" }
+
+# Public HTTP: anyone may invoke the underlying Cloud Run service.
+[[providers.gcp.blocks]]
+key = "invoker"
+resource = "google_cloud_run_v2_service_iam_member"
+when = { field = "http_trigger" }
+
+[providers.gcp.blocks.args]
+name     = { self_block = "main", attr = "name" }
+location = { var = "region" }
+role     = { value = "roles/run.invoker" }
+member   = { value = "allUsers" }
+
+# Least-privilege bindings for the service account, one per linked resource.
+[[providers.gcp.blocks]]
+key = "publish"
+resource = "google_pubsub_topic_iam_member"
+for_each_relation = "sends_to"
+for_each_target_type = "event_queue"
+
+[providers.gcp.blocks.args]
+topic  = { target = "id" }
+role   = { value = "roles/pubsub.publisher" }
+member = { relation = "iam_binding", attr = "member" }
+
+[[providers.gcp.blocks]]
+key = "publish_topic"
+resource = "google_pubsub_topic_iam_member"
+for_each_relation = "sends_to"
+for_each_target_type = "topic"
+
+[providers.gcp.blocks.args]
+topic  = { target = "id" }
+role   = { value = "roles/pubsub.publisher" }
+member = { relation = "iam_binding", attr = "member" }
+
+[[providers.gcp.blocks]]
+key = "consume"
+resource = "google_pubsub_subscription_iam_member"
+for_each_relation = "attribute_reference"
+for_each_target_type = "event_queue"
+
+[providers.gcp.blocks.args]
+subscription = { target = "id", block = "sub" }
+role         = { value = "roles/pubsub.subscriber" }
+member       = { relation = "iam_binding", attr = "member" }
+
+[[providers.gcp.blocks]]
+key = "secret_read"
+resource = "google_secret_manager_secret_iam_member"
+for_each_relation = "reads"
+
+[providers.gcp.blocks.args]
+secret_id = { target = "id" }
+role      = { value = "roles/secretmanager.secretAccessor" }
+member    = { relation = "iam_binding", attr = "member" }
+
+[[providers.gcp.blocks]]
+key = "bucket_rw"
+resource = "google_storage_bucket_iam_member"
+for_each_relation = "attachment"
+for_each_target_type = "object_storage"
+
+[providers.gcp.blocks.args]
+bucket = { target = "name" }
+role   = { value = "roles/storage.objectAdmin" }
+member = { relation = "iam_binding", attr = "member" }
+
+[providers.gcp.outputs]
+url = { attr = "url", description = "HTTPS URL of the function" }
+
+[[providers.gcp.manual_steps]]
+title = "Connector subnet must be a dedicated /28"
+when = { relation = "network_membership" }
+body = """
+The Serverless VPC Access connector is created on the linked subnet, which must be a
+/28 range used by nothing else. Give the function its own small subnet.
+"""
+
+[[providers.gcp.manual_steps]]
+title = "Database access needs the Cloud SQL client role"
+when = { relation = "attribute_reference", target_type = "relational_database" }
+body = """
+The function reaches the database over its private IP (through the connector) or the
+public IP. Grant the service account `roles/cloudsql.client` if you connect through the
+Cloud SQL Auth Proxy instead, and store the password in a Secret rather than the
+`db_password` variable.
 """

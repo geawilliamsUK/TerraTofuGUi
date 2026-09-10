@@ -72,6 +72,7 @@ min_targets = 2
 [[relations]]
 kind = "attribute_reference"
 label = "Uses security group"
+providers = ["aws", "azure"]
 targets = ["security_group"]
 cardinality = "optional"
 
@@ -297,4 +298,104 @@ No subnet is linked, so the flexible server is created with public network acces
 **no** firewall rules; no client can connect yet. Either link a subnet (VNet integration is
 then generated), set the Azure **Allow public access from** range (a firewall rule is
 generated), or add `azurerm_*_flexible_server_firewall_rule` resources by hand.
+"""
+
+# ---------------------------------------------------------------- GCP
+[providers.gcp]
+status = "partial"
+notes = "Cloud SQL. Linked to a subnet it gets a private IP through private services access on the subnet's network (one connection per network); without one it is public with no authorised networks."
+
+[[providers.gcp.variables]]
+name = "db_password"
+type = "string"
+description = "Administrator password for database instances that are not linked to a Secret."
+sensitive = true
+
+# Private services access: a reserved range plus the peering to Google's producer network.
+[[providers.gcp.blocks]]
+key = "psa_range"
+resource = "google_compute_global_address"
+when = { relation = "network_membership" }
+
+[providers.gcp.blocks.args]
+name          = { template = "{name}-psa-range", transform = "kebab" }
+purpose       = { value = "VPC_PEERING" }
+address_type  = { value = "INTERNAL" }
+prefix_length = { value = 16 }
+network       = { relation = "network_membership", ancestor = "virtual_network", attr = "id" }
+
+[[providers.gcp.blocks]]
+key = "psa"
+resource = "google_service_networking_connection"
+when = { relation = "network_membership" }
+
+[providers.gcp.blocks.args]
+network                 = { relation = "network_membership", ancestor = "virtual_network", attr = "id" }
+service                 = { value = "servicenetworking.googleapis.com" }
+reserved_peering_ranges = { self_block = "psa_range", attr = "name", wrap = "list" }
+
+[[providers.gcp.blocks]]
+key = "main"
+resource = "google_sql_database_instance"
+
+[providers.gcp.blocks.args]
+name                = { field = "name", transform = "kebab" }
+region              = { var = "region" }
+database_version    = { map = "engine", table = { postgres = "POSTGRES_16", mysql = "MYSQL_8_0" } }
+deletion_protection = { value = false }
+
+[[providers.gcp.blocks.nested]]
+block = "settings"
+
+[providers.gcp.blocks.nested.args]
+tier              = { map = "size", table = { small = "db-f1-micro", medium = "db-custom-2-7680", large = "db-custom-4-15360" } }
+disk_size         = { map = "storage", table = { "32" = 32, "64" = 64, "128" = 128, "256" = 256, "512" = 512 } }
+availability_type = { value = "ZONAL" }
+
+[[providers.gcp.blocks.nested.nested]]
+block = "ip_configuration"
+
+[providers.gcp.blocks.nested.nested.args]
+ipv4_enabled    = { if = { relation = "network_membership" }, then = { value = false }, else = { value = true } }
+private_network = { if = { relation = "network_membership" }, then = { self_block = "psa", attr = "network" } }
+
+[[providers.gcp.blocks]]
+key = "db"
+resource = "google_sql_database"
+
+[providers.gcp.blocks.args]
+name     = { field = "database_name" }
+instance = { self_block = "main", attr = "name" }
+
+[[providers.gcp.blocks]]
+key = "user"
+resource = "google_sql_user"
+
+[providers.gcp.blocks.args]
+name     = { field = "admin_username" }
+instance = { self_block = "main", attr = "name" }
+password = { if = { relation = "reads" }, then = { relation = "reads", block = "version", attr = "secret_data" }, else = { var = "db_password" } }
+
+[providers.gcp.outputs]
+private_ip      = { attr = "private_ip_address", description = "Private IPv4 address (VNet-integrated instances)" }
+public_ip       = { attr = "public_ip_address", description = "Public IPv4 address (public instances)" }
+connection_name = { attr = "connection_name", description = "Cloud SQL connection name (for the Auth Proxy)" }
+
+[[providers.gcp.manual_steps]]
+title = "Open network access to the database instance"
+when = { relation = "network_membership", absent = true }
+body = """
+No subnet is linked, so the instance has a public address and no authorised networks:
+nothing can connect yet. Link a subnet (private IP through private services access is
+then generated) or add `settings.ip_configuration.authorized_networks` by hand.
+"""
+
+[[providers.gcp.manual_steps]]
+title = "One private-services-access connection per network"
+when = { relation = "network_membership" }
+body = """
+Private IP needs a `google_service_networking_connection` on the network, and a network
+can only have one. This database generates its own; if another database (or Memorystore
+with private services access) shares the network, keep one connection and remove the
+others' `psa` / `psa_range` resources.
 """

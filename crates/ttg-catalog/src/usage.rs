@@ -113,7 +113,7 @@ mod tests {
         let def = cat.resource("compute_instance").unwrap();
         let mut users = providers_using(def, "size");
         users.sort();
-        assert_eq!(users, vec!["aws", "azure"]);
+        assert_eq!(users, vec!["aws", "azure", "gcp"]);
         // trusted_service only drives the AWS trust policy and instance profile.
         let role = cat.resource("iam_role").unwrap();
         assert_eq!(providers_using(role, "trusted_service"), vec!["aws"]);

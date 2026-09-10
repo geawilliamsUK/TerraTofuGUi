@@ -10,7 +10,7 @@ name = "ttg"
 path = "src/main.rs"
 
 [dependencies]
-ttg-core = { path = "../ttg-core" }
+ttg-core = { path = "../ttg-core", features = ["schema"] }
 ttg-catalog = { path = "../ttg-catalog" }
 ttg-codegen = { path = "../ttg-codegen" }
 ttg-schema = { path = "../ttg-schema" }

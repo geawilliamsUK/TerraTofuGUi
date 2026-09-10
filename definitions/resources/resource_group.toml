@@ -5,7 +5,7 @@
 # logical (nothing is emitted, children are placed at top level, and no warning is raised
 # because that is the declared, intended behaviour).
 
-schema_version = 1
+schema_version = 2
 
 [resource]
 type = "resource_group"
@@ -36,3 +36,8 @@ location = { var = "location" }
 
 [providers.azure.outputs]
 id = { attr = "id", description = "Resource group id" }
+
+# ---------------------------------------------------------------- GCP
+[providers.gcp]
+status = "logical"
+notes = "A Google Cloud project is chosen with the `project` variable, not drawn; children are emitted at top level."

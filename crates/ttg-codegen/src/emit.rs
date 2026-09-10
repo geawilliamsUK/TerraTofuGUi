@@ -471,15 +471,36 @@ fn var_ref(name: &str) -> Expression {
     ))
 }
 
+/// Add `depends_on` entries to a block, merging with a `depends_on` the mapping itself
+/// wrote so the attribute is never defined twice.
 fn with_depends_on(block: Block, deps: Vec<Expression>) -> Block {
     let mut b = Block::builder(block.identifier.clone());
     for l in block.labels.iter() {
         b = b.add_label(l.clone());
     }
+    let mut merged = false;
     for s in block.body.iter() {
+        if let hcl::Structure::Attribute(a) = s {
+            if a.key() == "depends_on" {
+                let mut all: Vec<Expression> = match a.expr() {
+                    Expression::Array(items) => items.clone(),
+                    other => vec![other.clone()],
+                };
+                for d in &deps {
+                    if !all.contains(d) {
+                        all.push(d.clone());
+                    }
+                }
+                b = b.add_attribute(("depends_on", Expression::Array(all)));
+                merged = true;
+                continue;
+            }
+        }
         b = b.add_structure(s.clone());
     }
-    b = b.add_attribute(("depends_on", Expression::Array(deps)));
+    if !merged {
+        b = b.add_attribute(("depends_on", Expression::Array(deps)));
+    }
     b.build()
 }
 

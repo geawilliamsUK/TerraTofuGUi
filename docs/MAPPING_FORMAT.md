@@ -288,6 +288,10 @@ without one are skipped); `{ target = "id", ancestor = "…" }` does the same in
 reference resolves to nothing, e.g. `block = "ns"` when the queue created its own
 namespace, falling back to the enclosing namespace container otherwise.
 
+**Built-in resources.** A block may use `resource = "terraform_data"` (built into
+Terraform and OpenTofu) to hold a value other resources reference, e.g. the network tag
+a GCP security group hands to its members; the schema check skips it.
+
 **Provider layers.** Every node, container and link in a project may carry
 `providers = ["azure"]` (empty = all). Codegen, diagnostics and reachability run on the
 provider's *layer*: the graph minus entities not tagged for it, minus entities whose type

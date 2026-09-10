@@ -221,3 +221,85 @@ Azure Monitor notifies through an *action group*, not a Service Bus topic. Set t
 `azurerm_monitor_action_group` with a webhook / Logic App that forwards to the linked topic
 and add an `action { action_group_id = … }` block to the alert.
 """
+
+# ---------------------------------------------------------------- GCP
+[providers.gcp]
+status = "partial"
+notes = "A Cloud Monitoring alert policy with a threshold condition. The metric filter is a provider field (CPU utilisation of the watched instance by default); an email notification channel is generated when an address is given."
+
+[[providers.gcp.fields]]
+name = "metric_filter"
+label = "Metric filter"
+type = "string"
+description = "Overrides the per-type default (CPU utilisation for instances and databases, execution count for functions, undelivered messages for queues, CPU for container apps, latency for load balancers). Cloud Monitoring filter, e.g. metric.type=\"cloudsql.googleapis.com/database/cpu/utilization\" AND resource.type=\"cloudsql_database\", or metric.type=\"cloudfunctions.googleapis.com/function/execution_count\" AND resource.type=\"cloud_function\". CPU utilisation metrics are fractions (0..1), so a threshold of 80 needs 0.8."
+
+[[providers.gcp.fields]]
+name = "notify_email"
+label = "Notify email"
+type = "string"
+pattern = "^[^@\\s]+@[^@\\s]+\\.[^@\\s]+$"
+pattern_hint = "an email address"
+description = "When set, an email notification channel is generated and attached to the policy."
+
+[[providers.gcp.blocks]]
+key = "channel"
+resource = "google_monitoring_notification_channel"
+when = { provider_field = "notify_email" }
+
+[providers.gcp.blocks.args]
+display_name = { template = "{name} email" }
+type         = { value = "email" }
+labels       = { object = { email_address = { provider_field = "notify_email" } } }
+
+[[providers.gcp.blocks]]
+key = "main"
+resource = "google_monitoring_alert_policy"
+
+[providers.gcp.blocks.args]
+display_name          = { field = "name" }
+combiner              = { value = "OR" }
+notification_channels = { if = { provider_field = "notify_email" }, then = { self_block = "channel", attr = "id", wrap = "list" } }
+
+[[providers.gcp.blocks.nested]]
+block = "conditions"
+
+[providers.gcp.blocks.nested.args]
+display_name = { template = "{name} threshold" }
+
+[[providers.gcp.blocks.nested.nested]]
+block = "condition_threshold"
+
+[providers.gcp.blocks.nested.nested.args]
+comparison      = { map = "comparison", table = { greater_than = "COMPARISON_GT", less_than = "COMPARISON_LT" } }
+threshold_value = { field = "threshold" }
+duration        = { map = "period_seconds", table = { "60" = "60s", "300" = "300s", "900" = "900s" } }
+
+# The filter follows the watched resource: the provider field when set, else a
+# per-type default scoped to that resource.
+[providers.gcp.blocks.nested.nested.args.filter]
+provider_field = "metric_filter"
+fallback = { if = { relation = "attribute_reference", target_type = "compute_instance" }, then = { func = "format", args = [ { value = "metric.type=\"compute.googleapis.com/instance/cpu/utilization\" AND resource.type=\"gce_instance\" AND resource.labels.instance_id=\"%s\"" }, { relation = "attribute_reference", target_type = "compute_instance", attr = "instance_id" } ] }, else = { if = { relation = "attribute_reference", target_type = "relational_database" }, then = { func = "format", args = [ { value = "metric.type=\"cloudsql.googleapis.com/database/cpu/utilization\" AND resource.type=\"cloudsql_database\" AND resource.labels.database_id=\"%s:%s\"" }, { var = "project" }, { relation = "attribute_reference", target_type = "relational_database", attr = "name" } ] }, else = { if = { relation = "attribute_reference", target_type = "function" }, then = { func = "format", args = [ { value = "metric.type=\"cloudfunctions.googleapis.com/function/execution_count\" AND resource.type=\"cloud_function\" AND resource.labels.function_name=\"%s\"" }, { relation = "attribute_reference", target_type = "function", attr = "name" } ] }, else = { if = { relation = "attribute_reference", target_type = "event_queue" }, then = { func = "format", args = [ { value = "metric.type=\"pubsub.googleapis.com/subscription/num_undelivered_messages\" AND resource.type=\"pubsub_subscription\" AND resource.labels.subscription_id=\"%s\"" }, { relation = "attribute_reference", target_type = "event_queue", block = "sub", attr = "name" } ] }, else = { if = { relation = "attribute_reference", target_type = "container_app" }, then = { func = "format", args = [ { value = "metric.type=\"run.googleapis.com/container/cpu/utilizations\" AND resource.type=\"cloud_run_revision\" AND resource.labels.service_name=\"%s\"" }, { relation = "attribute_reference", target_type = "container_app", attr = "name" } ] }, else = { func = "format", args = [ { value = "metric.type=\"loadbalancing.googleapis.com/l3/external/rtt_latencies\" AND resource.type=\"loadbalancing.googleapis.com/ExternalNetworkLoadBalancerRule\" AND resource.labels.forwarding_rule_name=\"%s\"" }, { relation = "attribute_reference", target_type = "load_balancer", block = "rule", attr = "name" } ] } } } } } }
+
+[[providers.gcp.blocks.nested.nested.nested]]
+block = "aggregations"
+
+[providers.gcp.blocks.nested.nested.nested.args]
+alignment_period   = { value = "60s" }
+per_series_aligner = { value = "ALIGN_MEAN" }
+
+[[providers.gcp.blocks.nested.nested.nested]]
+block = "trigger"
+
+[providers.gcp.blocks.nested.nested.nested.args]
+count = { value = 1 }
+
+[providers.gcp.outputs]
+id = { attr = "id", description = "Alert policy id" }
+
+[[providers.gcp.manual_steps]]
+title = "Threshold units follow the metric"
+body = """
+Cloud Monitoring compares the raw metric value: CPU utilisation is a fraction (0.8, not
+80), request counts are absolute. Check the threshold against the metric named in the
+filter. 'Consecutive periods' is approximated by the duration.
+"""

@@ -123,3 +123,8 @@ nat_gateway_id = { relation = "attribute_reference", target_type = "nat_gateway"
 
 [providers.azure.outputs]
 id = { attr = "id", description = "Route table id" }
+
+# ---------------------------------------------------------------- GCP
+[providers.gcp]
+status = "logical"
+notes = "GCP routes are network-wide: the default internet route exists already and Cloud NAT applies to whole subnets, so a route table has nothing to generate."

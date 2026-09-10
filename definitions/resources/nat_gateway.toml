@@ -7,7 +7,7 @@
 #      NAT gateways directly to subnets; the Route Table mapping emits those associations
 #      for every subnet the table applies to, so the diagram reads the same on both clouds.
 
-schema_version = 1
+schema_version = 2
 
 [resource]
 type = "nat_gateway"
@@ -88,3 +88,31 @@ public_ip_address_id = { self_block = "pip", attr = "id" }
 [providers.azure.outputs]
 id        = { attr = "id", description = "NAT gateway id" }
 public_ip = { block = "pip", attr = "ip_address", description = "Public IPv4 address" }
+
+# ---------------------------------------------------------------- GCP
+[providers.gcp]
+status = "full"
+notes = "Cloud NAT on a Cloud Router covers every subnet of the network in the region, so the subnet link is not needed on GCP."
+
+[[providers.gcp.blocks]]
+key = "router"
+resource = "google_compute_router"
+
+[providers.gcp.blocks.args]
+name    = { template = "{name}-router", transform = "kebab" }
+region  = { var = "region" }
+network = { relation = "network_membership", ancestor = "virtual_network", attr = "id", fallback = { ancestor = "virtual_network", attr = "id" } }
+
+[[providers.gcp.blocks]]
+key = "main"
+resource = "google_compute_router_nat"
+
+[providers.gcp.blocks.args]
+name                               = { field = "name", transform = "kebab" }
+router                             = { self_block = "router", attr = "name" }
+region                             = { var = "region" }
+nat_ip_allocate_option             = { value = "AUTO_ONLY" }
+source_subnetwork_ip_ranges_to_nat = { value = "ALL_SUBNETWORKS_ALL_IP_RANGES" }
+
+[providers.gcp.outputs]
+id = { attr = "id", description = "Cloud NAT id" }

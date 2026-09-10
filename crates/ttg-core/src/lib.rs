@@ -7,6 +7,8 @@
 
 pub mod graph;
 pub mod ir;
+#[cfg(feature = "schema")]
+pub mod json_schema;
 pub mod layout;
 pub mod project;
 pub mod validate;

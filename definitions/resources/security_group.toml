@@ -218,3 +218,64 @@ else = { value = "*" }
 
 [providers.azure.outputs]
 id = { attr = "id", description = "Network security group id" }
+
+# ---------------------------------------------------------------- GCP
+[providers.gcp]
+status = "full"
+notes = "Firewall rules are network-level. Membership is a network tag: instances that link the group carry it (target_tags), and a rule whose source is another group matches that group's tag (source_tags)."
+
+[[providers.gcp.checks]]
+for_each_field = "rules"
+when = { all = [ { item = "cidr", equals = "" }, { item = "source_group", equals = "" } ] }
+severity = "error"
+message = "rule '{item.name}' needs a CIDR or a source security group"
+
+[[providers.gcp.checks]]
+for_each_field = "rules"
+when = { all = [ { item = "direction", equals = "egress" }, { item = "source_group", not_equals = "" } ] }
+message = "rule '{item.name}': GCP egress rules cannot target another security group; the rule is generated without a destination and applies to all destinations"
+
+[[providers.gcp.checks]]
+for_each_field = "rules"
+when = { all = [ { item = "direction", equals = "ingress" }, { item = "cidr", equals = "0.0.0.0/0" }, { item = "from_port", not_equals = "80" }, { item = "from_port", not_equals = "443" } ] }
+message = "rule '{item.name}' opens port {item.from_port} to the whole internet"
+
+# The tag instances carry: a data-only resource so that links can reference it.
+[[providers.gcp.blocks]]
+key = "tag"
+resource = "terraform_data"
+
+[providers.gcp.blocks.args]
+input = { field = "name", transform = "kebab" }
+
+[[providers.gcp.blocks]]
+key = "rule"
+resource = "google_compute_firewall"
+for_each_field = "rules"
+
+[providers.gcp.blocks.args]
+name               = { func = "replace", args = [ { func = "lower", args = [ { func = "format", args = [ { value = "%s-%s" }, { field = "name", transform = "kebab" }, { item = "name" } ] } ] }, { value = "_" }, { value = "-" } ] }
+network            = { relation = "network_membership", attr = "id" }
+direction          = { if = { item = "direction", equals = "ingress" }, then = { value = "INGRESS" }, else = { value = "EGRESS" } }
+source_ranges      = { if = { all = [ { item = "direction", equals = "ingress" }, { item = "cidr", not_equals = "" } ] }, then = { item = "cidr", wrap = "list" } }
+destination_ranges = { if = { all = [ { item = "direction", equals = "egress" }, { item = "cidr", not_equals = "" } ] }, then = { item = "cidr", wrap = "list" } }
+source_tags        = { if = { all = [ { item = "direction", equals = "ingress" }, { item = "source_group", not_equals = "" } ] }, then = { item_ref = "source_group", block = "tag", attr = "output", wrap = "list" } }
+target_tags        = { self_block = "tag", attr = "output", wrap = "list" }
+
+[[providers.gcp.blocks.nested]]
+block = "allow"
+when = { any = [ { item = "protocol", equals = "tcp" }, { item = "protocol", equals = "udp" } ] }
+
+[providers.gcp.blocks.nested.args]
+protocol = { item = "protocol" }
+ports    = { list = [ { func = "format", args = [ { value = "%d-%d" }, { item = "from_port" }, { item = "to_port" } ] } ] }
+
+[[providers.gcp.blocks.nested]]
+block = "allow"
+when = { any = [ { item = "protocol", equals = "icmp" }, { item = "protocol", equals = "all" } ] }
+
+[providers.gcp.blocks.nested.args]
+protocol = { item = "protocol" }
+
+[providers.gcp.outputs]
+tag = { block = "tag", attr = "output", description = "Network tag carried by members" }

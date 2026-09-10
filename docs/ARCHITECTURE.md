@@ -188,7 +188,9 @@ available through `Project::children_of(id)`.
 
 Container types in Phase 1: `resource_group` (Azure: `azurerm_resource_group`; AWS: *logical* —
 emits nothing, children are flattened, no warning because the definition says so explicitly),
-`virtual_network` (AWS `aws_vpc`, Azure `azurerm_virtual_network`). `project` is reserved for GCP.
+`virtual_network` (AWS `aws_vpc`, Azure `azurerm_virtual_network`, GCP `google_compute_network`).
+There is no project container: on GCP the project is the `project` provider variable and
+`resource_group` is logical, exactly as on AWS.
 
 ### 4.4 `Edge`
 

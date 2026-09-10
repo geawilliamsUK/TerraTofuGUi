@@ -144,6 +144,10 @@ const BUILTIN_PROVIDERS: &[(&str, &str)] = &[
         "providers/azure.toml",
         include_str!("../../../definitions/providers/azure.toml"),
     ),
+    (
+        "providers/gcp.toml",
+        include_str!("../../../definitions/providers/gcp.toml"),
+    ),
 ];
 
 /// The loaded, validated set of resource and provider definitions.

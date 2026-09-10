@@ -19,6 +19,7 @@ pub type Config = BTreeMap<String, Value>;
 /// Which IaC tool the project targets. Codegen differences between the two are confined
 /// to `ttg-codegen::tool`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(rename_all = "lowercase")]
 pub enum Tool {
     Terraform,
@@ -38,6 +39,7 @@ impl Tool {
 
 /// Remote/local state backend configuration. Rendered by the tool layer.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub struct BackendConfig {
     /// `local`, `s3`, `azurerm`, ...
     #[serde(rename = "type")]
@@ -47,6 +49,7 @@ pub struct BackendConfig {
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub struct Settings {
     #[serde(default)]
     pub tool: Tool,
@@ -81,12 +84,14 @@ impl Default for Settings {
 
 /// Canvas position in world units (pixels at zoom 1.0). Stored as integers.
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize, Default)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub struct Position {
     pub x: i32,
     pub y: i32,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub struct Size {
     pub w: i32,
     pub h: i32,
@@ -109,6 +114,7 @@ pub type Extras = BTreeMap<ProviderId, BTreeMap<String, ExtraArgs>>;
 
 /// A leaf resource on the canvas.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub struct Node {
     pub id: Id,
     pub name: String,
@@ -138,6 +144,7 @@ pub struct Node {
 
 /// A resource that can hold other resources (VPC, Resource Group, Project).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub struct Container {
     pub id: Id,
     pub name: String,
@@ -165,6 +172,7 @@ pub struct Container {
 /// Kinds of relationship an edge can express. Direction is always
 /// *source depends on / references target*.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(rename_all = "snake_case")]
 pub enum Relation {
     NetworkMembership,
@@ -225,6 +233,7 @@ impl Relation {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub struct Edge {
     pub source: Id,
     pub target: Id,
@@ -239,6 +248,7 @@ pub struct Edge {
 
 /// Where an edge attaches to its endpoints. Absent means automatic.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize, Default)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub struct EdgeLayout {
     #[serde(default)]
     pub source: Anchor,
@@ -248,6 +258,7 @@ pub struct EdgeLayout {
 
 /// One end of an edge: a side of the node and an offset along it.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize, Default)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub struct Anchor {
     /// `left` | `right` | `top` | `bottom`; `None` = automatic (face the other node).
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -260,6 +271,7 @@ pub struct Anchor {
 /// A saved canvas filter: which entities and links are shown. Purely visual; codegen
 /// always sees the whole project.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub struct ViewFilter {
     /// Resource categories to show (empty = all).
     #[serde(default, skip_serializing_if = "BTreeSet::is_empty")]
@@ -324,6 +336,7 @@ impl ViewFilter {
 /// Positions and sizes a view keeps separately from the shared layout. Entities not
 /// listed use the shared position, so an empty layout is "same as All, until moved".
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub struct ViewLayout {
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub positions: BTreeMap<Id, Position>,
@@ -334,6 +347,7 @@ pub struct ViewLayout {
 /// A grouping box drawn on a view: pure annotation, never exported. Entities are "in"
 /// a group when their centre lies inside its box; dragging the group takes them along.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub struct Group {
     pub id: Id,
     pub label: String,
@@ -348,6 +362,7 @@ pub struct Group {
 
 /// One end of a data-flow arrow: a resource or a group.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(untagged)]
 pub enum FlowEnd {
     Entity { entity: Id },
@@ -366,6 +381,7 @@ impl FlowEnd {
 /// A labelled data-flow arrow on a view: architecture-map annotation, never exported
 /// and never a dependency.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub struct Flow {
     pub id: Id,
     pub from: FlowEnd,
@@ -379,6 +395,7 @@ pub struct Flow {
 /// A named, saved view shown as a tab above the canvas: a filter (what is shown), an
 /// optional layout of its own (where things are), and annotations (groups, flows).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub struct View {
     pub name: String,
     #[serde(default)]
@@ -418,6 +435,7 @@ impl View {
 
 /// The whole diagram.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub struct Project {
     pub schema_version: u32,
     pub name: String,

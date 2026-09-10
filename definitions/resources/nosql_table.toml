@@ -107,3 +107,29 @@ partition_key_paths = { list = [ { template = "/{partition_key}" } ] }
 
 [providers.azure.outputs]
 endpoint = { block = "acct", attr = "endpoint", description = "Cosmos DB endpoint" }
+
+# ---------------------------------------------------------------- GCP
+[providers.gcp]
+status = "partial"
+notes = "A Firestore database in Native mode. Firestore is schemaless: the partition key is a document field convention, not configuration."
+
+[[providers.gcp.blocks]]
+key = "main"
+resource = "google_firestore_database"
+
+[providers.gcp.blocks.args]
+name            = { field = "name", transform = "kebab" }
+location_id     = { var = "region" }
+type            = { value = "FIRESTORE_NATIVE" }
+deletion_policy = { value = "DELETE" }
+
+[providers.gcp.outputs]
+name = { attr = "name", description = "Database id" }
+
+[[providers.gcp.manual_steps]]
+title = "Partition key is a convention in Firestore"
+body = """
+Firestore has no table schema: use the partition key as the document id (or a field)
+in the collection your code writes to. Multiple named databases need the Firestore
+multi-database feature enabled on the project.
+"""

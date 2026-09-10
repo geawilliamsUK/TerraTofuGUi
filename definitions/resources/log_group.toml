@@ -2,7 +2,7 @@
 #
 # AWS: aws_cloudwatch_log_group. Azure: azurerm_log_analytics_workspace (PerGB2018).
 
-schema_version = 1
+schema_version = 2
 
 [resource]
 type = "log_group"
@@ -56,3 +56,21 @@ retention_in_days   = { map = "retention_days", table = { "30" = 30, "90" = 90, 
 
 [providers.azure.outputs]
 id = { attr = "id", description = "Workspace id" }
+
+# ---------------------------------------------------------------- GCP
+[providers.gcp]
+status = "full"
+notes = "A Cloud Logging bucket in the project. Workloads log to Cloud Logging automatically; route logs into this bucket with a sink if you want them separated."
+
+[[providers.gcp.blocks]]
+key = "main"
+resource = "google_logging_project_bucket_config"
+
+[providers.gcp.blocks.args]
+project        = { var = "project" }
+location       = { value = "global" }
+bucket_id      = { field = "name", transform = "kebab" }
+retention_days = { map = "retention_days", table = { "30" = 30, "90" = 90, "365" = 365 } }
+
+[providers.gcp.outputs]
+id = { attr = "id", description = "Log bucket id" }

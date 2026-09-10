@@ -3,7 +3,7 @@
 # AWS: aws_vpc. Azure: azurerm_virtual_network. Subnets drawn inside this container
 # get their network membership from containment (see subnet.toml `via_parent`).
 
-schema_version = 1
+schema_version = 2
 
 [resource]
 type = "virtual_network"
@@ -61,3 +61,21 @@ address_space       = { field = "cidr_block", wrap = "list" }
 
 [providers.azure.outputs]
 id = { attr = "id", description = "Virtual network id" }
+
+# ---------------------------------------------------------------- GCP
+[providers.gcp]
+status = "full"
+notes = "A custom-mode VPC network. GCP networks have no address range of their own: the CIDR lives on each subnet."
+
+[[providers.gcp.blocks]]
+key = "main"
+resource = "google_compute_network"
+
+[providers.gcp.blocks.args]
+name                    = { field = "name", transform = "kebab" }
+auto_create_subnetworks = { value = false }
+routing_mode            = { value = "REGIONAL" }
+
+[providers.gcp.outputs]
+id        = { attr = "id", description = "Network id" }
+self_link = { attr = "self_link", description = "Network self link" }

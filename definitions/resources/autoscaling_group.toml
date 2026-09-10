@@ -227,3 +227,97 @@ The scale set is created with a fixed instance count. Min / max scaling on Azure
 a separate `azurerm_monitor_autoscale_setting` resource with metric rules; add one that
 targets this scale set with the min / max from the diagram.
 """
+
+# ---------------------------------------------------------------- GCP
+[providers.gcp]
+status = "partial"
+notes = "An instance template, a regional managed instance group and an autoscaler on CPU. Adding the group to a Load Balancer backend is a manual step."
+
+[[providers.gcp.fields]]
+name = "image"
+label = "Boot image"
+type = "string"
+default = "ubuntu-os-cloud/ubuntu-2204-lts"
+
+[[providers.gcp.blocks]]
+key = "template"
+resource = "google_compute_instance_template"
+
+[providers.gcp.blocks.args]
+name_prefix  = { template = "{name}-", transform = "kebab" }
+machine_type = { map = "size", table = { small = "e2-micro", medium = "e2-medium", large = "e2-standard-2" } }
+tags         = { relation = "attribute_reference", target_type = "security_group", block = "tag", attr = "output", wrap = "list", optional = true }
+
+[[providers.gcp.blocks.nested]]
+block = "disk"
+
+[providers.gcp.blocks.nested.args]
+source_image = { provider_field = "image", fallback = { value = "ubuntu-os-cloud/ubuntu-2204-lts" } }
+auto_delete  = { value = true }
+boot         = { value = true }
+
+[[providers.gcp.blocks.nested]]
+block = "network_interface"
+
+[providers.gcp.blocks.nested.args]
+subnetwork = { relation = "network_membership", attr = "id" }
+
+[[providers.gcp.blocks]]
+key = "main"
+resource = "google_compute_region_instance_group_manager"
+
+[providers.gcp.blocks.args]
+name               = { field = "name", transform = "kebab" }
+region             = { var = "region" }
+base_instance_name = { field = "name", transform = "kebab" }
+target_size        = { field = "desired_instances" }
+
+[[providers.gcp.blocks.nested]]
+block = "version"
+
+[providers.gcp.blocks.nested.args]
+instance_template = { self_block = "template", attr = "self_link" }
+
+# The linked load balancer's port becomes a named port on the group.
+[[providers.gcp.blocks.nested]]
+block = "named_port"
+when = { relation = "attachment", target_type = "load_balancer" }
+
+[providers.gcp.blocks.nested.args]
+name = { value = "app" }
+port = { relation = "attachment", target_type = "load_balancer", block = "hc", attr = "tcp_health_check.0.port" }
+
+[[providers.gcp.blocks]]
+key = "autoscaler"
+resource = "google_compute_region_autoscaler"
+
+[providers.gcp.blocks.args]
+name   = { template = "{name}-autoscaler", transform = "kebab" }
+region = { var = "region" }
+target = { self_block = "main", attr = "id" }
+
+[[providers.gcp.blocks.nested]]
+block = "autoscaling_policy"
+
+[providers.gcp.blocks.nested.args]
+min_replicas    = { field = "min_instances" }
+max_replicas    = { field = "max_instances" }
+cooldown_period = { value = 60 }
+
+[[providers.gcp.blocks.nested.nested]]
+block = "cpu_utilization"
+
+[providers.gcp.blocks.nested.nested.args]
+target = { value = 0.6 }
+
+[providers.gcp.outputs]
+instance_group = { attr = "instance_group", description = "Managed instance group URL" }
+
+[[providers.gcp.manual_steps]]
+title = "Register the instance group with the load balancer"
+when = { relation = "attachment", target_type = "load_balancer" }
+body = """
+Add a `backend { group = <this instance_group output> }` to the linked Load Balancer's
+`google_compute_region_backend_service`; the generator cannot express a group-to-LB
+attachment from the group's side on GCP.
+"""

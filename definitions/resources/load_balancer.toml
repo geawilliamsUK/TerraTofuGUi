@@ -214,3 +214,83 @@ backend_address_pool_id = { self_block = "pool", attr = "id" }
 
 [providers.azure.outputs]
 public_ip = { block = "pip", attr = "ip_address", description = "Public IPv4 address of the load balancer" }
+
+# ---------------------------------------------------------------- GCP
+[providers.gcp]
+status = "partial"
+notes = "A regional passthrough Network Load Balancer (external or internal): health check, unmanaged instance group of the linked instances, backend service and forwarding rule. HTTP is served as TCP."
+
+[[providers.gcp.blocks]]
+key = "hc"
+resource = "google_compute_region_health_check"
+
+[providers.gcp.blocks.args]
+name   = { template = "{name}-hc", transform = "kebab" }
+region = { var = "region" }
+
+[[providers.gcp.blocks.nested]]
+block = "tcp_health_check"
+
+[providers.gcp.blocks.nested.args]
+port = { field = "target_port" }
+
+[[providers.gcp.blocks]]
+key = "group"
+resource = "google_compute_instance_group"
+when = { relation = "attachment", target_type = "compute_instance" }
+
+[providers.gcp.blocks.args]
+name      = { template = "{name}-targets", transform = "kebab" }
+zone      = { var = "zone" }
+instances = { relation = "attachment", target_type = "compute_instance", attr = "self_link", wrap = "list" }
+
+[[providers.gcp.blocks.nested]]
+block = "named_port"
+
+[providers.gcp.blocks.nested.args]
+name = { value = "app" }
+port = { field = "target_port" }
+
+[[providers.gcp.blocks]]
+key = "main"
+resource = "google_compute_region_backend_service"
+
+[providers.gcp.blocks.args]
+name                  = { field = "name", transform = "kebab" }
+region                = { var = "region" }
+protocol              = { value = "TCP" }
+load_balancing_scheme = { map = "scheme", table = { internet_facing = "EXTERNAL", internal = "INTERNAL" } }
+health_checks         = { self_block = "hc", attr = "id", wrap = "list" }
+
+[[providers.gcp.blocks.nested]]
+block = "backend"
+when = { relation = "attachment", target_type = "compute_instance" }
+
+[providers.gcp.blocks.nested.args]
+group = { self_block = "group", attr = "self_link" }
+
+[[providers.gcp.blocks]]
+key = "rule"
+resource = "google_compute_forwarding_rule"
+
+[providers.gcp.blocks.args]
+name                  = { template = "{name}-rule", transform = "kebab" }
+region                = { var = "region" }
+load_balancing_scheme = { map = "scheme", table = { internet_facing = "EXTERNAL", internal = "INTERNAL" } }
+ip_protocol           = { value = "TCP" }
+ports                 = { field = "listener_port", wrap = "list" }
+backend_service       = { self_block = "main", attr = "id" }
+network               = { if = { field = "scheme", equals = "internal" }, then = { relation = "network_membership", ancestor = "virtual_network", attr = "id" } }
+subnetwork            = { if = { field = "scheme", equals = "internal" }, then = { relation = "network_membership", attr = "id" } }
+
+[providers.gcp.outputs]
+address = { block = "rule", attr = "ip_address", description = "Frontend IP address" }
+
+[[providers.gcp.manual_steps]]
+title = "Health-check probes must be allowed by the firewall"
+body = """
+Google's health-check ranges (35.191.0.0/16 and 130.211.0.0/22) must be allowed to reach
+the target port on the backends; add an ingress rule for them to the instances' Security
+Group. HTTP listeners are served as TCP passthrough; use a native
+`google_compute_region_url_map` + target proxy for an HTTP(S) load balancer.
+"""

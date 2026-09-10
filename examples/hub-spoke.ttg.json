@@ -386,6 +386,9 @@
           "account_name": "hubspokereportsx7q2",
           "container_name": "reports",
           "replication": "LRS"
+        },
+        "gcp": {
+          "bucket_name": "hub-spoke-reports-x7q2"
         }
       },
       "position": {

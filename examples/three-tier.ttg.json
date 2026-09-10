@@ -356,6 +356,9 @@
           "account_name": "threetierassetsx7q2",
           "container_name": "assets",
           "replication": "LRS"
+        },
+        "gcp": {
+          "bucket_name": "three-tier-assets-x7q2"
         }
       },
       "position": {

@@ -1,0 +1,676 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "TerraTofu GUI project (.ttg.json)",
+  "description": "A cloud-architecture diagram: settings, containers, nodes, edges and views. Written by TerraTofu GUI; readable by `ttg` and any MCP client.",
+  "type": "object",
+  "properties": {
+    "schema_version": {
+      "type": "integer",
+      "format": "uint32",
+      "minimum": 0
+    },
+    "name": {
+      "type": "string"
+    },
+    "settings": {
+      "$ref": "#/$defs/Settings",
+      "default": {
+        "tool": "opentofu",
+        "target_provider": "aws",
+        "provider_settings": {},
+        "backend": null,
+        "state_encryption": false
+      }
+    },
+    "containers": {
+      "type": "object",
+      "additionalProperties": {
+        "$ref": "#/$defs/Container"
+      },
+      "default": {}
+    },
+    "nodes": {
+      "type": "object",
+      "additionalProperties": {
+        "$ref": "#/$defs/Node"
+      },
+      "default": {}
+    },
+    "edges": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/Edge"
+      },
+      "default": []
+    },
+    "views": {
+      "description": "Saved canvas views (filters). Optional; absent in files written by older versions.",
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/View"
+      }
+    }
+  },
+  "required": [
+    "schema_version",
+    "name"
+  ],
+  "$defs": {
+    "Settings": {
+      "type": "object",
+      "properties": {
+        "tool": {
+          "$ref": "#/$defs/Tool",
+          "default": "opentofu"
+        },
+        "target_provider": {
+          "type": "string",
+          "default": "aws"
+        },
+        "provider_settings": {
+          "description": "Values for provider-level variables declared in `definitions/providers/*.toml`\n(region, location, subscription id, ...).",
+          "type": "object",
+          "additionalProperties": {
+            "type": "object",
+            "additionalProperties": {
+              "type": "string"
+            }
+          },
+          "default": {}
+        },
+        "backend": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/BackendConfig"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "state_encryption": {
+          "description": "OpenTofu-only: emit a state `encryption` block. Ignored for Terraform.",
+          "type": "boolean",
+          "default": false
+        }
+      }
+    },
+    "Tool": {
+      "description": "Which IaC tool the project targets. Codegen differences between the two are confined\nto `ttg-codegen::tool`.",
+      "type": "string",
+      "enum": [
+        "terraform",
+        "opentofu"
+      ]
+    },
+    "BackendConfig": {
+      "description": "Remote/local state backend configuration. Rendered by the tool layer.",
+      "type": "object",
+      "properties": {
+        "type": {
+          "description": "`local`, `s3`, `azurerm`, ...",
+          "type": "string"
+        },
+        "args": {
+          "type": "object",
+          "additionalProperties": {
+            "type": "string"
+          },
+          "default": {}
+        }
+      },
+      "required": [
+        "type"
+      ]
+    },
+    "Container": {
+      "description": "A resource that can hold other resources (VPC, Resource Group, Project).",
+      "type": "object",
+      "properties": {
+        "id": {
+          "type": "string"
+        },
+        "name": {
+          "type": "string"
+        },
+        "container_type": {
+          "type": "string"
+        },
+        "config": {
+          "type": "object",
+          "additionalProperties": {
+            "$ref": "#/$defs/Value"
+          },
+          "default": {}
+        },
+        "provider_config": {
+          "type": "object",
+          "additionalProperties": {
+            "type": "object",
+            "additionalProperties": {
+              "$ref": "#/$defs/Value"
+            }
+          },
+          "default": {}
+        },
+        "position": {
+          "$ref": "#/$defs/Position",
+          "default": {
+            "x": 0,
+            "y": 0
+          }
+        },
+        "size": {
+          "$ref": "#/$defs/Size",
+          "default": {
+            "w": 480,
+            "h": 320
+          }
+        },
+        "parent": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "default": null
+        },
+        "manual": {
+          "type": "boolean",
+          "default": false
+        },
+        "providers": {
+          "description": "Providers this container is part of (empty = every provider).",
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "extra": {
+          "description": "Extra provider arguments beyond what the mapping sets (schema-validated).",
+          "type": "object",
+          "additionalProperties": {
+            "type": "object",
+            "additionalProperties": {
+              "type": "object",
+              "additionalProperties": true
+            }
+          }
+        }
+      },
+      "required": [
+        "id",
+        "name",
+        "container_type"
+      ]
+    },
+    "Value": {
+      "anyOf": [
+        {
+          "type": "boolean"
+        },
+        {
+          "type": "integer",
+          "format": "int64"
+        },
+        {
+          "type": "number",
+          "format": "double"
+        },
+        {
+          "type": "string"
+        },
+        {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        {
+          "description": "Rows of a `struct_list` field (schema_version 2 definitions).",
+          "type": "array",
+          "items": {
+            "type": "object",
+            "additionalProperties": {
+              "$ref": "#/$defs/Value"
+            }
+          }
+        }
+      ]
+    },
+    "Position": {
+      "description": "Canvas position in world units (pixels at zoom 1.0). Stored as integers.",
+      "type": "object",
+      "properties": {
+        "x": {
+          "type": "integer",
+          "format": "int32"
+        },
+        "y": {
+          "type": "integer",
+          "format": "int32"
+        }
+      },
+      "required": [
+        "x",
+        "y"
+      ]
+    },
+    "Size": {
+      "type": "object",
+      "properties": {
+        "w": {
+          "type": "integer",
+          "format": "int32"
+        },
+        "h": {
+          "type": "integer",
+          "format": "int32"
+        }
+      },
+      "required": [
+        "w",
+        "h"
+      ]
+    },
+    "Node": {
+      "description": "A leaf resource on the canvas.",
+      "type": "object",
+      "properties": {
+        "id": {
+          "type": "string"
+        },
+        "name": {
+          "type": "string"
+        },
+        "resource_type": {
+          "type": "string"
+        },
+        "config": {
+          "type": "object",
+          "additionalProperties": {
+            "$ref": "#/$defs/Value"
+          },
+          "default": {}
+        },
+        "provider_config": {
+          "type": "object",
+          "additionalProperties": {
+            "type": "object",
+            "additionalProperties": {
+              "$ref": "#/$defs/Value"
+            }
+          },
+          "default": {}
+        },
+        "position": {
+          "$ref": "#/$defs/Position",
+          "default": {
+            "x": 0,
+            "y": 0
+          }
+        },
+        "size": {
+          "description": "Custom node size; absent means the default node size.",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Size"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "parent": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "default": null
+        },
+        "manual": {
+          "description": "User-declared \"this resource exists already / will be created by hand\".",
+          "type": "boolean",
+          "default": false
+        },
+        "providers": {
+          "description": "Providers this entity is part of (empty = every provider). A provider layer is\nthe abstract graph minus entities not tagged for it; see `Project::layer`.",
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "extra": {
+          "description": "Extra provider arguments beyond what the mapping sets (schema-validated).",
+          "type": "object",
+          "additionalProperties": {
+            "type": "object",
+            "additionalProperties": {
+              "type": "object",
+              "additionalProperties": true
+            }
+          }
+        }
+      },
+      "required": [
+        "id",
+        "name",
+        "resource_type"
+      ]
+    },
+    "Edge": {
+      "type": "object",
+      "properties": {
+        "source": {
+          "type": "string"
+        },
+        "target": {
+          "type": "string"
+        },
+        "relation": {
+          "$ref": "#/$defs/Relation"
+        },
+        "layout": {
+          "description": "Optional manual routing (which side of each node the line attaches to).",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/EdgeLayout"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "providers": {
+          "description": "Providers this link is part of (empty = every provider).",
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        }
+      },
+      "required": [
+        "source",
+        "target",
+        "relation"
+      ]
+    },
+    "Relation": {
+      "description": "Kinds of relationship an edge can express. Direction is always\n*source depends on / references target*.",
+      "oneOf": [
+        {
+          "type": "string",
+          "enum": [
+            "network_membership",
+            "attribute_reference",
+            "iam_binding",
+            "depends_on"
+          ]
+        },
+        {
+          "description": "Source is attached to / registered with target (route table -> subnet,\nload balancer -> instance, function -> its backing storage).",
+          "type": "string",
+          "const": "attachment"
+        },
+        {
+          "description": "Source publishes messages to target (function -> queue).",
+          "type": "string",
+          "const": "sends_to"
+        },
+        {
+          "description": "Source reads target's value (function -> secret, database -> password secret,\nsecret -> database endpoint).",
+          "type": "string",
+          "const": "reads"
+        },
+        {
+          "description": "Source writes its logs to target (function -> log group).",
+          "type": "string",
+          "const": "logs_to"
+        }
+      ]
+    },
+    "EdgeLayout": {
+      "description": "Where an edge attaches to its endpoints. Absent means automatic.",
+      "type": "object",
+      "properties": {
+        "source": {
+          "$ref": "#/$defs/Anchor",
+          "default": {
+            "offset": 0
+          }
+        },
+        "target": {
+          "$ref": "#/$defs/Anchor",
+          "default": {
+            "offset": 0
+          }
+        }
+      }
+    },
+    "Anchor": {
+      "description": "One end of an edge: a side of the node and an offset along it.",
+      "type": "object",
+      "properties": {
+        "side": {
+          "description": "`left` | `right` | `top` | `bottom`; `None` = automatic (face the other node).",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "offset": {
+          "description": "Position along the side as a percentage from -100 (start) to 100 (end); 0 = centre.",
+          "type": "integer",
+          "format": "int32",
+          "default": 0
+        }
+      }
+    },
+    "View": {
+      "description": "A named, saved view shown as a tab above the canvas: a filter (what is shown), an\noptional layout of its own (where things are), and annotations (groups, flows).",
+      "type": "object",
+      "properties": {
+        "name": {
+          "type": "string"
+        },
+        "filter": {
+          "$ref": "#/$defs/ViewFilter",
+          "default": {
+            "depth": 1
+          }
+        },
+        "layout": {
+          "description": "`Some` = this view positions things itself; `None` = shares the All layout.",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ViewLayout"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "groups": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/Group"
+          }
+        },
+        "flows": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/Flow"
+          }
+        }
+      },
+      "required": [
+        "name"
+      ]
+    },
+    "ViewFilter": {
+      "description": "A saved canvas filter: which entities and links are shown. Purely visual; codegen\nalways sees the whole project.",
+      "type": "object",
+      "properties": {
+        "categories": {
+          "description": "Resource categories to show (empty = all).",
+          "type": "array",
+          "uniqueItems": true,
+          "items": {
+            "type": "string"
+          }
+        },
+        "relations": {
+          "description": "Relation kinds to draw (empty = all).",
+          "type": "array",
+          "uniqueItems": true,
+          "items": {
+            "$ref": "#/$defs/Relation"
+          }
+        },
+        "focus": {
+          "description": "Only show entities within `depth` links of this one (plus their containers).",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "depth": {
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0,
+          "default": 1
+        },
+        "hidden": {
+          "description": "Entities hidden explicitly.",
+          "type": "array",
+          "uniqueItems": true,
+          "items": {
+            "type": "string"
+          }
+        },
+        "only": {
+          "description": "When non-empty, show only these entities (plus their containers). Used by\n\"show this path\" in the reachability overlay.",
+          "type": "array",
+          "uniqueItems": true,
+          "items": {
+            "type": "string"
+          }
+        },
+        "containers": {
+          "description": "Draw containers (networks, resource groups, vaults). Off for architecture maps\nthat group things their own way.",
+          "type": "boolean"
+        }
+      }
+    },
+    "ViewLayout": {
+      "description": "Positions and sizes a view keeps separately from the shared layout. Entities not\nlisted use the shared position, so an empty layout is \"same as All, until moved\".",
+      "type": "object",
+      "properties": {
+        "positions": {
+          "type": "object",
+          "additionalProperties": {
+            "$ref": "#/$defs/Position"
+          }
+        },
+        "sizes": {
+          "type": "object",
+          "additionalProperties": {
+            "$ref": "#/$defs/Size"
+          }
+        }
+      }
+    },
+    "Group": {
+      "description": "A grouping box drawn on a view: pure annotation, never exported. Entities are \"in\"\na group when their centre lies inside its box; dragging the group takes them along.",
+      "type": "object",
+      "properties": {
+        "id": {
+          "type": "string"
+        },
+        "label": {
+          "type": "string"
+        },
+        "position": {
+          "$ref": "#/$defs/Position",
+          "default": {
+            "x": 0,
+            "y": 0
+          }
+        },
+        "size": {
+          "$ref": "#/$defs/Size",
+          "default": {
+            "w": 480,
+            "h": 320
+          }
+        },
+        "color": {
+          "description": "`#rrggbb`; a default palette colour when absent.",
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "id",
+        "label"
+      ]
+    },
+    "Flow": {
+      "description": "A labelled data-flow arrow on a view: architecture-map annotation, never exported\nand never a dependency.",
+      "type": "object",
+      "properties": {
+        "id": {
+          "type": "string"
+        },
+        "from": {
+          "$ref": "#/$defs/FlowEnd"
+        },
+        "to": {
+          "$ref": "#/$defs/FlowEnd"
+        },
+        "label": {
+          "type": "string",
+          "default": ""
+        },
+        "dashed": {
+          "type": "boolean",
+          "default": false
+        }
+      },
+      "required": [
+        "id",
+        "from",
+        "to"
+      ]
+    },
+    "FlowEnd": {
+      "description": "One end of a data-flow arrow: a resource or a group.",
+      "anyOf": [
+        {
+          "type": "object",
+          "properties": {
+            "entity": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "entity"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "group": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "group"
+          ]
+        }
+      ]
+    }
+  }
+}

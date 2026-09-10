@@ -354,6 +354,9 @@
           "account_name": "jobgatewaysax7q2",
           "container_name": "data",
           "replication": "LRS"
+        },
+        "gcp": {
+          "bucket_name": "job-pipeline-gateway-x7q2"
         }
       },
       "position": {
@@ -378,6 +381,9 @@
           "account_name": "jobrunnersax7q2",
           "container_name": "data",
           "replication": "LRS"
+        },
+        "gcp": {
+          "bucket_name": "job-pipeline-runner-x7q2"
         }
       },
       "position": {
