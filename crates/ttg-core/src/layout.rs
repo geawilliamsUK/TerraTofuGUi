@@ -65,10 +65,7 @@ fn representative(p: &Project, parent: Option<&str>, id: &str) -> Option<Id> {
         if par == parent {
             return Some(cur);
         }
-        match par {
-            Some(x) => cur = x.to_string(),
-            None => return None,
-        }
+        cur = par?.to_string();
     }
 }
 

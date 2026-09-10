@@ -177,7 +177,7 @@ pub fn show(app: &mut TtgApp, ui: &mut Ui) {
                 &painter,
                 a,
                 p,
-                Stroke::new(2.0, Color32::from_rgb(60, 60, 60)),
+                Stroke::new(2.0_f32, Color32::from_rgb(60, 60, 60)),
                 true,
             );
         }
@@ -201,7 +201,7 @@ pub fn show(app: &mut TtgApp, ui: &mut Ui) {
                 sr,
                 CornerRadius::ZERO,
                 Color32::from_rgba_unmultiplied(66, 133, 244, 30),
-                Stroke::new(1.0, Color32::from_rgb(66, 133, 244)),
+                Stroke::new(1.0_f32, Color32::from_rgb(66, 133, 244)),
                 StrokeKind::Outside,
             );
             if ui.input(|i| i.pointer.any_released()) {
@@ -267,7 +267,7 @@ fn draw_grid(painter: &egui::Painter, rect: Rect, cam: &crate::camera::Camera) {
     while x < rect.max.x {
         painter.line_segment(
             [Pos2::new(x, rect.min.y), Pos2::new(x, rect.max.y)],
-            Stroke::new(1.0, color),
+            Stroke::new(1.0_f32, color),
         );
         x += step;
     }
@@ -275,7 +275,7 @@ fn draw_grid(painter: &egui::Painter, rect: Rect, cam: &crate::camera::Camera) {
     while y < rect.max.y {
         painter.line_segment(
             [Pos2::new(rect.min.x, y), Pos2::new(rect.max.x, y)],
-            Stroke::new(1.0, color),
+            Stroke::new(1.0_f32, color),
         );
         y += step;
     }
@@ -484,7 +484,7 @@ fn entity_widget(app: &mut TtgApp, ui: &mut Ui, origin: Pos2, id: &str, is_conta
     // ---- paint
     let painter = ui.painter_at(app.canvas_rect);
     let cr = CornerRadius::same((6.0 * zoom).clamp(2.0, 8.0) as u8);
-    let stroke_w = if selected { 2.5 } else { 1.2 };
+    let stroke_w = if selected { 2.5_f32 } else { 1.2_f32 };
     let stroke_color = if selected {
         Color32::from_rgb(30, 100, 220)
     } else if manual || !mapped || logical {
@@ -546,7 +546,7 @@ fn entity_widget(app: &mut TtgApp, ui: &mut Ui, origin: Pos2, id: &str, is_conta
                 handle.left_bottom() + Vec2::new(3.0, -3.0),
                 handle.right_top() + Vec2::new(-3.0, 3.0),
             ],
-            Stroke::new(1.5, Color32::from_gray(150)),
+            Stroke::new(1.5_f32, Color32::from_gray(150)),
         );
         if hr.drag_started() {
             app.drag = Drag::Resize {
@@ -689,7 +689,7 @@ fn entity_widget(app: &mut TtgApp, ui: &mut Ui, origin: Pos2, id: &str, is_conta
             sr.expand(4.0 + 6.0 * (1.0 - f)),
             CornerRadius::same(8),
             Stroke::new(
-                3.0,
+                3.0_f32,
                 Color32::from_rgba_unmultiplied(255, 140, 0, (220.0 * f) as u8),
             ),
             StrokeKind::Outside,
@@ -706,7 +706,7 @@ fn entity_widget(app: &mut TtgApp, ui: &mut Ui, origin: Pos2, id: &str, is_conta
                     handle.left_bottom() + Vec2::new(3.0, -3.0),
                     handle.right_top() + Vec2::new(-3.0, 3.0),
                 ],
-                Stroke::new(1.5, Color32::from_gray(150)),
+                Stroke::new(1.5_f32, Color32::from_gray(150)),
             );
         }
         if hr.drag_started() {
@@ -761,7 +761,11 @@ fn entity_widget(app: &mut TtgApp, ui: &mut Ui, origin: Pos2, id: &str, is_conta
         Color32::from_gray(140)
     };
     painter.circle_filled(port_center, PORT_R * zoom.max(0.6), Color32::WHITE);
-    painter.circle_stroke(port_center, PORT_R * zoom.max(0.6), Stroke::new(1.5, port_color));
+    painter.circle_stroke(
+        port_center,
+        PORT_R * zoom.max(0.6),
+        Stroke::new(1.5_f32, port_color),
+    );
     if pr.drag_started() {
         app.drag = Drag::Connect { from: id.to_string() };
     }
@@ -814,7 +818,7 @@ fn truncate(s: &str, max_chars: f32) -> String {
 }
 
 fn dashed_rect(painter: &egui::Painter, r: Rect, color: Color32) {
-    let stroke = Stroke::new(1.0, color);
+    let stroke = Stroke::new(1.0_f32, color);
     let pts = [
         r.left_top(),
         r.right_top(),
@@ -1276,7 +1280,7 @@ fn draw_edges(app: &mut TtgApp, ui: &mut Ui, origin: Pos2) {
             }
         };
         let stroke = Stroke::new(
-            if selected { 3.0 } else { 1.8 },
+            if selected { 3.0_f32 } else { 1.8_f32 },
             if selected {
                 Color32::from_rgb(30, 100, 220)
             } else {
@@ -1326,7 +1330,7 @@ fn draw_edges(app: &mut TtgApp, ui: &mut Ui, origin: Pos2) {
         let term_r = 5.0 * zoom.max(0.6);
         if te.is_container {
             painter.circle_filled(b, term_r, Color32::WHITE);
-            painter.circle_stroke(b, term_r, Stroke::new(1.5, stroke.color));
+            painter.circle_stroke(b, term_r, Stroke::new(1.5_f32, stroke.color));
             painter.circle_filled(b, term_r * 0.4, stroke.color);
         } else {
             let n = Vec2::new(-dir.y, dir.x);
@@ -1339,7 +1343,7 @@ fn draw_edges(app: &mut TtgApp, ui: &mut Ui, origin: Pos2) {
         }
         if se.is_container {
             painter.circle_filled(a, term_r, Color32::WHITE);
-            painter.circle_stroke(a, term_r, Stroke::new(1.5, stroke.color));
+            painter.circle_stroke(a, term_r, Stroke::new(1.5_f32, stroke.color));
             painter.circle_filled(a, term_r * 0.4, stroke.color);
         }
 
@@ -1357,7 +1361,7 @@ fn draw_edges(app: &mut TtgApp, ui: &mut Ui, origin: Pos2) {
                 Color32::from_rgba_unmultiplied(255, 255, 255, 230)
             },
             Stroke::new(
-                1.0,
+                1.0_f32,
                 if selected {
                     Color32::from_rgb(30, 100, 220)
                 } else {
@@ -1512,7 +1516,7 @@ fn draw_reach(app: &mut TtgApp, ui: &mut Ui, origin: Pos2) {
         painter.rect_stroke(
             r,
             CornerRadius::same(6),
-            Stroke::new(1.5, color),
+            Stroke::new(1.5_f32, color),
             StrokeKind::Inside,
         );
         let glyph = match status {
@@ -1553,7 +1557,7 @@ fn draw_reach(app: &mut TtgApp, ui: &mut Ui, origin: Pos2) {
                 painter.rect_stroke(
                     r.expand(4.0),
                     CornerRadius::same(8),
-                    Stroke::new(3.0, Color32::from_rgb(30, 100, 220)),
+                    Stroke::new(3.0_f32, Color32::from_rgb(30, 100, 220)),
                     StrokeKind::Outside,
                 );
             }
@@ -1680,7 +1684,7 @@ fn draw_reach(app: &mut TtgApp, ui: &mut Ui, origin: Pos2) {
                     painter.rect_stroke(
                         r.expand(3.0),
                         CornerRadius::same(8),
-                        Stroke::new(3.0, Color32::from_rgb(230, 126, 34)),
+                        Stroke::new(3.0_f32, Color32::from_rgb(230, 126, 34)),
                         StrokeKind::Outside,
                     );
                     // Inbound arrow from "the internet" above the node.

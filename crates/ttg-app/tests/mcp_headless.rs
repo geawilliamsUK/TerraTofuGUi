@@ -100,8 +100,7 @@ impl Client {
             text.lines()
                 .filter_map(|l| l.strip_prefix("data:"))
                 .map(|l| l.trim().to_string())
-                .filter(|l| l.starts_with('{'))
-                .next_back()
+                .rfind(|l| l.starts_with('{'))
                 .unwrap_or_default()
         } else {
             text

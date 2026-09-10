@@ -41,7 +41,7 @@ pub fn show(app: &mut TtgApp, ui: &mut Ui) {
                                     .dnd_drag_source(id, PaletteItem { type_id: tid.clone() }, |ui| {
                                         egui::Frame::new()
                                             .fill(Color32::from_gray(252))
-                                            .stroke(egui::Stroke::new(1.0, Color32::from_gray(215)))
+                                            .stroke(egui::Stroke::new(1.0_f32, Color32::from_gray(215)))
                                             .corner_radius(4)
                                             .inner_margin(6)
                                             .show(ui, |ui| {
@@ -100,7 +100,7 @@ pub fn show(app: &mut TtgApp, ui: &mut Ui) {
                             .dnd_drag_source(id, PaletteItem { type_id: tid.clone() }, |ui| {
                                 egui::Frame::new()
                                     .fill(Color32::from_gray(252))
-                                    .stroke(egui::Stroke::new(1.0, Color32::from_gray(215)))
+                                    .stroke(egui::Stroke::new(1.0_f32, Color32::from_gray(215)))
                                     .corner_radius(4)
                                     .inner_margin(6)
                                     .show(ui, |ui| {

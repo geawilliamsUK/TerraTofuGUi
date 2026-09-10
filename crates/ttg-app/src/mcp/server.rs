@@ -471,9 +471,6 @@ pub struct ExportArgs {
     pub validate: Option<bool>,
 }
 
-#[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
-pub struct NoArgs {}
-
 // ------------------------------------------------------------------ tools
 
 impl TtgServer {

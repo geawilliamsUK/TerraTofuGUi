@@ -806,10 +806,8 @@ impl Project {
     pub fn extra_args_mut(&mut self, id: &str, provider: &str, block: &str) -> Option<&mut ExtraArgs> {
         let extras = if let Some(n) = self.nodes.get_mut(id) {
             &mut n.extra
-        } else if let Some(c) = self.containers.get_mut(id) {
-            &mut c.extra
         } else {
-            return None;
+            &mut self.containers.get_mut(id)?.extra
         };
         Some(
             extras

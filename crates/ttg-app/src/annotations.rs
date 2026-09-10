@@ -263,7 +263,7 @@ pub fn draw_groups(app: &mut TtgApp, ui: &mut Ui, origin: Pos2) {
             CornerRadius::same(10),
             Color32::from_rgba_unmultiplied(color.r(), color.g(), color.b(), 28),
             Stroke::new(
-                if selected { 2.5 } else { 1.5 },
+                if selected { 2.5_f32 } else { 1.5_f32 },
                 if selected {
                     Color32::from_rgb(30, 100, 220)
                 } else {
@@ -346,7 +346,7 @@ pub fn draw_groups(app: &mut TtgApp, ui: &mut Ui, origin: Pos2) {
                 handle.left_bottom() + Vec2::new(3.0, -3.0),
                 handle.right_top() + Vec2::new(-3.0, 3.0),
             ],
-            Stroke::new(1.5, color),
+            Stroke::new(1.5_f32, color),
         );
         if hr.drag_started() {
             app.drag = Drag::Resize {
@@ -540,7 +540,7 @@ pub fn annotation_inspector(app: &mut TtgApp, ui: &mut Ui, a: &Annotation) {
                         CornerRadius::same(4),
                         col,
                         Stroke::new(
-                            if cur { 2.0 } else { 1.0 },
+                            if cur { 2.0_f32 } else { 1.0_f32 },
                             if cur {
                                 Color32::BLACK
                             } else {

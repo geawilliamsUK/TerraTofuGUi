@@ -658,7 +658,7 @@ pub fn run(full: &Project, cat: &Catalog, provider: &str) -> Vec<Diagnostic> {
             }
         }
     }
-    out.sort_by(|a, b| b.severity.cmp(&a.severity));
+    out.sort_by_key(|a| std::cmp::Reverse(a.severity));
     out
 }
 
