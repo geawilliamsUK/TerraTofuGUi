@@ -792,20 +792,14 @@ pub fn condition_holds_for(
                 Some(t) => v.map(|v| Value::Str(t.apply(&v.display()))),
                 None => v,
             };
-            if f.equals.is_some() || f.not_equals.is_some() {
-                cond_value(v.as_ref(), &f.equals, &f.not_equals)
-            } else if let Some(sw) = &f.starts_with {
-                v.as_ref()
-                    .map(|v| v.display())
-                    .unwrap_or_default()
-                    .starts_with(sw.as_str())
-            } else if let Some(nsw) = &f.not_starts_with {
-                !v.as_ref()
-                    .map(|v| v.display())
-                    .unwrap_or_default()
-                    .starts_with(nsw.as_str())
-            } else {
-                cond_value(v.as_ref(), &f.equals, &f.not_equals)
+            // Equality wins when given; otherwise a prefix test; otherwise truthiness.
+            let prefix = f.starts_with.as_deref().or(f.not_starts_with.as_deref());
+            match prefix {
+                Some(p) if f.equals.is_none() && f.not_equals.is_none() => {
+                    let s = v.as_ref().map(|v| v.display()).unwrap_or_default();
+                    s.starts_with(p) == f.starts_with.is_some()
+                }
+                _ => cond_value(v.as_ref(), &f.equals, &f.not_equals),
             }
         }
         Condition::ProviderField(f) => {
