@@ -71,6 +71,13 @@ providers = ["aws"]           # v2, optional: only this provider's mapping uses 
 the other providers' business: their mappings neither consume it nor warn that they
 cannot, and the inspector labels it accordingly.
 
+There are only eight relation kinds, so a type may declare the **same kind more than
+once**, one entry per group of target types — a DNS Record's `attribute_reference` is both
+"In zone" (a `dns_zone`) and "Alias of" (a `load_balancer` or `cdn`). The declarations must
+have disjoint `targets`; each then owns only links to its own targets, so cardinality,
+`via_parent` and the "not a declared target" warning are judged per declaration. Mappings
+tell them apart with `target_type` (§2.6).
+
 ---
 
 ## 2. Provider mapping section
@@ -87,7 +94,10 @@ notes = "…"            # shown in the inspector
 
 - `partial` — the resource deploys but `manual_steps` (required) must be done afterwards.
 - `logical` — nothing is emitted, on purpose, and no warning is raised. Used when a
-  container has no equivalent (Resource Group on AWS). No `blocks` allowed.
+  container has no equivalent (Resource Group on AWS). No `blocks` allowed. A logical
+  mapping *may* still declare `manual_steps`: they land in MANUAL_STEPS.md without raising
+  a diagnostic, which is how a type whose provider needs a whole other Terraform provider
+  (User Identity on Azure) says what to do instead.
 
 ### 2.1 Provider-specific fields and variables
 
@@ -160,7 +170,7 @@ simply omitted from the block.
 | `{ object = { K = <source>, … } }` | An object whose members are sources. |
 | `{ list = [ <source>, … ] }` | A list of sources. |
 | `{ func = "jsonencode", args = [ <source>, … ] }` | A function call. |
-| `{ raw = "…" }` | Raw HCL expression, parsed by hcl-rs. Last resort; prefer the above. |
+| `{ raw = "…" }` | Raw HCL expression, parsed by hcl-rs. Last resort; prefer the above. See `refs` in §2.6 for splicing traversals into one. |
 
 Modifiers accepted by `field`, `provider_field`, `relation`, `self_block`:
 
@@ -308,6 +318,22 @@ without one are skipped); `{ target = "id", ancestor = "…" }` does the same in
 reference resolves to nothing, e.g. `block = "ns"` when the queue created its own
 namespace, falling back to the enclosing namespace container otherwise.
 
+**Raw expressions with references (`refs`).** `{ raw = "…", refs = { <name> = <source> } }`
+resolves each source, renders it as HCL text and substitutes it for `@name@` in `raw` before
+the whole string is parsed. It is the escape hatch for expressions the source language has
+no form for — a `for_each` comprehension, a `for` projection — without hard-coding the local
+names the emitter chooses. Every `@name@` must have a `refs` entry and every entry must be
+used; a ref that resolves to nothing omits the whole argument.
+
+```toml
+# aws_route53_record, one per entry of a certificate's computed validation options
+for_each = { raw = "{ for o in @options@ : o.domain_name => o }", refs = { options = { self_block = "main", attr = "domain_validation_options" } } }
+name     = { raw = "each.value.resource_record_name" }
+```
+
+`for_each`, `count`, `provider` and `lifecycle` are meta-arguments: the schema check accepts
+them on any block.
+
 **Built-in resources.** A block may use `resource = "terraform_data"` (built into
 Terraform and OpenTofu) to hold a value other resources reference, e.g. the network tag
 a GCP security group hands to its members; the schema check skips it.
@@ -365,7 +391,8 @@ egress routes) are built into the engine rather than declared per definition; se
 ARCHITECTURE.md §6.0.
 
 See `definitions/resources/function.toml`, `security_group.toml`, `relational_database.toml`,
-`secret.toml` and `kubernetes_node_pool.toml` for worked examples of every feature.
+`secret.toml` and `kubernetes_node_pool.toml` for worked examples of every feature;
+`tls_certificate.toml` for `refs` and `dns_record.toml` for two relations sharing a kind.
 
 ---
 

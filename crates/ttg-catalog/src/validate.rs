@@ -161,6 +161,19 @@ pub fn catalog(cat: &Catalog) -> Vec<String> {
                 )));
             }
         }
+        // A kind may be declared several times (one per group of target types). Each
+        // declaration then owns its own targets; overlapping sets would make cardinality
+        // and `target_type` filters ambiguous.
+        for (i, r) in def.relations.iter().enumerate() {
+            for other in def.relations.iter().take(i).filter(|x| x.kind == r.kind) {
+                if let Some(t) = r.targets.iter().find(|t| other.targets.contains(t)) {
+                    errs.push(where_(&format!(
+                        "relation '{}' declares target '{t}' twice; declarations sharing a kind need disjoint targets",
+                        r.kind
+                    )));
+                }
+            }
+        }
         // providers
         for (pid, m) in &def.providers {
             let pw = |s: &str| where_(&format!("provider '{pid}': {s}"));
@@ -531,13 +544,16 @@ fn check_relation_ref(
     target_type: Option<&str>,
     errs: &mut Vec<String>,
 ) {
-    let Some(r) = ctx.relations.iter().find(|x| x.kind == relation) else {
+    // A type may declare the same relation kind more than once (one per group of target
+    // types), so every declaration of the kind is a candidate.
+    let decls: Vec<&RelationDef> = ctx.relations.iter().filter(|x| x.kind == relation).collect();
+    if decls.is_empty() {
         errs.push(format!("{}{at}: undeclared relation '{relation}'", ctx.what));
         return;
-    };
+    }
     if let Some(tt) = target_type {
         ctx.v2 = true;
-        if !r.targets.iter().any(|t| t == tt) {
+        if !decls.iter().any(|r| r.targets.iter().any(|t| t == tt)) {
             errs.push(format!(
                 "{}{at}: target_type '{tt}' is not a declared target of relation '{relation}'",
                 ctx.what
@@ -639,7 +655,28 @@ fn check_source(ctx: &mut SourceCtx, at: &str, src: &ArgSource, errs: &mut Vec<S
     let what = ctx.what.clone();
     let e = |msg: String| format!("{what}{at}: {msg}");
     match src {
-        ArgSource::Literal(_) | ArgSource::Raw(_) => {}
+        ArgSource::Literal(_) => {}
+        ArgSource::Raw(r) => {
+            if r.refs.is_empty() {
+                return;
+            }
+            ctx.v2 = true;
+            if r.raw.matches('@').count() % 2 != 0 {
+                errs.push(e("raw has an unterminated @placeholder@".into()));
+            }
+            let used = r.placeholders();
+            for name in &used {
+                if !r.refs.contains_key(*name) {
+                    errs.push(e(format!("raw placeholder '@{name}@' has no entry in refs")));
+                }
+            }
+            for (name, sub) in &r.refs {
+                if !used.contains(&name.as_str()) {
+                    errs.push(e(format!("ref '{name}' never appears as '@{name}@' in raw")));
+                }
+                check_source(ctx, &format!("{at}.refs.{name}"), sub, errs);
+            }
+        }
         ArgSource::Field(f) => {
             let declared = ctx.fields.iter().find(|x| x.name == f.field);
             if f.field != "name" && declared.is_none() {

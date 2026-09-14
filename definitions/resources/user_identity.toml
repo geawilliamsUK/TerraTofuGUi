@@ -1,0 +1,178 @@
+# Abstract type: User Identity  (schema_version 2)
+#
+# A user directory for an application's own end users: a pool, one app client and a hosted
+# sign-in domain.
+# AWS: aws_cognito_user_pool + aws_cognito_user_pool_client + aws_cognito_user_pool_domain.
+# GCP: google_identity_platform_config — Identity Platform is one config per project, and
+#      the sign-in providers and OAuth clients are set up in the console, so this is partial.
+# Azure: LOGICAL. Microsoft Entra External ID lives in the `azuread` provider, which this
+#      catalog deliberately does not carry (see definitions/providers/), so nothing can be
+#      generated; the manual step says what to do instead.
+
+schema_version = 2
+
+[resource]
+type = "user_identity"
+category = "iam"
+display_name = "User Identity"
+description = "A user pool with an app client and hosted sign-in pages (Cognito / Identity Platform)."
+kind = "node"
+allowed_parents = ["resource_group"]
+icon = "UID"
+network_agnostic = true
+
+[[fields]]
+name = "domain_prefix"
+label = "Sign-in domain prefix"
+type = "string"
+required = true
+pattern = "^[a-z0-9][a-z0-9-]{1,61}[a-z0-9]$"
+pattern_hint = "3-63 lowercase letters, digits and hyphens; globally unique within the region"
+unique_scope = "cognito_domain"
+description = "Host part of the hosted sign-in pages, e.g. \"acme-login\" for acme-login.auth.<region>.amazoncognito.com."
+
+[[fields]]
+name = "callback_urls"
+label = "Callback URLs"
+type = "string_list"
+description = "Redirect URIs the app client accepts after sign-in. Without them the client has no OAuth flows."
+
+[[fields]]
+name = "password_min_length"
+label = "Minimum password length"
+type = "int"
+required = true
+default = 12
+
+[[fields]]
+name = "mfa"
+label = "Multi-factor authentication"
+type = "enum"
+required = true
+options = ["off", "optional", "required"]
+default = "optional"
+
+# ---------------------------------------------------------------- AWS
+[providers.aws]
+status = "full"
+
+[[providers.aws.blocks]]
+key = "main"
+resource = "aws_cognito_user_pool"
+
+[providers.aws.blocks.args]
+name                     = { field = "name" }
+mfa_configuration        = { map = "mfa", table = { off = "OFF", optional = "OPTIONAL", required = "ON" } }
+username_attributes      = { value = ["email"] }
+auto_verified_attributes = { value = ["email"] }
+tags                     = { object = { Name = { field = "name" } } }
+
+[[providers.aws.blocks.nested]]
+block = "password_policy"
+
+[providers.aws.blocks.nested.args]
+minimum_length    = { field = "password_min_length" }
+require_lowercase = { value = true }
+require_uppercase = { value = true }
+require_numbers   = { value = true }
+require_symbols   = { value = true }
+
+# Cognito rejects a pool with MFA on and no second factor configured.
+[[providers.aws.blocks.nested]]
+block = "software_token_mfa_configuration"
+when = { field = "mfa", not_equals = "off" }
+
+[providers.aws.blocks.nested.args]
+enabled = { value = true }
+
+[[providers.aws.blocks]]
+key = "client"
+resource = "aws_cognito_user_pool_client"
+
+[providers.aws.blocks.args]
+name                                 = { template = "{name}-app", transform = "kebab" }
+user_pool_id                         = { self_block = "main", attr = "id" }
+generate_secret                      = { value = false }
+explicit_auth_flows                  = { value = ["ALLOW_USER_SRP_AUTH", "ALLOW_REFRESH_TOKEN_AUTH"] }
+supported_identity_providers         = { value = ["COGNITO"] }
+prevent_user_existence_errors        = { value = "ENABLED" }
+callback_urls                        = { field = "callback_urls", optional = true }
+allowed_oauth_flows_user_pool_client = { if = { field = "callback_urls" }, then = { value = true } }
+allowed_oauth_flows                  = { if = { field = "callback_urls" }, then = { value = ["code"] } }
+allowed_oauth_scopes                 = { if = { field = "callback_urls" }, then = { value = ["openid", "email", "profile"] } }
+
+[[providers.aws.blocks]]
+key = "domain"
+resource = "aws_cognito_user_pool_domain"
+
+[providers.aws.blocks.args]
+domain       = { field = "domain_prefix" }
+user_pool_id = { self_block = "main", attr = "id" }
+
+[providers.aws.outputs]
+user_pool_id  = { attr = "id", description = "User pool id" }
+endpoint      = { attr = "endpoint", description = "OpenID Connect issuer host for the pool" }
+client_id     = { block = "client", attr = "id", description = "App client id" }
+hosted_domain = { block = "domain", attr = "domain", description = "Hosted UI domain prefix; sign-in lives at https://<prefix>.auth.<region>.amazoncognito.com/login" }
+
+# ---------------------------------------------------------------- Azure
+[providers.azure]
+status = "logical"
+notes = "Microsoft Entra External ID (formerly Azure AD B2C) is created through the `azuread` / Microsoft Graph providers, which this catalog does not carry; nothing is emitted and the manual step explains the alternative."
+
+[[providers.azure.manual_steps]]
+title = "Create the Entra External ID tenant by hand"
+body = """
+No Azure resource was generated. A customer-facing user directory on Azure is **Microsoft
+Entra External ID**: a separate tenant plus user flows and app registrations, created with
+the `azuread` provider (or `microsoft/azuread` + Microsoft Graph), neither of which is in
+this catalog — the `azurerm` provider has nothing equivalent. Create the external tenant in
+the portal, register the application with the callback URLs from this node, and feed the
+resulting client id and authority URL into the application's configuration.
+"""
+
+# ---------------------------------------------------------------- GCP
+[providers.gcp]
+status = "partial"
+
+[[providers.gcp.blocks]]
+key = "main"
+resource = "google_identity_platform_config"
+
+[providers.gcp.blocks.args]
+autodelete_anonymous_users = { value = false }
+
+[[providers.gcp.blocks.nested]]
+block = "sign_in"
+
+[[providers.gcp.blocks.nested.nested]]
+block = "email"
+
+[providers.gcp.blocks.nested.nested.args]
+enabled           = { value = true }
+password_required = { value = true }
+
+[[providers.gcp.blocks.nested]]
+block = "mfa"
+
+[providers.gcp.blocks.nested.args]
+state = { map = "mfa", table = { off = "DISABLED", optional = "ENABLED", required = "MANDATORY" } }
+
+[providers.gcp.outputs]
+name = { attr = "name", description = "Identity Platform config resource name" }
+
+[[providers.gcp.manual_steps]]
+title = "Finish Identity Platform in the console"
+body = """
+`google_identity_platform_config` is one configuration per project and covers far less than
+a Cognito pool:
+
+* There is no hosted sign-in domain, so the **Sign-in domain prefix** is unused — Identity
+  Platform is driven from the client SDK, or from Firebase Authentication's hosted pages.
+* The **Callback URLs** become *authorized domains*: add each host to `authorized_domains`
+  (or in the console under Authentication → Settings) before the SDK will accept a redirect.
+* Password strength, OAuth provider clients (Google, Apple, SAML, OIDC) and email templates
+  are console settings or separate `google_identity_platform_*_config` resources.
+
+Enable the Identity Platform API on the project first; the config resource fails without it.
+"""

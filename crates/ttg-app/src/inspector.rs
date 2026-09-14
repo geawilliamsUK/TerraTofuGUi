@@ -520,10 +520,7 @@ fn entity_inspector(app: &mut TtgApp, ui: &mut Ui, id: &Id) {
             app.finish(before);
         }
         for r in &def.relations {
-            let kind = ttg_core::Relation::from_key(&r.kind);
-            let satisfied = kind.is_some_and(|k| {
-                !ttg_codegen::diagnostics::relation_targets(&app.project, &app.catalog, &app.project.entity(id).unwrap(), k).is_empty()
-            });
+            let satisfied = !ttg_codegen::diagnostics::declared_relation_targets(&app.project, &app.catalog, &app.project.entity(id).unwrap(), &def, r).is_empty();
             let txt = format!(
                 "{}: {} ({}{})",
                 r.label.clone().unwrap_or(r.kind.clone()),

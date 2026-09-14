@@ -1,11 +1,18 @@
 # Abstract type: Load Balancer  (schema_version 2)
 #
-# A layer-7 (http) or layer-4 (tcp) load balancer in front of compute instances.
+# A layer-7 (http / https) or layer-4 (tcp) load balancer in front of compute instances.
 # AWS: aws_lb (application or network) + target group + listener + one
-#      aws_lb_target_group_attachment per 'Attached to' instance.
+#      aws_lb_target_group_attachment per 'Attached to' instance. https adds the
+#      certificate and TLS policy to the listener, and optionally a port-80 listener that
+#      redirects. Access logs add an access_logs block plus the bucket policy the ELB
+#      service needs.
 # Azure: azurerm_lb (Standard) + public IP (internet-facing) or subnet frontend (internal)
 #      + backend pool + probe + rule + one NIC/backend-pool association per instance.
 #      The association targets the instance's `nic` block (`{ target = "id", block = "nic" }`).
+#      azurerm_lb is layer 4, so https is passed through to the backends untouched.
+# GCP: a regional passthrough Network Load Balancer for http / tcp; https switches to a
+#      global external Application Load Balancer (health check, backend service, URL map,
+#      target HTTPS proxy and global forwarding rule).
 
 schema_version = 2
 
@@ -31,9 +38,9 @@ name = "protocol"
 label = "Protocol"
 type = "enum"
 required = true
-options = ["http", "tcp"]
+options = ["http", "https", "tcp"]
 default = "http"
-description = "http = application / layer-7 load balancer, tcp = network / layer-4."
+description = "http / https = application (layer-7) load balancer, tcp = network (layer-4). https needs a Certificate link."
 
 [[fields]]
 name = "listener_port"
@@ -49,6 +56,33 @@ type = "int"
 required = true
 default = 80
 
+[[fields]]
+name = "redirect_http"
+label = "Redirect HTTP to HTTPS"
+type = "bool"
+default = false
+description = "With https, also listen on port 80 and answer every request with a 301 to the https URL."
+
+[[fields]]
+name = "drop_invalid_header_fields"
+label = "Drop invalid headers"
+type = "bool"
+default = false
+description = "Discard requests whose headers do not conform to HTTP before they reach the backends (layer 7 only)."
+
+[[fields]]
+name = "deletion_protection"
+label = "Deletion protection"
+type = "bool"
+default = false
+description = "Refuse to destroy the load balancer until the flag is cleared."
+
+[[fields]]
+name = "idle_timeout_seconds"
+label = "Idle timeout (s)"
+type = "int"
+description = "How long an idle connection is kept open (layer 7 only). Unset means the provider default."
+
 [[relations]]
 kind = "network_membership"
 label = "Subnets"
@@ -60,6 +94,23 @@ kind = "attribute_reference"
 label = "Uses security group"
 providers = ["aws"]
 targets = ["security_group"]
+cardinality = "optional"
+
+# Azure's azurerm_lb terminates nothing, so a certificate is not its business.
+[[relations]]
+kind = "attribute_reference"
+label = "Certificate"
+providers = ["aws", "gcp"]
+targets = ["tls_certificate"]
+cardinality = "optional"
+
+# Only ELB access logs land in a bucket; Azure sends diagnostics to Log Analytics and
+# Google logs through the backend service, neither of which is an Object Storage target.
+[[relations]]
+kind = "logs_to"
+label = "Access logs to"
+providers = ["aws"]
+targets = ["object_storage"]
 cardinality = "optional"
 
 [[relations]]
@@ -77,12 +128,51 @@ key = "main"
 resource = "aws_lb"
 
 [providers.aws.blocks.args]
-name               = { field = "name", transform = "kebab" }
-internal           = { map = "scheme", table = { internet_facing = false, internal = true } }
-load_balancer_type = { map = "protocol", table = { http = "application", tcp = "network" } }
-subnets            = { relation = "network_membership", attr = "id", wrap = "list" }
-security_groups    = { relation = "attribute_reference", target_type = "security_group", attr = "id", wrap = "list", optional = true }
-tags               = { object = { Name = { field = "name" } } }
+name                       = { field = "name", transform = "kebab" }
+internal                   = { map = "scheme", table = { internet_facing = false, internal = true } }
+load_balancer_type         = { map = "protocol", table = { http = "application", https = "application", tcp = "network" } }
+subnets                    = { relation = "network_membership", attr = "id", wrap = "list" }
+security_groups            = { relation = "attribute_reference", target_type = "security_group", attr = "id", wrap = "list", optional = true }
+enable_deletion_protection = { field = "deletion_protection", optional = true }
+# Application load balancers only: aws_lb rejects both arguments on a network LB.
+drop_invalid_header_fields = { if = { field = "protocol", not_equals = "tcp" }, then = { field = "drop_invalid_header_fields", optional = true } }
+idle_timeout               = { if = { field = "protocol", not_equals = "tcp" }, then = { field = "idle_timeout_seconds", optional = true } }
+# The bucket policy must exist before the load balancer may write its first log file.
+depends_on                 = { self_block = "logs_policy", attr = "", wrap = "list" }
+tags                       = { object = { Name = { field = "name" } } }
+
+[[providers.aws.blocks.nested]]
+block = "access_logs"
+when = { relation = "logs_to", target_type = "object_storage" }
+
+[providers.aws.blocks.nested.args]
+bucket  = { relation = "logs_to", target_type = "object_storage", attr = "id" }
+prefix  = { field = "name", transform = "kebab" }
+enabled = { value = true }
+
+# Elastic Load Balancing writes the logs itself, so the bucket has to allow it.
+[[providers.aws.blocks]]
+key = "logs_policy"
+resource = "aws_s3_bucket_policy"
+when = { relation = "logs_to", target_type = "object_storage" }
+
+[providers.aws.blocks.args]
+bucket = { relation = "logs_to", target_type = "object_storage", attr = "id" }
+
+[providers.aws.blocks.args.policy]
+func = "jsonencode"
+
+[[providers.aws.blocks.args.policy.args]]
+[providers.aws.blocks.args.policy.args.object]
+Version = { value = "2012-10-17" }
+
+[[providers.aws.blocks.args.policy.args.object.Statement.list]]
+[providers.aws.blocks.args.policy.args.object.Statement.list.object]
+Sid       = { value = "AllowELBAccessLogs" }
+Effect    = { value = "Allow" }
+Action    = { value = "s3:PutObject" }
+Principal = { object = { Service = { value = "logdelivery.elasticloadbalancing.amazonaws.com" } } }
+Resource  = { func = "format", args = [ { value = "%s/*" }, { relation = "logs_to", target_type = "object_storage", attr = "arn" } ] }
 
 [[providers.aws.blocks]]
 key = "tg"
@@ -91,7 +181,8 @@ resource = "aws_lb_target_group"
 [providers.aws.blocks.args]
 name        = { template = "{name}-tg", transform = "kebab" }
 port        = { field = "target_port" }
-protocol    = { map = "protocol", table = { http = "HTTP", tcp = "TCP" } }
+# TLS terminates at the listener, so an https load balancer still talks HTTP to the targets.
+protocol    = { map = "protocol", table = { http = "HTTP", https = "HTTP", tcp = "TCP" } }
 vpc_id      = { relation = "network_membership", attr = "vpc_id" }
 # Pods are registered by their IP, not as EC2 instances, so a cluster target changes the
 # whole target group; the registration itself is the controller's job (manual step).
@@ -104,7 +195,11 @@ resource = "aws_lb_listener"
 [providers.aws.blocks.args]
 load_balancer_arn = { self_block = "main", attr = "arn" }
 port              = { field = "listener_port" }
-protocol          = { map = "protocol", table = { http = "HTTP", tcp = "TCP" } }
+protocol          = { map = "protocol", table = { http = "HTTP", https = "HTTPS", tcp = "TCP" } }
+# Prefer the validation resource's arn so the listener waits for the certificate to be
+# issued; a certificate with no DNS Zone has no validation block, so fall back to its own.
+certificate_arn   = { relation = "attribute_reference", target_type = "tls_certificate", block = "issued", attr = "certificate_arn", optional = true, fallback = { relation = "attribute_reference", target_type = "tls_certificate", attr = "arn", optional = true } }
+ssl_policy        = { if = { field = "protocol", equals = "https" }, then = { value = "ELBSecurityPolicy-TLS13-1-2-2021-06" } }
 
 [[providers.aws.blocks.nested]]
 block = "default_action"
@@ -112,6 +207,30 @@ block = "default_action"
 [providers.aws.blocks.nested.args]
 type             = { value = "forward" }
 target_group_arn = { self_block = "tg", attr = "arn" }
+
+[[providers.aws.blocks]]
+key = "redirect"
+resource = "aws_lb_listener"
+when = { all = [ { field = "protocol", equals = "https" }, { field = "redirect_http" } ] }
+
+[providers.aws.blocks.args]
+load_balancer_arn = { self_block = "main", attr = "arn" }
+port              = { value = 80 }
+protocol          = { value = "HTTP" }
+
+[[providers.aws.blocks.nested]]
+block = "default_action"
+
+[providers.aws.blocks.nested.args]
+type = { value = "redirect" }
+
+[[providers.aws.blocks.nested.nested]]
+block = "redirect"
+
+[providers.aws.blocks.nested.nested.args]
+port        = { value = "443" }
+protocol    = { value = "HTTPS" }
+status_code = { value = "HTTP_301" }
 
 [[providers.aws.blocks]]
 key = "attach"
@@ -126,6 +245,28 @@ port             = { field = "target_port" }
 
 [providers.aws.outputs]
 dns_name = { attr = "dns_name", description = "Public DNS name of the load balancer" }
+zone_id  = { attr = "zone_id", description = "Hosted zone id for a Route 53 alias record" }
+
+[[providers.aws.checks]]
+severity = "error"
+when = { all = [ { field = "protocol", equals = "https" }, { relation = "attribute_reference", target_type = "tls_certificate", absent = true } ] }
+message = "\"{name}\" listens on https but has no Certificate link; an HTTPS listener needs an ACM certificate"
+
+[[providers.aws.checks]]
+when = { all = [ { field = "redirect_http" }, { field = "protocol", not_equals = "https" } ] }
+message = "\"{name}\": 'Redirect HTTP to HTTPS' only does something when the protocol is https"
+
+[[providers.aws.manual_steps]]
+title = "Check the access-log bucket policy for older Regions"
+when = { relation = "logs_to", target_type = "object_storage" }
+body = """
+The generated bucket policy grants `s3:PutObject` to the
+`logdelivery.elasticloadbalancing.amazonaws.com` service principal, which is what Elastic
+Load Balancing uses in every Region launched **after August 2022**. In an older Region
+(eu-west-1, eu-west-2, us-east-1 and friends) the writer is a regional AWS account instead:
+replace the `Principal` with `{ AWS = data.aws_elb_service_account.main.arn }` and add the
+matching `data "aws_elb_service_account" "main" {}` block, or logging silently never starts.
+"""
 
 [[providers.aws.manual_steps]]
 title = "Bind the target group to a Kubernetes Service"
@@ -207,7 +348,8 @@ resource = "azurerm_lb_probe"
 [providers.azure.blocks.args]
 name            = { value = "probe" }
 loadbalancer_id = { self_block = "main", attr = "id" }
-protocol        = { map = "protocol", table = { http = "Http", tcp = "Tcp" } }
+# https is probed as Tcp: the probe would need the certificate to speak Https.
+protocol        = { map = "protocol", table = { http = "Http", https = "Tcp", tcp = "Tcp" } }
 port            = { field = "target_port" }
 request_path    = { if = { field = "protocol", equals = "http" }, then = { value = "/" } }
 
@@ -252,14 +394,31 @@ equivalent of what the diagram asks for. The load balancer here is still created
 instance targets.
 """
 
+[[providers.azure.manual_steps]]
+title = "TLS is not terminated on an Azure Load Balancer"
+when = { field = "protocol", equals = "https" }
+body = """
+`azurerm_lb` is a layer-4 load balancer: it forwards TCP on the listener port and never sees
+the TLS handshake, so no certificate is attached and no HTTP-to-HTTPS redirect is possible.
+Two honest options:
+
+* **Terminate on the backends.** Install the certificate on each instance and serve https
+  there; the generated configuration already forwards port 443 untouched.
+* **Put a layer-7 service in front.** An Application Gateway
+  (`azurerm_application_gateway` with an `ssl_certificate` from a Key Vault) or Front Door
+  terminates TLS, redirects http and can run a WAF policy. Both need their own dedicated
+  subnet, so they are drawn as native nodes rather than generated from this one.
+"""
+
 # ---------------------------------------------------------------- GCP
 [providers.gcp]
 status = "partial"
-notes = "A regional passthrough Network Load Balancer (external or internal): health check, unmanaged instance group of the linked instances, backend service and forwarding rule. HTTP is served as TCP."
+notes = "http / tcp become a regional passthrough Network Load Balancer (HTTP is served as TCP). https becomes a global external Application Load Balancer: health check, backend service, URL map, target HTTPS proxy and global forwarding rule."
 
 [[providers.gcp.blocks]]
 key = "hc"
 resource = "google_compute_region_health_check"
+when = { field = "protocol", not_equals = "https" }
 
 [providers.gcp.blocks.args]
 name   = { template = "{name}-hc", transform = "kebab" }
@@ -291,6 +450,7 @@ port = { field = "target_port" }
 [[providers.gcp.blocks]]
 key = "main"
 resource = "google_compute_region_backend_service"
+when = { field = "protocol", not_equals = "https" }
 
 [providers.gcp.blocks.args]
 name                  = { field = "name", transform = "kebab" }
@@ -309,6 +469,7 @@ group = { self_block = "group", attr = "self_link" }
 [[providers.gcp.blocks]]
 key = "rule"
 resource = "google_compute_forwarding_rule"
+when = { field = "protocol", not_equals = "https" }
 
 [providers.gcp.blocks.args]
 name                  = { template = "{name}-rule", transform = "kebab" }
@@ -320,8 +481,89 @@ backend_service       = { self_block = "main", attr = "id" }
 network               = { if = { field = "scheme", equals = "internal" }, then = { relation = "network_membership", ancestor = "virtual_network", attr = "id" } }
 subnetwork            = { if = { field = "scheme", equals = "internal" }, then = { relation = "network_membership", attr = "id" } }
 
+# ---- https: global external Application Load Balancer
+[[providers.gcp.blocks]]
+key = "ghc"
+resource = "google_compute_health_check"
+when = { field = "protocol", equals = "https" }
+
+[providers.gcp.blocks.args]
+name = { template = "{name}-hc", transform = "kebab" }
+
+[[providers.gcp.blocks.nested]]
+block = "http_health_check"
+
+[providers.gcp.blocks.nested.args]
+port = { field = "target_port" }
+
+[[providers.gcp.blocks]]
+key = "gbs"
+resource = "google_compute_backend_service"
+when = { field = "protocol", equals = "https" }
+
+[providers.gcp.blocks.args]
+name                  = { field = "name", transform = "kebab" }
+protocol              = { value = "HTTP" }
+port_name             = { value = "app" }
+load_balancing_scheme = { value = "EXTERNAL_MANAGED" }
+timeout_sec           = { field = "idle_timeout_seconds", fallback = { value = 30 } }
+health_checks         = { self_block = "ghc", attr = "id", wrap = "list" }
+
+[[providers.gcp.blocks.nested]]
+block = "backend"
+when = { relation = "attachment", target_type = "compute_instance" }
+
+[providers.gcp.blocks.nested.args]
+group = { self_block = "group", attr = "self_link" }
+
+[[providers.gcp.blocks]]
+key = "urlmap"
+resource = "google_compute_url_map"
+when = { field = "protocol", equals = "https" }
+
+[providers.gcp.blocks.args]
+name            = { template = "{name}-url-map", transform = "kebab" }
+default_service = { self_block = "gbs", attr = "id" }
+
+[[providers.gcp.blocks]]
+key = "proxy"
+resource = "google_compute_target_https_proxy"
+when = { field = "protocol", equals = "https" }
+
+[providers.gcp.blocks.args]
+name             = { template = "{name}-https-proxy", transform = "kebab" }
+url_map          = { self_block = "urlmap", attr = "id" }
+ssl_certificates = { relation = "attribute_reference", target_type = "tls_certificate", attr = "id", wrap = "list" }
+
+[[providers.gcp.blocks]]
+key = "grule"
+resource = "google_compute_global_forwarding_rule"
+when = { field = "protocol", equals = "https" }
+
+[providers.gcp.blocks.args]
+name                  = { template = "{name}-https-rule", transform = "kebab" }
+target                = { self_block = "proxy", attr = "id" }
+port_range            = { value = "443" }
+ip_protocol           = { value = "TCP" }
+load_balancing_scheme = { value = "EXTERNAL_MANAGED" }
+
 [providers.gcp.outputs]
-address = { block = "rule", attr = "ip_address", description = "Frontend IP address" }
+address        = { block = "rule", attr = "ip_address", description = "Frontend IP address" }
+global_address = { block = "grule", attr = "ip_address", description = "Global frontend IP address of the HTTPS load balancer" }
+
+[[providers.gcp.checks]]
+severity = "error"
+when = { all = [ { field = "protocol", equals = "https" }, { relation = "attribute_reference", target_type = "tls_certificate", absent = true } ] }
+message = "\"{name}\" listens on https but has no Certificate link; a target HTTPS proxy needs an SSL certificate"
+
+[[providers.gcp.checks]]
+severity = "error"
+when = { all = [ { field = "protocol", equals = "https" }, { field = "scheme", equals = "internal" } ] }
+message = "\"{name}\": the global HTTPS load balancer this mapping builds is external only; set the scheme to internet_facing or use tcp"
+
+[[providers.gcp.checks]]
+when = { all = [ { field = "redirect_http" }, { field = "protocol", equals = "https" } ] }
+message = "\"{name}\": the HTTP-to-HTTPS redirect is not generated on Google Cloud; it needs a second URL map with a default_url_redirect and its own target HTTP proxy"
 
 [[providers.gcp.manual_steps]]
 title = "GKE pods join the backend service through a NEG"
@@ -336,9 +578,28 @@ create its own load balancer instead of this one).
 
 [[providers.gcp.manual_steps]]
 title = "Health-check probes must be allowed by the firewall"
+when = { field = "protocol", not_equals = "https" }
 body = """
 Google's health-check ranges (35.191.0.0/16 and 130.211.0.0/22) must be allowed to reach
 the target port on the backends; add an ingress rule for them to the instances' Security
-Group. HTTP listeners are served as TCP passthrough; use a native
-`google_compute_region_url_map` + target proxy for an HTTP(S) load balancer.
+Group. HTTP listeners are served as TCP passthrough; use `https` (or a native
+`google_compute_region_url_map` + target proxy) for a real HTTP(S) load balancer.
+"""
+
+[[providers.gcp.manual_steps]]
+title = "Finish the global HTTPS load balancer"
+when = { field = "protocol", equals = "https" }
+body = """
+The global external Application Load Balancer is generated (health check, backend service,
+URL map, target HTTPS proxy, global forwarding rule), but two things live outside it:
+
+* **Firewall.** Allow 35.191.0.0/16 and 130.211.0.0/22 to the target port on the backends,
+  or every backend stays unhealthy.
+* **Redirect and extra routing.** Only a default route to the single backend service is
+  emitted. An http-to-https redirect needs a second URL map with `default_url_redirect` and
+  a `google_compute_target_http_proxy`; host and path rules need `host_rule` / `path_matcher`
+  entries on the URL map.
+
+The Google-managed certificate is only issued once the domain resolves to the forwarding
+rule's address, so apply this first and create the DNS record afterwards.
 """

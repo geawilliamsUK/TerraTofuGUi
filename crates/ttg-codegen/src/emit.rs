@@ -6,7 +6,7 @@
 //! (`item`, `item_index`, `target`), conditional sources (`if`), field fallbacks and
 //! relation `target_type` filters.
 
-use crate::diagnostics::{self, consumed_relations, relation_targets, Consumed, Diagnostic, Severity};
+use crate::diagnostics::{self, consumed_relations, Consumed, Diagnostic, Severity};
 use crate::files;
 use crate::tool::Profile;
 use crate::GenError;
@@ -73,7 +73,9 @@ enum Status<'a> {
     Emit(&'a ProviderMapping),
     Manual,
     Unmapped,
-    Logical,
+    /// Nothing is generated on purpose. The mapping may still declare manual steps for
+    /// the part of the diagram this provider can only do outside Terraform.
+    Logical(&'a ProviderMapping),
 }
 
 /// One iteration of a repeated block: a struct_list row, a string_list entry, or a
@@ -330,7 +332,15 @@ pub fn generate(p: &Project, cat: &Catalog, provider: &str, tool: Tool) -> Resul
                     em.pdef.provider.display_name
                 ),
             ),
-            Status::Logical => {}
+            Status::Logical(m) => {
+                for step in diagnostics::applicable_manual_steps(p, cat, provider, &e, m) {
+                    em.manual.push(ManualEntry {
+                        entity: Some(id.clone()),
+                        title: format!("{} \"{}\": {}", def.resource.display_name, e.name, step.title),
+                        body: step.body.trim().to_string(),
+                    });
+                }
+            }
         }
     }
 
@@ -710,7 +720,7 @@ impl<'a> Emitter<'a> {
         }
         match self.cat.mapping(e.resource_type, self.provider) {
             None => Status::Unmapped,
-            Some(m) if m.status == MappingStatus::Logical => Status::Logical,
+            Some(m) if m.status == MappingStatus::Logical => Status::Logical(m),
             Some(m) => Status::Emit(m),
         }
     }
@@ -789,10 +799,7 @@ impl<'a> Emitter<'a> {
         kind: Relation,
         target_type: Option<&str>,
     ) -> Vec<Id> {
-        relation_targets(self.p, self.cat, e, kind)
-            .into_iter()
-            .filter(|t| target_type.is_none_or(|tt| self.p.entity(t).is_some_and(|x| x.resource_type == tt)))
-            .collect()
+        diagnostics::relation_targets_of_type(self.p, self.cat, e, kind, target_type)
     }
 
     fn cond_holds(&self, e: &EntityRef<'a>, c: &Condition, item: Option<ItemCtx<'_>>) -> bool {
@@ -1338,7 +1345,18 @@ impl<'a> Emitter<'a> {
                 }
                 Some(Expression::FuncCall(Box::new(fc.build())))
             }
-            ArgSource::Raw(r) => Some(raw_expr(&r.raw)),
+            ArgSource::Raw(r) => {
+                let mut text = r.raw.clone();
+                for (name, sub) in &r.refs {
+                    // A ref that resolves to nothing takes the whole expression with it:
+                    // splicing an empty string would produce unparseable HCL.
+                    let Some(x) = self.resolve(e, m, sub, &format!("{at}.refs.{name}"), item)? else {
+                        return Ok(None);
+                    };
+                    text = text.replace(&format!("@{name}@"), &x.to_string());
+                }
+                Some(raw_expr(&text))
+            }
         })
     }
 
@@ -1372,7 +1390,7 @@ impl<'a> Emitter<'a> {
                 };
                 Ok(Some(traversal(&bdef.resource, &local, attr)))
             }
-            Status::Logical => Ok(None),
+            Status::Logical(_) => Ok(None),
             Status::Manual | Status::Unmapped => {
                 let reason = if t.manual {
                     "flagged as external / managed by hand"
@@ -1507,11 +1525,17 @@ impl<'a> Emitter<'a> {
             let tname = t.name.to_string();
             match self.status(&t) {
                 Status::Emit(tm) => {
-                    let key = primary_key(tm);
-                    let pk = (edge.target.clone(), key.clone());
-                    if !self.planned.contains(&pk) {
+                    // Ordering only, so any block of the target will do: a mapping whose
+                    // primary block is conditional (the GCP load balancer's backend
+                    // service) must still get its depends_on and its manual step.
+                    let primary = primary_key(tm);
+                    let Some(key) = std::iter::once(primary.clone())
+                        .chain(tm.blocks.iter().map(|b| b.key.clone()))
+                        .find(|k| self.planned.contains(&(edge.target.clone(), k.clone())))
+                    else {
                         continue;
-                    }
+                    };
+                    let pk = (edge.target.clone(), key.clone());
                     let bdef = tm.blocks.iter().find(|b| b.key == key).unwrap();
                     let Some(local) = self.instances.get(&pk).and_then(|v| v.first()).cloned() else {
                         continue;
@@ -1539,7 +1563,7 @@ impl<'a> Emitter<'a> {
                         });
                     }
                 }
-                Status::Logical => {}
+                Status::Logical(_) => {}
                 Status::Manual | Status::Unmapped => {
                     let reason = if t.manual { "external / manual" } else { "unmapped" };
                     self.note_manual_entity(&t, reason);

@@ -1,0 +1,314 @@
+# Abstract type: CDN  (schema_version 2)
+#
+# An edge cache in front of an Object Storage bucket or a Load Balancer.
+# AWS: aws_cloudfront_distribution. A bucket origin also gets an origin access control and
+#      the bucket policy that lets only this distribution read the objects; a load balancer
+#      origin becomes a custom origin whose protocol follows the load balancer's.
+# Azure: azurerm_cdn_profile + azurerm_cdn_endpoint (classic Microsoft CDN). Custom domains
+#      and certificates are separate resources, so they stay manual steps.
+# GCP: google_compute_backend_bucket with enable_cdn for a bucket origin. Cloud CDN in
+#      front of a load balancer is a flag on the backend service, which belongs to the load
+#      balancer's mapping, so that case is a manual step.
+
+schema_version = 2
+
+[resource]
+type = "cdn"
+category = "network"
+display_name = "CDN"
+description = "An edge cache in front of a bucket or load balancer. Link 'Origin' to what it fronts."
+kind = "node"
+allowed_parents = ["resource_group"]
+icon = "CDN"
+network_agnostic = true
+
+[[fields]]
+name = "domain"
+label = "Custom domain"
+type = "string"
+description = "Alias served by the CDN, e.g. cdn.example.com. Needs a matching certificate."
+pattern = "^([a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?\\.)+[a-z]{2,}$"
+pattern_hint = "a fully qualified domain such as cdn.example.com"
+
+[[relations]]
+kind = "attribute_reference"
+label = "Origin"
+targets = ["object_storage", "load_balancer"]
+cardinality = "one"
+
+[[relations]]
+kind = "attribute_reference"
+label = "Certificate"
+targets = ["tls_certificate"]
+cardinality = "optional"
+providers = ["aws"]
+
+[[relations]]
+kind = "attribute_reference"
+label = "Protected by"
+targets = ["web_application_firewall"]
+cardinality = "optional"
+providers = ["aws"]
+
+# ---------------------------------------------------------------- AWS
+[providers.aws]
+status = "partial"
+
+[[providers.aws.blocks]]
+key = "oac"
+resource = "aws_cloudfront_origin_access_control"
+when = { relation = "attribute_reference", target_type = "object_storage" }
+
+[providers.aws.blocks.args]
+name                              = { template = "{name}-oac", transform = "kebab" }
+origin_access_control_origin_type = { value = "s3" }
+signing_behavior                  = { value = "always" }
+signing_protocol                  = { value = "sigv4" }
+
+[[providers.aws.blocks]]
+key = "main"
+resource = "aws_cloudfront_distribution"
+
+[providers.aws.blocks.args]
+enabled             = { value = true }
+is_ipv6_enabled     = { value = true }
+comment             = { template = "{name} (managed by TerraTofu GUI)" }
+default_root_object = { if = { relation = "attribute_reference", target_type = "object_storage" }, then = { value = "index.html" } }
+aliases             = { field = "domain", wrap = "list", optional = true }
+tags                = { object = { Name = { field = "name" } } }
+
+[[providers.aws.blocks.nested]]
+block = "origin"
+when = { relation = "attribute_reference", target_type = "object_storage" }
+
+[providers.aws.blocks.nested.args]
+origin_id                = { value = "origin" }
+domain_name              = { relation = "attribute_reference", target_type = "object_storage", attr = "bucket_regional_domain_name" }
+origin_access_control_id = { self_block = "oac", attr = "id" }
+
+[[providers.aws.blocks.nested]]
+block = "origin"
+when = { relation = "attribute_reference", target_type = "load_balancer" }
+
+[providers.aws.blocks.nested.args]
+origin_id   = { value = "origin" }
+domain_name = { relation = "attribute_reference", target_type = "load_balancer", attr = "dns_name" }
+
+[[providers.aws.blocks.nested.nested]]
+block = "custom_origin_config"
+
+[providers.aws.blocks.nested.nested.args]
+http_port              = { value = 80 }
+https_port             = { value = 443 }
+origin_protocol_policy = { if = { relation = "attribute_reference", target_type = "load_balancer", target_field = "protocol", equals = "https" }, then = { value = "https-only" }, else = { value = "http-only" } }
+origin_ssl_protocols   = { value = ["TLSv1.2"] }
+
+[[providers.aws.blocks.nested]]
+block = "default_cache_behavior"
+
+[providers.aws.blocks.nested.args]
+target_origin_id       = { value = "origin" }
+viewer_protocol_policy = { value = "redirect-to-https" }
+allowed_methods        = { value = ["GET", "HEAD", "OPTIONS"] }
+cached_methods         = { value = ["GET", "HEAD"] }
+compress               = { value = true }
+# AWS managed policies: CachingOptimized for a bucket, CachingDisabled + AllViewer for a
+# load balancer (dynamic content must reach the origin with the viewer's headers).
+cache_policy_id          = { if = { relation = "attribute_reference", target_type = "object_storage" }, then = { value = "658327ea-f89d-4fab-a63d-7e88639e58f6" }, else = { value = "4135ea2d-6df8-44a3-9df3-4b5a84be39ad" } }
+origin_request_policy_id = { if = { relation = "attribute_reference", target_type = "load_balancer" }, then = { value = "216adef6-5c7f-47e4-b989-5492eafa07d3" } }
+
+[[providers.aws.blocks.nested]]
+block = "restrictions"
+
+[[providers.aws.blocks.nested.nested]]
+block = "geo_restriction"
+
+[providers.aws.blocks.nested.nested.args]
+restriction_type = { value = "none" }
+
+[[providers.aws.blocks.nested]]
+block = "viewer_certificate"
+when = { relation = "attribute_reference", target_type = "tls_certificate" }
+
+[providers.aws.blocks.nested.args]
+acm_certificate_arn      = { relation = "attribute_reference", target_type = "tls_certificate", block = "issued", attr = "certificate_arn", fallback = { relation = "attribute_reference", target_type = "tls_certificate", attr = "arn" } }
+ssl_support_method       = { value = "sni-only" }
+minimum_protocol_version = { value = "TLSv1.2_2021" }
+
+[[providers.aws.blocks.nested]]
+block = "viewer_certificate"
+when = { relation = "attribute_reference", target_type = "tls_certificate", absent = true }
+
+[providers.aws.blocks.nested.args]
+cloudfront_default_certificate = { value = true }
+
+# Only this distribution may read the bucket.
+[[providers.aws.blocks]]
+key = "origin_policy"
+resource = "aws_s3_bucket_policy"
+when = { relation = "attribute_reference", target_type = "object_storage" }
+
+[providers.aws.blocks.args]
+bucket = { relation = "attribute_reference", target_type = "object_storage", attr = "id" }
+
+[providers.aws.blocks.args.policy]
+func = "jsonencode"
+
+[[providers.aws.blocks.args.policy.args]]
+[providers.aws.blocks.args.policy.args.object]
+Version = { value = "2012-10-17" }
+
+[[providers.aws.blocks.args.policy.args.object.Statement.list]]
+[providers.aws.blocks.args.policy.args.object.Statement.list.object]
+Sid       = { value = "AllowCloudFrontRead" }
+Effect    = { value = "Allow" }
+Action    = { value = "s3:GetObject" }
+Principal = { object = { Service = { value = "cloudfront.amazonaws.com" } } }
+Resource  = { func = "format", args = [ { value = "%s/*" }, { relation = "attribute_reference", target_type = "object_storage", attr = "arn" } ] }
+Condition = { object = { StringEquals = { object = { "AWS:SourceArn" = { self_block = "main", attr = "arn" } } } } }
+
+[providers.aws.outputs]
+domain_name = { attr = "domain_name", description = "CloudFront domain name to point DNS at" }
+hosted_zone = { attr = "hosted_zone_id", description = "Hosted zone id for an alias record" }
+
+[[providers.aws.checks]]
+when = { relation = "attribute_reference", target_type = "web_application_firewall" }
+message = "\"{name}\": a CloudFront distribution needs a CLOUDFRONT-scoped Web ACL, but the Web Application Firewall type emits a REGIONAL one; the link is not wired up"
+
+[[providers.aws.manual_steps]]
+title = "Attach a CLOUDFRONT-scoped Web ACL"
+when = { relation = "attribute_reference", target_type = "web_application_firewall" }
+body = """
+`web_acl_id` was deliberately left unset. A CloudFront distribution can only use a Web ACL
+created with `scope = "CLOUDFRONT"` in **us-east-1**, which is a different resource from the
+REGIONAL ACL the linked Web Application Firewall emits for the load balancer. Create a
+second `aws_wafv2_web_acl` with that scope (an aliased us-east-1 provider) and set
+`web_acl_id` on the distribution to its ARN.
+"""
+
+[[providers.aws.manual_steps]]
+title = "Point the custom domain at the distribution"
+when = { field = "domain" }
+body = """
+`aliases` names the custom domain, but CloudFront only serves it once DNS sends the name to
+the distribution. Add a DNS Record of type A with an **Alias of** link to this CDN (or a
+CNAME to its `domain_name`), and make sure the linked certificate covers the alias and lives
+in **us-east-1** — CloudFront ignores certificates from any other region.
+"""
+
+# ---------------------------------------------------------------- Azure
+[providers.azure]
+status = "partial"
+
+[[providers.azure.blocks]]
+key = "profile"
+resource = "azurerm_cdn_profile"
+
+[providers.azure.blocks.args]
+name                = { template = "{name}-profile", transform = "kebab" }
+location            = { var = "location" }
+resource_group_name = { ancestor = "resource_group", attr = "name" }
+sku                 = { value = "Standard_Microsoft" }
+tags                = { object = { Name = { field = "name" } } }
+
+[[providers.azure.blocks]]
+key = "main"
+resource = "azurerm_cdn_endpoint"
+
+[providers.azure.blocks.args]
+name                          = { field = "name", transform = "kebab" }
+profile_name                  = { self_block = "profile", attr = "name" }
+location                      = { var = "location" }
+resource_group_name           = { ancestor = "resource_group", attr = "name" }
+is_https_allowed              = { value = true }
+is_compression_enabled        = { value = true }
+querystring_caching_behaviour = { value = "IgnoreQueryString" }
+origin_host_header            = { relation = "attribute_reference", target_type = "object_storage", attr = "primary_blob_host", optional = true }
+
+[[providers.azure.blocks.nested]]
+block = "origin"
+when = { relation = "attribute_reference", target_type = "object_storage" }
+
+[providers.azure.blocks.nested.args]
+name      = { value = "origin" }
+host_name = { relation = "attribute_reference", target_type = "object_storage", attr = "primary_blob_host" }
+
+[[providers.azure.blocks.nested]]
+block = "origin"
+when = { relation = "attribute_reference", target_type = "load_balancer" }
+
+[providers.azure.blocks.nested.args]
+name      = { value = "origin" }
+host_name = { relation = "attribute_reference", target_type = "load_balancer", block = "pip", attr = "ip_address" }
+
+[providers.azure.outputs]
+fqdn = { attr = "fqdn", description = "Endpoint host name (*.azureedge.net)" }
+
+[[providers.azure.manual_steps]]
+title = "Add the custom domain and its certificate"
+when = { field = "domain" }
+body = """
+The classic CDN endpoint only serves `*.azureedge.net` out of the box. Add an
+`azurerm_cdn_endpoint_custom_domain` for the custom domain (after a CNAME points it at the
+endpoint's `fqdn`) and enable HTTPS on it with a CDN-managed certificate or one from a Key
+Vault. There is no provider-neutral way to express that, so it is left to you.
+"""
+
+[[providers.azure.manual_steps]]
+title = "Give the load balancer origin a host name"
+when = { relation = "attribute_reference", target_type = "load_balancer" }
+body = """
+The endpoint origin was set to the load balancer's public IP address because an
+`azurerm_lb` has no DNS name. Azure CDN expects a host name and will not send a usable Host
+header to an IP origin: create a DNS Record for the load balancer and set the endpoint's
+`origin.host_name` and `origin_host_header` to it.
+"""
+
+# ---------------------------------------------------------------- GCP
+[providers.gcp]
+status = "partial"
+
+[[providers.gcp.blocks]]
+key = "main"
+resource = "google_compute_backend_bucket"
+when = { relation = "attribute_reference", target_type = "object_storage" }
+
+[providers.gcp.blocks.args]
+name        = { field = "name", transform = "kebab" }
+description = { template = "{name} (managed by TerraTofu GUI)" }
+bucket_name = { relation = "attribute_reference", target_type = "object_storage", attr = "name" }
+enable_cdn  = { value = true }
+
+[[providers.gcp.blocks.nested]]
+block = "cdn_policy"
+
+[providers.gcp.blocks.nested.args]
+cache_mode  = { value = "CACHE_ALL_STATIC" }
+default_ttl = { value = 3600 }
+client_ttl  = { value = 3600 }
+max_ttl     = { value = 86400 }
+
+[providers.gcp.outputs]
+self_link = { attr = "self_link", description = "Backend bucket to use as a URL map target" }
+
+[[providers.gcp.manual_steps]]
+title = "Put the backend bucket behind a load balancer"
+when = { relation = "attribute_reference", target_type = "object_storage" }
+body = """
+Cloud CDN has no standalone endpoint: the backend bucket only serves traffic once a URL map,
+target proxy and global forwarding rule point at it. Add an HTTPS Load Balancer node (or
+native `google_compute_url_map` / `google_compute_target_https_proxy` /
+`google_compute_global_forwarding_rule` resources) whose default service is this backend
+bucket's `self_link`.
+"""
+
+[[providers.gcp.manual_steps]]
+title = "Enable Cloud CDN on the load balancer's backend service"
+when = { relation = "attribute_reference", target_type = "load_balancer" }
+body = """
+Nothing was generated: in front of a load balancer, Cloud CDN is not a resource of its own
+but `enable_cdn = true` (plus a `cdn_policy`) on the
+`google_compute_backend_service` the load balancer creates. Set it there — for example as an
+extra argument on the Load Balancer node's backend-service block — and delete this node, or
+keep it as documentation of intent.
+"""

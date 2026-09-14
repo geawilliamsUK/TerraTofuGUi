@@ -19,8 +19,8 @@ fn fmt_block(b: &Block) -> String {
     s
 }
 
-/// `filter {   }` -> `filter {}`. A block with no arguments at all (an S3 lifecycle
-/// filter that means "every object") comes out of the formatter padded.
+/// `none {     }` -> `none {}`. The formatter pads an empty body with the block's own
+/// indentation, and WAF rules are full of deliberately empty blocks.
 fn collapse_empty_braces(s: &str) -> String {
     let mut out = String::with_capacity(s.len());
     let mut rest = s;
@@ -28,7 +28,7 @@ fn collapse_empty_braces(s: &str) -> String {
         out.push_str(&rest[..i]);
         let after = &rest[i + 1..];
         let spaces = after.len() - after.trim_start_matches(' ').len();
-        if spaces > 0 && after[spaces..].starts_with('}') {
+        if after[spaces..].starts_with('}') {
             out.push_str("{}");
             rest = &after[spaces + 1..];
         } else {

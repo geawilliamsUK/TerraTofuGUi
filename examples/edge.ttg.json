@@ -1,0 +1,436 @@
+{
+  "schema_version": 1,
+  "name": "edge",
+  "settings": {
+    "tool": "opentofu",
+    "target_provider": "aws",
+    "provider_settings": {
+      "aws": {
+        "region": "eu-west-2"
+      },
+      "azure": {
+        "location": "uksouth"
+      },
+      "gcp": {
+        "region": "europe-west2",
+        "zone": "europe-west2-a"
+      }
+    },
+    "backend": null,
+    "state_encryption": false
+  },
+  "containers": {
+    "rg-edge": {
+      "id": "rg-edge",
+      "name": "edge",
+      "container_type": "resource_group",
+      "config": {},
+      "provider_config": {},
+      "position": {
+        "x": 40,
+        "y": 40
+      },
+      "size": {
+        "w": 1660,
+        "h": 900
+      },
+      "parent": null,
+      "manual": false
+    },
+    "vnet-edge": {
+      "id": "vnet-edge",
+      "name": "edge net",
+      "container_type": "virtual_network",
+      "config": {
+        "cidr_block": "10.30.0.0/16"
+      },
+      "provider_config": {},
+      "position": {
+        "x": 80,
+        "y": 110
+      },
+      "size": {
+        "w": 820,
+        "h": 500
+      },
+      "parent": "rg-edge",
+      "manual": false
+    },
+    "zone-public": {
+      "id": "zone-public",
+      "name": "public zone",
+      "container_type": "dns_zone",
+      "config": {
+        "domain": "example.com"
+      },
+      "provider_config": {},
+      "position": {
+        "x": 960,
+        "y": 110
+      },
+      "size": {
+        "w": 340,
+        "h": 190
+      },
+      "parent": "rg-edge",
+      "manual": false
+    },
+    "kv-edge": {
+      "id": "kv-edge",
+      "name": "edge vault",
+      "container_type": "key_vault",
+      "config": {},
+      "provider_config": {
+        "azure": {
+          "vault_name": "ttg-edge-x7q2"
+        }
+      },
+      "position": {
+        "x": 960,
+        "y": 350
+      },
+      "size": {
+        "w": 340,
+        "h": 190
+      },
+      "parent": "rg-edge",
+      "manual": false
+    }
+  },
+  "nodes": {
+    "sub-web-a": {
+      "id": "sub-web-a",
+      "name": "web a",
+      "resource_type": "subnet",
+      "config": {
+        "cidr_block": "10.30.0.0/24"
+      },
+      "provider_config": {
+        "aws": {
+          "availability_zone": "eu-west-2a",
+          "map_public_ip": true
+        }
+      },
+      "position": {
+        "x": 120,
+        "y": 180
+      },
+      "parent": "vnet-edge",
+      "manual": false
+    },
+    "sub-web-b": {
+      "id": "sub-web-b",
+      "name": "web b",
+      "resource_type": "subnet",
+      "config": {
+        "cidr_block": "10.30.1.0/24"
+      },
+      "provider_config": {
+        "aws": {
+          "availability_zone": "eu-west-2b",
+          "map_public_ip": true
+        }
+      },
+      "position": {
+        "x": 120,
+        "y": 320
+      },
+      "parent": "vnet-edge",
+      "manual": false
+    },
+    "sg-web": {
+      "id": "sg-web",
+      "name": "web sg",
+      "resource_type": "security_group",
+      "config": {
+        "rules": [
+          {
+            "name": "https",
+            "direction": "ingress",
+            "protocol": "tcp",
+            "from_port": 443,
+            "to_port": 443,
+            "cidr": "0.0.0.0/0",
+            "source_group": ""
+          },
+          {
+            "name": "http",
+            "direction": "ingress",
+            "protocol": "tcp",
+            "from_port": 80,
+            "to_port": 80,
+            "cidr": "0.0.0.0/0",
+            "source_group": ""
+          },
+          {
+            "name": "egress",
+            "direction": "egress",
+            "protocol": "all",
+            "from_port": 0,
+            "to_port": 0,
+            "cidr": "0.0.0.0/0",
+            "source_group": ""
+          }
+        ]
+      },
+      "provider_config": {},
+      "position": {
+        "x": 400,
+        "y": 180
+      },
+      "parent": "vnet-edge",
+      "manual": false
+    },
+    "vm-web": {
+      "id": "vm-web",
+      "name": "web server",
+      "resource_type": "compute_instance",
+      "config": {
+        "size": "small"
+      },
+      "provider_config": {
+        "aws": {
+          "ami": ""
+        },
+        "azure": {
+          "admin_username": "azureuser",
+          "image": "ubuntu-22.04"
+        }
+      },
+      "position": {
+        "x": 400,
+        "y": 320
+      },
+      "parent": "vnet-edge",
+      "manual": false
+    },
+    "lb-web": {
+      "id": "lb-web",
+      "name": "web lb",
+      "resource_type": "load_balancer",
+      "config": {
+        "scheme": "internet_facing",
+        "protocol": "https",
+        "listener_port": 443,
+        "target_port": 80,
+        "redirect_http": true,
+        "drop_invalid_header_fields": true,
+        "deletion_protection": false,
+        "idle_timeout_seconds": 120
+      },
+      "provider_config": {},
+      "position": {
+        "x": 640,
+        "y": 250
+      },
+      "parent": "vnet-edge",
+      "manual": false
+    },
+    "cert-site": {
+      "id": "cert-site",
+      "name": "site cert",
+      "resource_type": "tls_certificate",
+      "config": {
+        "domain": "www.example.com",
+        "alternative_names": [
+          "example.com"
+        ]
+      },
+      "provider_config": {},
+      "position": {
+        "x": 1000,
+        "y": 410
+      },
+      "parent": "kv-edge",
+      "manual": false
+    },
+    "rec-www": {
+      "id": "rec-www",
+      "name": "www",
+      "resource_type": "dns_record",
+      "config": {
+        "record_name": "www",
+        "record_type": "A",
+        "ttl": 60,
+        "values": []
+      },
+      "provider_config": {},
+      "position": {
+        "x": 1000,
+        "y": 170
+      },
+      "parent": "zone-public",
+      "manual": false
+    },
+    "waf-edge": {
+      "id": "waf-edge",
+      "name": "edge waf",
+      "resource_type": "web_application_firewall",
+      "config": {
+        "managed_rules": [
+          "AWSManagedRulesCommonRuleSet",
+          "AWSManagedRulesKnownBadInputsRuleSet",
+          "AWSManagedRulesSQLiRuleSet"
+        ],
+        "rate_limit_per_5min": 2000,
+        "mode": "block"
+      },
+      "provider_config": {},
+      "position": {
+        "x": 1360,
+        "y": 110
+      },
+      "parent": "rg-edge",
+      "manual": false
+    },
+    "obj-logs": {
+      "id": "obj-logs",
+      "name": "lb logs",
+      "resource_type": "object_storage",
+      "config": {
+        "versioning": false
+      },
+      "provider_config": {
+        "aws": {
+          "bucket_name": "ttg-edge-lb-logs-x7q2"
+        },
+        "azure": {
+          "account_name": "ttgedgelogsx7q2",
+          "container_name": "logs",
+          "replication": "LRS"
+        },
+        "gcp": {
+          "bucket_name": "ttg-edge-lb-logs-x7q2"
+        }
+      },
+      "position": {
+        "x": 1360,
+        "y": 250
+      },
+      "parent": "rg-edge",
+      "manual": false
+    },
+    "obj-assets": {
+      "id": "obj-assets",
+      "name": "assets",
+      "resource_type": "object_storage",
+      "config": {
+        "versioning": false
+      },
+      "provider_config": {
+        "aws": {
+          "bucket_name": "ttg-edge-assets-x7q2"
+        },
+        "azure": {
+          "account_name": "ttgedgeassetsx7q2",
+          "container_name": "assets",
+          "replication": "LRS"
+        },
+        "gcp": {
+          "bucket_name": "ttg-edge-assets-x7q2"
+        }
+      },
+      "position": {
+        "x": 1360,
+        "y": 390
+      },
+      "parent": "rg-edge",
+      "manual": false
+    },
+    "cdn-assets": {
+      "id": "cdn-assets",
+      "name": "assets cdn",
+      "resource_type": "cdn",
+      "config": {},
+      "provider_config": {},
+      "position": {
+        "x": 1360,
+        "y": 530
+      },
+      "parent": "rg-edge",
+      "manual": false
+    },
+    "uid-logins": {
+      "id": "uid-logins",
+      "name": "logins",
+      "resource_type": "user_identity",
+      "config": {
+        "domain_prefix": "ttg-edge-logins-x7q2",
+        "callback_urls": [
+          "https://www.example.com/oauth2/callback"
+        ],
+        "password_min_length": 12,
+        "mfa": "optional"
+      },
+      "provider_config": {},
+      "position": {
+        "x": 1360,
+        "y": 670
+      },
+      "parent": "rg-edge",
+      "manual": false
+    }
+  },
+  "edges": [
+    {
+      "source": "vm-web",
+      "target": "sub-web-a",
+      "relation": "network_membership"
+    },
+    {
+      "source": "vm-web",
+      "target": "sg-web",
+      "relation": "attribute_reference"
+    },
+    {
+      "source": "lb-web",
+      "target": "sub-web-a",
+      "relation": "network_membership"
+    },
+    {
+      "source": "lb-web",
+      "target": "sub-web-b",
+      "relation": "network_membership"
+    },
+    {
+      "source": "lb-web",
+      "target": "sg-web",
+      "relation": "attribute_reference"
+    },
+    {
+      "source": "lb-web",
+      "target": "cert-site",
+      "relation": "attribute_reference"
+    },
+    {
+      "source": "lb-web",
+      "target": "obj-logs",
+      "relation": "logs_to"
+    },
+    {
+      "source": "lb-web",
+      "target": "vm-web",
+      "relation": "attachment"
+    },
+    {
+      "source": "cert-site",
+      "target": "zone-public",
+      "relation": "attribute_reference"
+    },
+    {
+      "source": "waf-edge",
+      "target": "lb-web",
+      "relation": "attachment"
+    },
+    {
+      "source": "cdn-assets",
+      "target": "obj-assets",
+      "relation": "attribute_reference"
+    },
+    {
+      "source": "rec-www",
+      "target": "lb-web",
+      "relation": "attribute_reference"
+    }
+  ]
+}

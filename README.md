@@ -13,15 +13,16 @@ provider — never a single "portable" HCL file, because no such thing can exist
 
 ![TerraTofu GUI with the three-tier example open](docs/screenshot.png)
 
-Status: **Phase 3** — 34 curated abstract types mapped for AWS, Azure and Google Cloud,
+Status: **Phase 3** — 38 curated abstract types mapped for AWS, Azure and Google Cloud,
 plus every native provider resource through the bundled schema index (see "Beyond the
 curated catalog"). Curated: networking (Virtual Network, Subnet, Internet Gateway, NAT
-Gateway, Route Table, Security Group, Private Endpoint, Network Peering), compute (Compute Instance,
-Autoscaling Group, Load Balancer), data (Relational Database, NoSQL Table, Cache, Object
+Gateway, Route Table, Security Group, Private Endpoint, Network Peering), the internet-facing
+edge (Load Balancer with HTTPS, TLS Certificate, Web Application Firewall, CDN), compute
+(Compute Instance, Autoscaling Group), data (Relational Database, NoSQL Table, Cache, Object
 Storage), serverless (Function, Event Queue, Topic, the Azure-only Storage Queue and
 Service Bus Namespace), containers (Container App, Container Registry, Kubernetes Cluster,
 Kubernetes Node Pool, Kubernetes Workload), DNS (Zone, Record), secrets (Key Vault,
-Secret, Encryption Key), monitoring (Log Group, Alarm), IAM Role and the Resource Group container. A
+Secret, Encryption Key), monitoring (Log Group, Alarm), IAM Role, User Identity and the Resource Group container. A
 Kubernetes Workload turns its links into EKS Pod Identity, an AKS federated credential or
 a GKE workload-identity binding plus a least-privilege policy, the way a Function does.
 Gaps a provider cannot

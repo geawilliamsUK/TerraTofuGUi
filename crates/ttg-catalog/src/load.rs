@@ -114,6 +114,22 @@ const BUILTIN_RESOURCES: &[(&str, &str)] = &[
         include_str!("../../../definitions/resources/dns_record.toml"),
     ),
     (
+        "resources/tls_certificate.toml",
+        include_str!("../../../definitions/resources/tls_certificate.toml"),
+    ),
+    (
+        "resources/web_application_firewall.toml",
+        include_str!("../../../definitions/resources/web_application_firewall.toml"),
+    ),
+    (
+        "resources/cdn.toml",
+        include_str!("../../../definitions/resources/cdn.toml"),
+    ),
+    (
+        "resources/user_identity.toml",
+        include_str!("../../../definitions/resources/user_identity.toml"),
+    ),
+    (
         "resources/key_vault.toml",
         include_str!("../../../definitions/resources/key_vault.toml"),
     ),

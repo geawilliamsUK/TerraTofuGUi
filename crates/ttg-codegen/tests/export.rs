@@ -1527,3 +1527,201 @@ fn kubernetes_example_node_pools_and_workload_identity() {
         );
     }
 }
+
+// ---------------------------------------------------------------- internet-facing edge
+
+/// Collapse whitespace so assertions can be written on one line whatever the formatter does.
+fn norm(s: &str) -> String {
+    s.split_whitespace().collect::<Vec<_>>().join(" ")
+}
+
+#[test]
+fn edge_aws_https_waf_cdn_and_alias() {
+    let cat = Catalog::builtin();
+    let p = example("edge.ttg.json");
+    let g = generate(&p, &cat, "aws", Tool::OpenTofu).unwrap();
+    assert!(g.diagnostics.iter().all(|d| d.severity != Severity::Error));
+
+    // HTTPS listener with the validated certificate, TLS policy and the redirect listener.
+    let lb = norm(&g.files["load_balancer.tf"]);
+    assert!(lb.contains("protocol = \"HTTPS\""), "{lb}");
+    assert!(
+        lb.contains("certificate_arn = aws_acm_certificate_validation.site_cert_issued.certificate_arn"),
+        "{lb}"
+    );
+    assert!(lb.contains("ssl_policy = \"ELBSecurityPolicy-TLS13-1-2-2021-06\""));
+    assert!(lb.contains("resource \"aws_lb_listener\" \"web_lb_redirect\""));
+    assert!(
+        lb.contains("redirect { port = \"443\" protocol = \"HTTPS\" status_code = \"HTTP_301\" }"),
+        "{lb}"
+    );
+    // Hardening, and access logs plus the bucket policy the ELB service needs.
+    assert!(lb.contains("drop_invalid_header_fields = true"));
+    assert!(lb.contains("idle_timeout = 120"));
+    assert!(
+        lb.contains("access_logs { bucket = aws_s3_bucket.lb_logs.id"),
+        "{lb}"
+    );
+    assert!(lb.contains("resource \"aws_s3_bucket_policy\" \"web_lb_logs_policy\""));
+    assert!(lb.contains("logdelivery.elasticloadbalancing.amazonaws.com"));
+    assert!(
+        lb.contains("depends_on = [ aws_s3_bucket_policy.web_lb_logs_policy ]"),
+        "{lb}"
+    );
+
+    // ACM with DNS validation: the `raw` + `refs` for_each comprehension names the
+    // certificate's own address, and the validation resource waits for every record.
+    let net = norm(&g.files["network.tf"]);
+    assert!(net.contains("validation_method = \"DNS\""));
+    assert!(
+        net.contains("for_each = {for o in aws_acm_certificate.site_cert.domain_validation_options : o.domain_name => o}"),
+        "{net}"
+    );
+    assert!(net.contains("name = each.value.resource_record_name"));
+    assert!(
+        net.contains("validation_record_fqdns = [for r in aws_route53_record.site_cert_validation : r.fqdn]")
+    );
+
+    // Web ACL: one managed rule per entry, a rate-based rule, and one association per LB.
+    assert!(net.contains("scope = \"REGIONAL\""));
+    assert_eq!(
+        net.matches("managed_rule_group_statement").count(),
+        3,
+        "one statement per managed rule group"
+    );
+    assert!(net.contains("override_action { none {} }"), "{net}");
+    assert!(
+        net.contains("rate_based_statement { limit = 2000 aggregate_key_type = \"IP\""),
+        "{net}"
+    );
+    assert!(net.contains("resource \"aws_wafv2_web_acl_association\" \"edge_waf_assoc_0\""));
+    assert!(net.contains("resource_arn = aws_lb.web_lb.arn"));
+
+    // CloudFront over the bucket: origin access control plus the reader policy.
+    assert!(net.contains("origin_access_control_id = aws_cloudfront_origin_access_control.assets_cdn_oac.id"));
+    assert!(net.contains("cloudfront_default_certificate = true"));
+    assert!(
+        net.contains("\"AWS:SourceArn\" = aws_cloudfront_distribution.assets_cdn.arn"),
+        "{net}"
+    );
+
+    // Alias record: an `alias` block instead of records / ttl.
+    let dns = norm(&g.files["dns.tf"]);
+    assert!(
+        dns.contains("alias { name = aws_lb.web_lb.dns_name zone_id = aws_lb.web_lb.zone_id evaluate_target_health = false }"),
+        "{dns}"
+    );
+    assert!(
+        !dns.contains("records"),
+        "an alias record carries no records: {dns}"
+    );
+    assert!(!dns.contains("ttl"), "an alias record carries no ttl: {dns}");
+
+    // Cognito: pool, client and hosted domain.
+    let iam = norm(&g.files["iam.tf"]);
+    assert!(iam.contains("mfa_configuration = \"OPTIONAL\""));
+    assert!(iam.contains("password_policy { minimum_length = 12"), "{iam}");
+    assert!(iam.contains("resource \"aws_cognito_user_pool_domain\" \"logins_domain\""));
+    assert!(g.files["outputs.tf"].contains("output \"logins_client_id\""));
+}
+
+#[test]
+fn edge_azure_is_honest_about_what_it_cannot_do() {
+    let cat = Catalog::builtin();
+    let p = example("edge.ttg.json");
+    let g = generate(&p, &cat, "azure", Tool::OpenTofu).unwrap();
+    let net = norm(&g.files["network.tf"]);
+
+    // A certificate drawn inside a Key Vault becomes a vault certificate.
+    assert!(net.contains("resource \"azurerm_key_vault_certificate\" \"site_cert\""));
+    assert!(net.contains("issuer_parameters { name = \"Self\" }"), "{net}");
+    assert!(net.contains("subject = format(\"CN=%s\", \"www.example.com\")"));
+    // WAF policy with the OWASP set and the rate-limit custom rule.
+    assert!(net.contains("resource \"azurerm_web_application_firewall_policy\" \"edge_waf\""));
+    assert!(
+        net.contains("managed_rule_set { type = \"OWASP\" version = \"3.2\" }"),
+        "{net}"
+    );
+    assert!(net.contains("rate_limit_threshold = 2000"));
+    assert!(net.contains("resource \"azurerm_cdn_endpoint\" \"assets_cdn\""));
+    assert!(net.contains("host_name = azurerm_storage_account.assets.primary_blob_host"));
+
+    // The layer-4 load balancer passes 443 through and says so.
+    let lb = norm(&g.files["load_balancer.tf"]);
+    assert!(lb.contains("frontend_port = 443"));
+    assert!(!lb.contains("certificate"), "azurerm_lb terminates nothing: {lb}");
+
+    // An A record aliased to the load balancer targets its public IP.
+    assert!(norm(&g.files["dns.tf"]).contains("target_resource_id = azurerm_public_ip.web_lb_pip.id"));
+
+    // Nothing is generated for the user pool, but the logical mapping still explains itself.
+    let steps = &g.files["MANUAL_STEPS.md"];
+    assert!(
+        steps.contains("Create the Entra External ID tenant by hand"),
+        "{steps}"
+    );
+    assert!(steps.contains("TLS is not terminated on an Azure Load Balancer"));
+    assert!(steps.contains("Attach the policy to an Application Gateway or Front Door"));
+}
+
+#[test]
+fn edge_gcp_builds_a_global_https_load_balancer() {
+    let cat = Catalog::builtin();
+    let p = example("edge.ttg.json");
+    let g = generate(&p, &cat, "gcp", Tool::OpenTofu).unwrap();
+    let lb = norm(&g.files["load_balancer.tf"]);
+
+    // https swaps the regional passthrough NLB for the global application LB.
+    assert!(!lb.contains("google_compute_region_backend_service"), "{lb}");
+    assert!(lb.contains("resource \"google_compute_backend_service\" \"web_lb_gbs\""));
+    assert!(lb.contains("load_balancing_scheme = \"EXTERNAL_MANAGED\""));
+    assert!(lb.contains("resource \"google_compute_url_map\" \"web_lb_urlmap\""));
+    assert!(
+        lb.contains("ssl_certificates = [ google_compute_managed_ssl_certificate.site_cert.id ]"),
+        "{lb}"
+    );
+    assert!(lb.contains("resource \"google_compute_global_forwarding_rule\" \"web_lb_grule\""));
+
+    let net = norm(&g.files["network.tf"]);
+    assert!(
+        net.contains("managed { domains = concat([\"www.example.com\"], [\"example.com\"]) }"),
+        "{net}"
+    );
+    // Cloud Armor: one rule per translatable group, a rate-based ban and the catch-all.
+    assert!(net.contains("expression = \"evaluatePreconfiguredWaf('sqli-v33-stable')\""));
+    assert!(net.contains("action = \"rate_based_ban\""));
+    assert!(net.contains("priority = 2147483647"));
+    assert!(net.contains("resource \"google_compute_backend_bucket\" \"assets_cdn\""));
+    assert!(net.contains("enable_cdn = true"));
+
+    // Cloud DNS has no alias type: the record holds the global forwarding rule's address.
+    assert!(norm(&g.files["dns.tf"])
+        .contains("rrdatas = [ google_compute_global_forwarding_rule.web_lb_grule.ip_address ]"));
+
+    // The redirect and the Cloud Armor attachment are reported, not pretended.
+    assert!(g.diagnostics.iter().any(|d| d
+        .message
+        .contains("HTTP-to-HTTPS redirect is not generated on Google Cloud")));
+    let steps = &g.files["MANUAL_STEPS.md"];
+    assert!(
+        steps.contains("Attach the policy to the load balancer's backend service"),
+        "{steps}"
+    );
+}
+
+#[test]
+fn https_without_a_certificate_is_an_error() {
+    let cat = Catalog::builtin();
+    let mut p = example("edge.ttg.json");
+    p.edges
+        .retain(|e| !(e.source == "lb-web" && e.target == "cert-site"));
+    for provider in ["aws", "gcp"] {
+        let err = generate(&p, &cat, provider, Tool::OpenTofu).unwrap_err();
+        assert!(
+            err.to_string().contains("no Certificate link"),
+            "{provider}: {err}"
+        );
+    }
+    // Azure never terminates TLS on a load balancer, so it has nothing to complain about.
+    generate(&p, &cat, "azure", Tool::OpenTofu).unwrap();
+}

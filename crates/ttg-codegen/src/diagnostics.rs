@@ -487,10 +487,10 @@ pub fn run(full: &Project, cat: &Catalog, provider: &str) -> Vec<Diagnostic> {
 
         // Relations: cardinality and target types.
         for r in &def.relations {
-            let Some(kind) = Relation::from_key(&r.kind) else {
+            if Relation::from_key(&r.kind).is_none() {
                 continue;
-            };
-            let targets = relation_targets(p, cat, &e, kind);
+            }
+            let targets = declared_relation_targets(p, cat, &e, def, r);
             let label = r.label.clone().unwrap_or(r.kind.clone());
             if let Some(min) = r.min_targets {
                 if !targets.is_empty() && targets.len() < min {
@@ -540,29 +540,20 @@ pub fn run(full: &Project, cat: &Catalog, provider: &str) -> Vec<Diagnostic> {
                 }
                 _ => {}
             }
-            for edge in p.edges_from(e.id).filter(|x| x.relation == kind) {
-                if let Some(t) = p.entity(&edge.target) {
-                    if !r.targets.iter().any(|x| x == t.resource_type) {
-                        push(
-                            &mut out,
-                            Some(e.id),
-                            Severity::Warning,
-                            Code::BadRelationTarget,
-                            format!(
-                                "'{}' link to '{}' ({}) is not a declared target; it will only produce depends_on",
-                                r.kind, t.name, t.resource_type
-                            ),
-                        );
-                    }
-                }
-            }
         }
-        // Edges whose relation kind the type does not declare.
+        // Edges whose relation kind the type does not declare, or whose target type no
+        // declaration of that kind allows. Judged against every declaration of the kind at
+        // once, so a type that splits one kind over several declarations stays quiet.
         for edge in p.edges_from(e.id) {
             if edge.relation == Relation::DependsOn {
                 continue;
             }
-            if !def.relations.iter().any(|r| r.kind == edge.relation.key()) {
+            let declared: Vec<&ttg_catalog::RelationDef> = def
+                .relations
+                .iter()
+                .filter(|r| r.kind == edge.relation.key())
+                .collect();
+            if declared.is_empty() {
                 push(
                     &mut out,
                     Some(e.id),
@@ -572,6 +563,27 @@ pub fn run(full: &Project, cat: &Catalog, provider: &str) -> Vec<Diagnostic> {
                         "'{}' is not a relation {} declares; the edge will only produce depends_on",
                         edge.relation.display_name(),
                         def.resource.display_name
+                    ),
+                );
+                continue;
+            }
+            let Some(t) = p.entity(&edge.target) else {
+                continue;
+            };
+            if !declared
+                .iter()
+                .any(|r| r.targets.iter().any(|x| x == t.resource_type))
+            {
+                push(
+                    &mut out,
+                    Some(e.id),
+                    Severity::Warning,
+                    Code::BadRelationTarget,
+                    format!(
+                        "'{}' link to '{}' ({}) is not a declared target; it will only produce depends_on",
+                        edge.relation.key(),
+                        t.name,
+                        t.resource_type
                     ),
                 );
             }
@@ -724,10 +736,7 @@ pub fn relation_targets_of_type(
     kind: Relation,
     target_type: Option<&str>,
 ) -> Vec<Id> {
-    relation_targets(p, cat, e, kind)
-        .into_iter()
-        .filter(|t| target_type.is_none_or(|tt| p.entity(t).is_some_and(|x| x.resource_type == tt)))
-        .collect()
+    targets_where(p, cat, e, kind, &|ty| target_type.is_none_or(|tt| tt == ty))
 }
 
 /// Entities that link *to* `e` with this relation, optionally only those of one abstract
@@ -902,37 +911,78 @@ fn render_message(msg: &str, e: &EntityRef, item: Option<&Record>) -> String {
 /// True when an explicit edge says nothing containment does not already say: a
 /// `via_parent` relation whose target is an enclosing container of the source.
 pub fn is_redundant_edge(p: &Project, cat: &Catalog, e: &ttg_core::Edge) -> bool {
-    let Some(src) = p.entity(&e.source) else {
+    let (Some(src), Some(t)) = (p.entity(&e.source), p.entity(&e.target)) else {
         return false;
     };
-    let Some(r) = cat.relation_def(src.resource_type, e.relation.key()) else {
+    let Some(def) = cat.resource(src.resource_type) else {
         return false;
     };
-    r.via_parent
-        && p.is_ancestor(&e.target, &e.source)
-        && p.entity(&e.target)
-            .is_some_and(|t| r.targets.iter().any(|x| x == t.resource_type))
+    p.is_ancestor(&e.target, &e.source)
+        && def.relations.iter().any(|r| {
+            r.kind == e.relation.key() && r.via_parent && r.targets.iter().any(|x| x == t.resource_type)
+        })
 }
 
-/// Targets of a relation for an entity: explicit edges first, then (if the relation is
-/// `via_parent`) the nearest enclosing container of an allowed type.
+/// Targets of a relation for an entity: explicit edges first, then (if some declaration of
+/// the kind is `via_parent`) the nearest enclosing container of an allowed type.
 pub fn relation_targets(p: &Project, cat: &Catalog, e: &EntityRef, kind: Relation) -> Vec<Id> {
+    targets_where(p, cat, e, kind, &|_| true)
+}
+
+/// Targets of one *relation declaration*. A type may declare the same relation kind
+/// several times, one per group of target types (a DNS Record's zone and its alias target
+/// are both `attribute_reference`); each declaration then only owns links to its own
+/// targets, so cardinality and "satisfied" are judged per declaration.
+pub fn declared_relation_targets(
+    p: &Project,
+    cat: &Catalog,
+    e: &EntityRef,
+    def: &ttg_catalog::ResourceDef,
+    r: &ttg_catalog::RelationDef,
+) -> Vec<Id> {
+    let Some(kind) = Relation::from_key(&r.kind) else {
+        return Vec::new();
+    };
+    if def.relations.iter().filter(|x| x.kind == r.kind).count() < 2 {
+        return relation_targets(p, cat, e, kind);
+    }
+    targets_where(p, cat, e, kind, &|ty| r.targets.iter().any(|d| d == ty))
+}
+
+/// The one place edges of a relation kind are resolved. `keep` narrows the targets by
+/// abstract type; the `via_parent` fallback only fires when no *accepted* edge exists, so
+/// one declaration of a kind never swallows another's containment.
+fn targets_where(
+    p: &Project,
+    cat: &Catalog,
+    e: &EntityRef,
+    kind: Relation,
+    keep: &dyn Fn(&str) -> bool,
+) -> Vec<Id> {
+    let accepted = |id: &str| p.entity(id).is_some_and(|x| keep(x.resource_type));
     let mut out: Vec<Id> = p
         .edges_from(e.id)
         .filter(|x| x.relation == kind)
         .map(|x| x.target.clone())
+        .filter(|t| accepted(t))
         .collect();
     if out.is_empty() {
-        if let Some(r) = cat.relation_def(e.resource_type, kind.key()) {
-            if r.via_parent {
-                if let Some(c) = p
-                    .ancestors(e.id)
-                    .into_iter()
-                    .find(|c| r.targets.iter().any(|t| t == &c.container_type))
-                {
-                    out.push(c.id.clone());
-                }
-            }
+        let Some(def) = cat.resource(e.resource_type) else {
+            return out;
+        };
+        let containers: Vec<&str> = def
+            .relations
+            .iter()
+            .filter(|r| r.kind == kind.key() && r.via_parent)
+            .flat_map(|r| r.targets.iter().map(String::as_str))
+            .filter(|t| keep(t))
+            .collect();
+        if let Some(c) = p
+            .ancestors(e.id)
+            .into_iter()
+            .find(|c| containers.contains(&c.container_type.as_str()))
+        {
+            out.push(c.id.clone());
         }
     }
     out
@@ -1056,6 +1106,7 @@ fn scan_source(s: &ArgSource, rel: &mut HashSet<Consumed>, anc: &mut HashSet<Str
                 scan_source(o, rel, anc);
             }
         }
+        ArgSource::Raw(r) => r.refs.values().for_each(|x| scan_source(x, rel, anc)),
         ArgSource::Object(o) => o.object.values().for_each(|x| scan_source(x, rel, anc)),
         ArgSource::List(l) => l.list.iter().for_each(|x| scan_source(x, rel, anc)),
         ArgSource::Func(f) => f.args.iter().for_each(|x| scan_source(x, rel, anc)),

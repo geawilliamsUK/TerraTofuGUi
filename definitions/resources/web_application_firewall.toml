@@ -1,0 +1,370 @@
+# Abstract type: Web Application Firewall  (schema_version 2)
+#
+# Managed rule groups (and an optional rate limit) in front of a Load Balancer.
+# AWS: aws_wafv2_web_acl (REGIONAL) with one managed-rule statement per entry plus an
+#      aws_wafv2_web_acl_association per protected load balancer — the whole thing.
+# Azure: azurerm_web_application_firewall_policy with the OWASP 3.2 managed rule set and a
+#      rate-limit custom rule. Azure policies attach to an Application Gateway or Front
+#      Door, never to the layer-4 azurerm_lb the Load Balancer type emits, so the
+#      attachment is a manual step.
+# GCP: google_compute_security_policy (Cloud Armor) with preconfigured WAF expressions and
+#      a rate-based ban. Cloud Armor is attached by setting `security_policy` on the
+#      *backend service*, which belongs to the load balancer's mapping, so that too is a
+#      manual step.
+
+schema_version = 2
+
+[resource]
+type = "web_application_firewall"
+category = "network"
+display_name = "Web Application Firewall"
+description = "Managed rule groups and a rate limit in front of a Load Balancer. Link 'Protects' to the load balancers it guards."
+kind = "node"
+allowed_parents = ["resource_group"]
+icon = "WAF"
+network_agnostic = true
+
+[[fields]]
+name = "managed_rules"
+label = "Managed rule groups"
+type = "string_list"
+required = true
+default = ["AWSManagedRulesCommonRuleSet"]
+description = "AWS managed rule group names. AWSManagedRulesCommonRuleSet, AWSManagedRulesKnownBadInputsRuleSet, AWSManagedRulesSQLiRuleSet, AWSManagedRulesLinuxRuleSet and AWSManagedRulesPHPRuleSet also translate to Cloud Armor; any other name is AWS-only."
+
+[[fields]]
+name = "rate_limit_per_5min"
+label = "Rate limit / 5 min"
+type = "int"
+default = 0
+description = "Requests per source IP per five minutes before the rule fires; 0 turns the rule off. AWS requires at least 100."
+
+[[fields]]
+name = "mode"
+label = "Mode"
+type = "enum"
+required = true
+options = ["block", "count"]
+default = "block"
+description = "block enforces the rules; count only records what would have been blocked (Detection / preview)."
+
+[[relations]]
+kind = "attachment"
+label = "Protects"
+targets = ["load_balancer"]
+cardinality = "many"
+
+# ---------------------------------------------------------------- AWS
+[providers.aws]
+status = "full"
+
+[[providers.aws.blocks]]
+key = "main"
+resource = "aws_wafv2_web_acl"
+
+[providers.aws.blocks.args]
+name        = { field = "name", transform = "kebab" }
+description = { template = "{name} (managed by TerraTofu GUI)" }
+scope       = { value = "REGIONAL" }
+tags        = { object = { Name = { field = "name" } } }
+
+[[providers.aws.blocks.nested]]
+block = "default_action"
+
+[[providers.aws.blocks.nested.nested]]
+block = "allow"
+
+# One rule per managed rule group. `override_action` decides whether the group's own
+# actions apply (none) or are downgraded to counting (count).
+[[providers.aws.blocks.nested]]
+block = "rule"
+for_each_field = "managed_rules"
+
+[providers.aws.blocks.nested.args]
+name     = { item = "value" }
+priority = { item_index = { base = 1, step = 1 } }
+
+[[providers.aws.blocks.nested.nested]]
+block = "override_action"
+
+[[providers.aws.blocks.nested.nested.nested]]
+block = "none"
+when = { field = "mode", equals = "block" }
+
+[[providers.aws.blocks.nested.nested.nested]]
+block = "count"
+when = { field = "mode", equals = "count" }
+
+[[providers.aws.blocks.nested.nested]]
+block = "statement"
+
+[[providers.aws.blocks.nested.nested.nested]]
+block = "managed_rule_group_statement"
+
+[providers.aws.blocks.nested.nested.nested.args]
+name        = { item = "value" }
+vendor_name = { value = "AWS" }
+
+[[providers.aws.blocks.nested.nested]]
+block = "visibility_config"
+
+[providers.aws.blocks.nested.nested.args]
+cloudwatch_metrics_enabled = { value = true }
+metric_name                = { item = "value" }
+sampled_requests_enabled   = { value = true }
+
+# Rate limit. A rate-based rule carries its own action rather than an override_action.
+[[providers.aws.blocks.nested]]
+block = "rule"
+when = { field = "rate_limit_per_5min" }
+
+[providers.aws.blocks.nested.args]
+name     = { template = "{name}-rate-limit", transform = "kebab" }
+priority = { value = 100 }
+
+[[providers.aws.blocks.nested.nested]]
+block = "action"
+
+[[providers.aws.blocks.nested.nested.nested]]
+block = "block"
+when = { field = "mode", equals = "block" }
+
+[[providers.aws.blocks.nested.nested.nested]]
+block = "count"
+when = { field = "mode", equals = "count" }
+
+[[providers.aws.blocks.nested.nested]]
+block = "statement"
+
+[[providers.aws.blocks.nested.nested.nested]]
+block = "rate_based_statement"
+
+[providers.aws.blocks.nested.nested.nested.args]
+limit                 = { field = "rate_limit_per_5min" }
+aggregate_key_type    = { value = "IP" }
+evaluation_window_sec = { value = 300 }
+
+[[providers.aws.blocks.nested.nested]]
+block = "visibility_config"
+
+[providers.aws.blocks.nested.nested.args]
+cloudwatch_metrics_enabled = { value = true }
+metric_name                = { template = "{name}-rate-limit", transform = "kebab" }
+sampled_requests_enabled   = { value = true }
+
+[[providers.aws.blocks.nested]]
+block = "visibility_config"
+
+[providers.aws.blocks.nested.args]
+cloudwatch_metrics_enabled = { value = true }
+metric_name                = { template = "{name}", transform = "alnum" }
+sampled_requests_enabled   = { value = true }
+
+[[providers.aws.blocks]]
+key = "assoc"
+resource = "aws_wafv2_web_acl_association"
+for_each_relation = "attachment"
+for_each_target_type = "load_balancer"
+
+[providers.aws.blocks.args]
+resource_arn = { target = "arn" }
+web_acl_arn  = { self_block = "main", attr = "arn" }
+
+[providers.aws.outputs]
+arn = { attr = "arn", description = "Web ACL ARN" }
+
+# ---------------------------------------------------------------- Azure
+[providers.azure]
+status = "partial"
+notes = "OWASP 3.2 covers the AWS rule groups between them, so the individual entries of 'Managed rule groups' are not distinguished on Azure."
+
+[[providers.azure.blocks]]
+key = "main"
+resource = "azurerm_web_application_firewall_policy"
+
+[providers.azure.blocks.args]
+name                = { field = "name", transform = "kebab" }
+location            = { var = "location" }
+resource_group_name = { ancestor = "resource_group", attr = "name" }
+tags                = { object = { Name = { field = "name" } } }
+
+[[providers.azure.blocks.nested]]
+block = "policy_settings"
+
+[providers.azure.blocks.nested.args]
+enabled = { value = true }
+mode    = { map = "mode", table = { block = "Prevention", count = "Detection" } }
+
+[[providers.azure.blocks.nested]]
+block = "managed_rules"
+
+[[providers.azure.blocks.nested.nested]]
+block = "managed_rule_set"
+
+[providers.azure.blocks.nested.nested.args]
+type    = { value = "OWASP" }
+version = { value = "3.2" }
+
+[[providers.azure.blocks.nested]]
+block = "custom_rules"
+when = { field = "rate_limit_per_5min" }
+
+[providers.azure.blocks.nested.args]
+name                 = { value = "RateLimit" }
+priority             = { value = 1 }
+rule_type            = { value = "RateLimitRule" }
+rate_limit_duration  = { value = "FiveMins" }
+rate_limit_threshold = { field = "rate_limit_per_5min" }
+group_rate_limit_by  = { value = "ClientAddr" }
+action               = { map = "mode", table = { block = "Block", count = "Log" } }
+
+[[providers.azure.blocks.nested.nested]]
+block = "match_conditions"
+
+[providers.azure.blocks.nested.nested.args]
+operator           = { value = "IPMatch" }
+negation_condition = { value = false }
+match_values       = { value = ["0.0.0.0/0"] }
+
+[[providers.azure.blocks.nested.nested.nested]]
+block = "match_variables"
+
+[providers.azure.blocks.nested.nested.nested.args]
+variable_name = { value = "RemoteAddr" }
+
+[providers.azure.outputs]
+id = { attr = "id", description = "WAF policy id (reference it from an Application Gateway or Front Door)" }
+
+[[providers.azure.manual_steps]]
+title = "Attach the policy to an Application Gateway or Front Door"
+body = """
+The policy exists but protects nothing yet. Azure WAF only attaches to an Application
+Gateway (`azurerm_application_gateway.firewall_policy_id`) or a Front Door
+(`azurerm_cdn_frontdoor_security_policy`); the Standard `azurerm_lb` the Load Balancer type
+emits is a layer-4 load balancer and cannot run a WAF. Add a native Application Gateway
+node in front of the backends and set its `firewall_policy_id` to this policy's id.
+"""
+
+# ---------------------------------------------------------------- GCP
+[providers.gcp]
+status = "partial"
+
+[[providers.gcp.blocks]]
+key = "main"
+resource = "google_compute_security_policy"
+
+[providers.gcp.blocks.args]
+name        = { field = "name", transform = "kebab" }
+description = { template = "{name} (managed by TerraTofu GUI)" }
+
+# One rule per rule group Cloud Armor has a preconfigured expression for. The `when` list
+# has to repeat the keys of the lookup table below: entries with no Cloud Armor equivalent
+# produce no rule (and a check warns about them).
+[[providers.gcp.blocks.nested]]
+block = "rule"
+for_each_field = "managed_rules"
+when = { any = [
+  { item = "value", equals = "AWSManagedRulesCommonRuleSet" },
+  { item = "value", equals = "AWSManagedRulesKnownBadInputsRuleSet" },
+  { item = "value", equals = "AWSManagedRulesSQLiRuleSet" },
+  { item = "value", equals = "AWSManagedRulesLinuxRuleSet" },
+  { item = "value", equals = "AWSManagedRulesPHPRuleSet" },
+] }
+
+[providers.gcp.blocks.nested.args]
+action      = { value = "deny(403)" }
+priority    = { item_index = { base = 1, step = 1 } }
+description = { template = "{item.value}" }
+preview     = { if = { field = "mode", equals = "count" }, then = { value = true } }
+
+[[providers.gcp.blocks.nested.nested]]
+block = "match"
+
+[[providers.gcp.blocks.nested.nested.nested]]
+block = "expr"
+
+[providers.gcp.blocks.nested.nested.nested.args]
+expression = { map = "value", optional = true, table = { AWSManagedRulesCommonRuleSet = "evaluatePreconfiguredWaf('xss-v33-stable') || evaluatePreconfiguredWaf('protocolattack-v33-stable') || evaluatePreconfiguredWaf('scannerdetection-v33-stable')", AWSManagedRulesKnownBadInputsRuleSet = "evaluatePreconfiguredWaf('cve-canary') || evaluatePreconfiguredWaf('rce-v33-stable')", AWSManagedRulesSQLiRuleSet = "evaluatePreconfiguredWaf('sqli-v33-stable')", AWSManagedRulesLinuxRuleSet = "evaluatePreconfiguredWaf('lfi-v33-stable') || evaluatePreconfiguredWaf('rfi-v33-stable')", AWSManagedRulesPHPRuleSet = "evaluatePreconfiguredWaf('php-v33-stable')" } }
+
+[[providers.gcp.blocks.nested]]
+block = "rule"
+when = { field = "rate_limit_per_5min" }
+
+[providers.gcp.blocks.nested.args]
+action      = { value = "rate_based_ban" }
+priority    = { value = 100 }
+description = { value = "rate limit per source IP" }
+preview     = { if = { field = "mode", equals = "count" }, then = { value = true } }
+
+[[providers.gcp.blocks.nested.nested]]
+block = "match"
+
+[providers.gcp.blocks.nested.nested.args]
+versioned_expr = { value = "SRC_IPS_V1" }
+
+[[providers.gcp.blocks.nested.nested.nested]]
+block = "config"
+
+[providers.gcp.blocks.nested.nested.nested.args]
+src_ip_ranges = { value = ["*"] }
+
+[[providers.gcp.blocks.nested.nested]]
+block = "rate_limit_options"
+
+[providers.gcp.blocks.nested.nested.args]
+conform_action   = { value = "allow" }
+exceed_action    = { value = "deny(429)" }
+enforce_on_key   = { value = "IP" }
+ban_duration_sec = { value = 600 }
+
+[[providers.gcp.blocks.nested.nested.nested]]
+block = "rate_limit_threshold"
+
+[providers.gcp.blocks.nested.nested.nested.args]
+count        = { field = "rate_limit_per_5min" }
+interval_sec = { value = 300 }
+
+# Cloud Armor requires a catch-all rule at the lowest priority.
+[[providers.gcp.blocks.nested]]
+block = "rule"
+
+[providers.gcp.blocks.nested.args]
+action      = { value = "allow" }
+priority    = { value = 2147483647 }
+description = { value = "default allow" }
+
+[[providers.gcp.blocks.nested.nested]]
+block = "match"
+
+[providers.gcp.blocks.nested.nested.args]
+versioned_expr = { value = "SRC_IPS_V1" }
+
+[[providers.gcp.blocks.nested.nested.nested]]
+block = "config"
+
+[providers.gcp.blocks.nested.nested.nested.args]
+src_ip_ranges = { value = ["*"] }
+
+[providers.gcp.outputs]
+id = { attr = "id", description = "Cloud Armor policy id" }
+
+[[providers.gcp.checks]]
+for_each_field = "managed_rules"
+when = { all = [
+  { item = "value", not_equals = "AWSManagedRulesCommonRuleSet" },
+  { item = "value", not_equals = "AWSManagedRulesKnownBadInputsRuleSet" },
+  { item = "value", not_equals = "AWSManagedRulesSQLiRuleSet" },
+  { item = "value", not_equals = "AWSManagedRulesLinuxRuleSet" },
+  { item = "value", not_equals = "AWSManagedRulesPHPRuleSet" },
+] }
+message = "\"{name}\": Cloud Armor has no preconfigured equivalent for \"{item.value}\"; that rule group is dropped on Google Cloud"
+
+[[providers.gcp.manual_steps]]
+title = "Attach the policy to the load balancer's backend service"
+body = """
+Cloud Armor is attached from the *backend service* side (`security_policy = <this policy's
+id>`), which belongs to the load balancer, so this mapping cannot write it. After apply,
+set `security_policy` on the `google_compute_backend_service` /
+`google_compute_region_backend_service` of each protected load balancer — for example as an
+extra argument on the Load Balancer node's `main` block — and re-apply.
+"""

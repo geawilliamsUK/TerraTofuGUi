@@ -526,7 +526,8 @@ pub enum ArgSource {
     EntityVar(SrcEntityVar),
     /// `{ if = <condition>, then = <source>, else = <source> }` (v2).
     If(SrcIf),
-    /// `{ raw = "..." }` — raw HCL expression. Last resort.
+    /// `{ raw = "..." }` — raw HCL expression, optionally with `refs` spliced in at
+    /// `@name@`. Last resort.
     Raw(SrcRaw),
 }
 
@@ -734,6 +735,23 @@ pub struct SrcFunc {
 #[serde(deny_unknown_fields)]
 pub struct SrcRaw {
     pub raw: String,
+    /// Sub-expressions spliced into `raw` wherever `@name@` appears, before the text is
+    /// parsed as HCL (v2). Lets a mapping write an expression the source language has no
+    /// form for — a `for_each` comprehension, say — without hard-coding local names.
+    #[serde(default)]
+    pub refs: IndexMap<String, ArgSource>,
+}
+
+impl SrcRaw {
+    /// The `@name@` placeholders in the raw text, in order of appearance.
+    pub fn placeholders(&self) -> Vec<&str> {
+        self.raw
+            .split('@')
+            .skip(1)
+            .step_by(2)
+            .filter(|s| !s.is_empty())
+            .collect()
+    }
 }
 
 // ---------------------------------------------------------------------------

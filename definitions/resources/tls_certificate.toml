@@ -1,0 +1,224 @@
+# Abstract type: TLS Certificate  (schema_version 2)
+#
+# The server certificate an internet-facing Load Balancer or CDN presents.
+# AWS: aws_acm_certificate with DNS validation. Linking a DNS Zone ("Validated in") also
+#      emits the CNAME records ACM asks for and an aws_acm_certificate_validation that
+#      blocks until the certificate is issued, so `apply` produces a usable certificate in
+#      one go. Without a zone the certificate stays PENDING_VALIDATION (manual step).
+# Azure: there is no provider-neutral managed certificate. Drawn inside a Key Vault the
+#      mapping creates an azurerm_key_vault_certificate with a self-signed issuer policy —
+#      real enough to attach, but not publicly trusted; swap the issuer for a CA. Outside a
+#      vault nothing is emitted and the whole certificate is a manual step.
+# GCP: google_compute_managed_ssl_certificate. Google validates by checking that the
+#      domain already points at the load balancer, so there are no validation records.
+
+schema_version = 2
+
+[resource]
+type = "tls_certificate"
+category = "network"
+display_name = "TLS Certificate"
+description = "A server certificate for an HTTPS load balancer or CDN. Link 'Validated in' to a DNS Zone so AWS can prove ownership automatically."
+kind = "node"
+allowed_parents = ["resource_group", "key_vault"]
+icon = "TLS"
+network_agnostic = true
+
+[[fields]]
+name = "domain"
+label = "Domain"
+type = "string"
+required = true
+default = "www.example.com"
+pattern = "^\\*?\\.?([a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?\\.)+[a-z]{2,}$"
+pattern_hint = "a fully qualified domain such as www.example.com, or *.example.com"
+
+[[fields]]
+name = "alternative_names"
+label = "Alternative names"
+type = "string_list"
+description = "Extra domains the certificate also covers (subject alternative names)."
+
+# DNS validation is an ACM concept: Azure's vault certificate is issued by the vault and
+# Google validates by resolving the domain, so neither consumes this link.
+[[relations]]
+kind = "attribute_reference"
+label = "Validated in"
+providers = ["aws"]
+targets = ["dns_zone"]
+cardinality = "optional"
+
+# ---------------------------------------------------------------- AWS
+[providers.aws]
+status = "partial"
+
+[[providers.aws.blocks]]
+key = "main"
+resource = "aws_acm_certificate"
+
+[providers.aws.blocks.args]
+domain_name               = { field = "domain" }
+subject_alternative_names = { field = "alternative_names", optional = true }
+validation_method         = { value = "DNS" }
+tags                      = { object = { Name = { field = "name" } } }
+
+# One record per entry of the certificate's domain_validation_options set. The set is only
+# known after apply, so the block has to be a for_each over a comprehension; `refs` splices
+# in the certificate's own address.
+[[providers.aws.blocks]]
+key = "validation"
+resource = "aws_route53_record"
+when = { relation = "attribute_reference", target_type = "dns_zone" }
+
+[providers.aws.blocks.args]
+for_each        = { raw = "{ for o in @options@ : o.domain_name => o }", refs = { options = { self_block = "main", attr = "domain_validation_options" } } }
+zone_id         = { relation = "attribute_reference", target_type = "dns_zone", attr = "zone_id" }
+name            = { raw = "each.value.resource_record_name" }
+type            = { raw = "each.value.resource_record_type" }
+records         = { raw = "[each.value.resource_record_value]" }
+ttl             = { value = 60 }
+allow_overwrite = { value = true }
+
+[[providers.aws.blocks]]
+key = "issued"
+resource = "aws_acm_certificate_validation"
+when = { relation = "attribute_reference", target_type = "dns_zone" }
+
+[providers.aws.blocks.args]
+certificate_arn         = { self_block = "main", attr = "arn" }
+validation_record_fqdns = { raw = "[for r in @records@ : r.fqdn]", refs = { records = { self_block = "validation", attr = "" } } }
+
+[providers.aws.outputs]
+arn = { attr = "arn", description = "Certificate ARN" }
+
+[[providers.aws.manual_steps]]
+title = "Validate the certificate by hand"
+when = { relation = "attribute_reference", target_type = "dns_zone", absent = true }
+body = """
+No DNS Zone is linked, so the certificate is created with `validation_method = "DNS"` and
+stays in `PENDING_VALIDATION`. Read the CNAME name/value from the certificate's
+`domain_validation_options` (console or `aws acm describe-certificate`) and add it to
+whoever hosts the domain. Link a DNS Zone with **Validated in** to have the records and the
+`aws_acm_certificate_validation` generated instead.
+"""
+
+# ---------------------------------------------------------------- Azure
+[providers.azure]
+status = "partial"
+
+[[providers.azure.blocks]]
+key = "main"
+resource = "azurerm_key_vault_certificate"
+when = { ancestor = "key_vault" }
+
+[providers.azure.blocks.args]
+name         = { field = "name", transform = "kebab" }
+key_vault_id = { ancestor = "key_vault", attr = "id" }
+tags         = { object = { Name = { field = "name" } } }
+
+[[providers.azure.blocks.nested]]
+block = "certificate_policy"
+
+[[providers.azure.blocks.nested.nested]]
+block = "issuer_parameters"
+
+[providers.azure.blocks.nested.nested.args]
+name = { value = "Self" }
+
+[[providers.azure.blocks.nested.nested]]
+block = "key_properties"
+
+[providers.azure.blocks.nested.nested.args]
+exportable = { value = true }
+key_type   = { value = "RSA" }
+key_size   = { value = 2048 }
+reuse_key  = { value = true }
+
+[[providers.azure.blocks.nested.nested]]
+block = "lifetime_action"
+
+[[providers.azure.blocks.nested.nested.nested]]
+block = "action"
+
+[providers.azure.blocks.nested.nested.nested.args]
+action_type = { value = "AutoRenew" }
+
+[[providers.azure.blocks.nested.nested.nested]]
+block = "trigger"
+
+[providers.azure.blocks.nested.nested.nested.args]
+days_before_expiry = { value = 30 }
+
+[[providers.azure.blocks.nested.nested]]
+block = "secret_properties"
+
+[providers.azure.blocks.nested.nested.args]
+content_type = { value = "application/x-pkcs12" }
+
+[[providers.azure.blocks.nested.nested]]
+block = "x509_certificate_properties"
+
+[providers.azure.blocks.nested.nested.args]
+subject            = { func = "format", args = [ { value = "CN=%s" }, { field = "domain" } ] }
+key_usage          = { value = ["digitalSignature", "keyEncipherment"] }
+validity_in_months = { value = 12 }
+
+[[providers.azure.blocks.nested.nested.nested]]
+block = "subject_alternative_names"
+when = { field = "alternative_names" }
+
+[providers.azure.blocks.nested.nested.nested.args]
+dns_names = { field = "alternative_names" }
+
+[providers.azure.outputs]
+secret_id = { attr = "secret_id", description = "Key Vault secret holding the certificate (what an Application Gateway references)" }
+
+[[providers.azure.manual_steps]]
+title = "Obtain a publicly trusted certificate"
+when = { ancestor = "key_vault" }
+body = """
+The generated policy uses the **Self** issuer, so the certificate is self-signed: browsers
+will not trust it. Either change `issuer_parameters.name` to a CA issuer registered on the
+vault (App Service Certificate, DigiCert, GlobalSign) and re-apply, or import a certificate
+you already hold into the same vault entry.
+"""
+
+[[providers.azure.manual_steps]]
+title = "Azure has no standalone managed certificate"
+when = { ancestor = "key_vault", absent = true }
+body = """
+Nothing was generated for this certificate. Azure issues certificates through a Key Vault
+(`azurerm_key_vault_certificate`) or per-service (App Service managed certificates, Front
+Door managed certificates); there is no generic resource a plain Load Balancer could use.
+Draw this certificate **inside a Key Vault** container to have the vault certificate
+generated, then reference it from an Application Gateway or Front Door.
+"""
+
+# ---------------------------------------------------------------- GCP
+[providers.gcp]
+status = "partial"
+
+[[providers.gcp.blocks]]
+key = "main"
+resource = "google_compute_managed_ssl_certificate"
+
+[providers.gcp.blocks.args]
+name = { field = "name", transform = "kebab" }
+
+[[providers.gcp.blocks.nested]]
+block = "managed"
+
+[providers.gcp.blocks.nested.args]
+domains = { func = "concat", args = [ { field = "domain", wrap = "list" }, { field = "alternative_names", wrap = "list" } ] }
+
+[providers.gcp.outputs]
+id = { attr = "id", description = "Certificate id (reference it from a target HTTPS proxy)" }
+
+[[providers.gcp.manual_steps]]
+title = "Point the domain at the load balancer before the certificate can be issued"
+body = """
+A Google-managed certificate is only issued once every domain in it resolves to the load
+balancer's global IP address. Apply the load balancer first, then create the A record (the
+DNS Record type can do this with an **Alias of** link), and wait — provisioning takes up to
+an hour and `terraform apply` returns before the certificate is ACTIVE.
+"""

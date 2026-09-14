@@ -95,6 +95,7 @@ fn scan(src: &ArgSource, set: &mut HashSet<String>) {
                 scan(o, set);
             }
         }
+        ArgSource::Raw(r) => r.refs.values().for_each(|x| scan(x, set)),
         ArgSource::Object(o) => o.object.values().for_each(|x| scan(x, set)),
         ArgSource::List(l) => l.list.iter().for_each(|x| scan(x, set)),
         ArgSource::Func(f) => f.args.iter().for_each(|x| scan(x, set)),

@@ -268,8 +268,54 @@ Shapes worth knowing:
 - Provider-scoped relations keep GCP quiet where a concept does not apply (functions'
   and databases' security groups, `logs_to`, the private endpoint's links).
 
-Open on GCP: an HTTP(S) load balancer variant (URL map + target proxy), Private Service
-Connect for private endpoints, and provider-level project creation (`google_project`).
+Open on GCP: Private Service Connect for private endpoints and provider-level project
+creation (`google_project`). The HTTP(S) load balancer variant landed with the edge work
+below.
+
+## Internet-facing edge (gap report 2.4, 2.7, 2.8, 2.18)
+
+Four curated types and the load balancer / DNS record changes that use them. The example is
+`examples/edge.ttg.json`; it validates on all three providers and both tools.
+
+- **TLS Certificate** (`tls_certificate`). AWS `aws_acm_certificate` with DNS validation;
+  linking a DNS Zone ("Validated in", AWS-only) also emits the `aws_route53_record`s from
+  `domain_validation_options` and an `aws_acm_certificate_validation`, so listeners can wait
+  for issuance. Azure only has a certificate inside a Key Vault
+  (`azurerm_key_vault_certificate`, self-signed issuer policy) — outside one, nothing is
+  emitted and a manual step says why. GCP `google_compute_managed_ssl_certificate`.
+- **HTTPS on Load Balancer.** `protocol` gained `https`; a Certificate link (AWS + GCP) is
+  required for it by a design-time check. AWS: HTTPS listener with `certificate_arn` and
+  `ELBSecurityPolicy-TLS13-1-2-2021-06`, plus an optional port-80 redirect listener
+  (`redirect_http`). Azure keeps `azurerm_lb` — a layer-4 load balancer cannot terminate TLS
+  and an Application Gateway needs its own subnet, so that is a manual step rather than a
+  silent second mapping. GCP switches to a global external Application Load Balancer
+  (health check, backend service, URL map, target HTTPS proxy, global forwarding rule).
+  Hardening: `drop_invalid_header_fields`, `deletion_protection`, `idle_timeout_seconds`,
+  and access logs to an Object Storage node through a `logs_to` link (AWS emits the
+  `access_logs` block *and* the bucket policy the ELB service needs).
+- **Web Application Firewall** (`web_application_firewall`). AWS `aws_wafv2_web_acl`
+  (REGIONAL) with one managed-rule statement per entry, a rate-based rule and one
+  `aws_wafv2_web_acl_association` per protected load balancer. Azure
+  `azurerm_web_application_firewall_policy` (OWASP 3.2 + a rate-limit custom rule); GCP
+  `google_compute_security_policy` with preconfigured Cloud Armor expressions and a
+  rate-based ban. Neither Azure nor GCP can attach it from this side, so both say so.
+- **CDN** (`cdn`). AWS `aws_cloudfront_distribution` (origin access control and the reader
+  bucket policy for an Object Storage origin, a custom origin for a Load Balancer); Azure
+  classic `azurerm_cdn_profile` + `azurerm_cdn_endpoint`; GCP
+  `google_compute_backend_bucket` with `enable_cdn`. A CloudFront distribution needs a
+  CLOUDFRONT-scoped Web ACL, which is a different resource from the REGIONAL one — that is a
+  check plus a manual step, not a pretend link.
+- **User Identity** (`user_identity`). AWS Cognito pool + client + hosted domain; GCP
+  `google_identity_platform_config` (partial); Azure `logical`, because Entra External ID
+  needs the `azuread` provider this catalog does not carry.
+- **DNS alias** (`dns_record`). An optional "Alias of" link to a Load Balancer or CDN turns
+  an A record into a Route 53 `alias` block, an Azure `target_resource_id` pointing at the
+  load balancer's public IP, or the Google forwarding rule's address, and suppresses
+  `records` / `ttl`.
+
+Mapping-language additions this needed: `{ raw = "…", refs = { … } }` (splice resolved
+traversals into a raw expression — the ACM `for_each` comprehension), several relation
+declarations sharing one kind, and `manual_steps` on a `logical` mapping.
 
 ## Phase 4 — Contribution guide and tooling (done 2026-09-09)
 
