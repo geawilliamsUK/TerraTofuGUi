@@ -36,7 +36,8 @@ Claude Code ──Streamable HTTP (MCP), localhost, bearer token──► terrat
 ## 2. Tools
 
 Read: `project_get`, `project_summary`, `catalog_types`, `catalog_type`, `diagnostics`,
-`reach_posture`, `reach_from`, `reach_to`, `export_preview`, `screenshot`.
+`reach_posture`, `reach_from`, `reach_to`, `export_preview`, `view_get`, `view_export`,
+`view_fit`, `screenshot`.
 
 Write (each undoable): `entity_add`, `entity_update` (values validated against the
 definition, unknown fields rejected with the list of valid ones), `entity_move`,
@@ -52,6 +53,22 @@ via `BlockSchema::filtered` in `ttg-schema`, also behind `ttg schema show --dept
 --required-only`), `entity_update.extra` (extra / native arguments), `layout_tidy`, `layout_align`,
 `layout_distribute`, `settings_set`, `project_save`, `project_open`, `project_new`,
 `export_run` (validate runs off the UI thread), `undo`, `redo`.
+
+Added 2026-09-14 (views as documents): `view_note_add` and `view_logical_add` (note
+boxes and annotation-only nodes; both removable through `view_annotation_remove`, which
+now matches a group, flow, note or logical node by id, label, title or name),
+`view_update` (name, description, legend), `view_get` (one view in full: filter,
+description, layout, which resources it shows, and its groups — with the members they
+currently hold — flows, notes and logicals), `view_fit` (frames the view's content in the
+camera and answers with the bounding box, so it works headless) and `view_export`
+(`md` / `mermaid` through `ttg_codegen::views`). `view_group_add`, `view_flow_add`,
+`view_note_add`, `view_logical_add`, `view_annotation_remove` and `entity_move` take an
+optional `view`: `TtgApp::with_view` makes that view active for the command and puts the
+previous one back, so a batch can draw a whole map without interleaving `view_activate`.
+`view_flow_add` also takes `step` and `color`. `screenshot` takes `view`, `fit` and
+`hide_panels`; the options are applied when the command is dequeued and the capture is
+asked for two frames later, so the view has settled, with the panels restored when the
+image arrives (the asynchronous contract is unchanged).
 
 Added 2026-09-09: `project_apply` (a list of `{tool, args}` diagram writes executed as
 one undo step; `AgentCommand::Batch` snapshots first, runs each sub-command through the
@@ -110,8 +127,12 @@ prompts are skipped in this mode. `crates/ttg-app/tests/mcp_headless.rs` spawns 
 free port and speaks Streamable HTTP with a ~60-line client (`ureq`, SSE `data:` lines):
 initialize, tools/list, a write and the revision counter, a four-command batch undone
 by one `undo`, a failing batch rolled back, `export_diff` against an empty directory,
-resources list/read/templates/subscribe, a 401 and the headless screenshot refusal. It
-runs in CI on the same job as the rest of the workspace.
+resources list/read/templates/subscribe, a 401 and the headless screenshot refusal. A
+second test drives the job-pipeline example: `view_get`, drawing notes, logical nodes
+and flows into a named view while no view is active, `entity_move` landing in that
+view's layout and not the shared one, `view_update`, both `view_export` formats,
+`view_fit` answering without a window, removal by title, and a three-command batch undone
+in one step. Both run in CI on the same job as the rest of the workspace.
 
 ## 5. Open ideas
 

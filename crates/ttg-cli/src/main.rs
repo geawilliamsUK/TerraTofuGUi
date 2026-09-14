@@ -5,6 +5,7 @@
 //! ttg export     <project.ttg.json> --provider aws --tool opentofu --out ./out/aws [--validate]
 //! ttg export-all <project.ttg.json> --tool opentofu --out ./out [--zip] [--validate]
 //! ttg catalog    [--definitions ./definitions]
+//! ttg view       export <project.ttg.json> <view> [--format md|mermaid] [--out doc.md]
 //! ```
 
 use anyhow::{bail, Context, Result};
@@ -112,6 +113,11 @@ enum Cmd {
         #[command(subcommand)]
         cmd: SchemaCmd,
     },
+    /// Saved views: list them, or write one out as a document.
+    View {
+        #[command(subcommand)]
+        cmd: ViewCmd,
+    },
     /// Re-lay out a project file automatically (columns by dependency, containers fitted).
     Tidy {
         project: PathBuf,
@@ -119,6 +125,31 @@ enum Cmd {
         #[arg(long)]
         out: Option<PathBuf>,
     },
+}
+
+#[derive(Clone, Copy, ValueEnum)]
+enum ViewFormat {
+    /// Description, the groups with their members, the flows in step order, the notes.
+    Md,
+    /// A Mermaid `flowchart LR`: groups as subgraphs, logical nodes dashed.
+    Mermaid,
+}
+
+#[derive(Subcommand)]
+enum ViewCmd {
+    /// Write a view as a document. The picture is the fitted screenshot from the GUI.
+    Export {
+        project: PathBuf,
+        /// View name (case-insensitive).
+        view: String,
+        #[arg(long, value_enum, default_value_t = ViewFormat::Md)]
+        format: ViewFormat,
+        /// Write here instead of standard output.
+        #[arg(long)]
+        out: Option<PathBuf>,
+    },
+    /// List the views a project file holds.
+    List { project: PathBuf },
 }
 
 #[derive(Subcommand)]
@@ -325,6 +356,63 @@ fn main() -> Result<()> {
                     .resource(&provider, &resource)
                     .ok_or_else(|| anyhow::anyhow!("no {resource} on {provider}"))?;
                 print_block(&b.filtered(depth, required_only), 0);
+            }
+        },
+        Cmd::View { cmd } => match cmd {
+            ViewCmd::List { project } => {
+                let p = ttg_core::project::load(&project)?;
+                for v in &p.views {
+                    println!(
+                        "{:<20} {} group(s), {} flow(s), {} note(s), {} logical node(s){}",
+                        v.name,
+                        v.groups.len(),
+                        v.flows.len(),
+                        v.notes.len(),
+                        v.logicals.len(),
+                        if v.description.is_empty() {
+                            String::new()
+                        } else {
+                            format!("  — {}", v.description.lines().next().unwrap_or_default())
+                        }
+                    );
+                }
+                if p.views.is_empty() {
+                    println!("(no saved views)");
+                }
+            }
+            ViewCmd::Export {
+                project,
+                view,
+                format,
+                out,
+            } => {
+                let p = ttg_core::project::load(&project)?;
+                cat.ensure_native_types(&p);
+                let v = p
+                    .views
+                    .iter()
+                    .find(|v| v.name.eq_ignore_ascii_case(&view))
+                    .with_context(|| {
+                        format!(
+                            "no view named '{view}' (views: {})",
+                            p.views
+                                .iter()
+                                .map(|v| v.name.clone())
+                                .collect::<Vec<_>>()
+                                .join(", ")
+                        )
+                    })?;
+                let text = match format {
+                    ViewFormat::Md => ttg_codegen::views::markdown(&p, &cat, v),
+                    ViewFormat::Mermaid => ttg_codegen::views::mermaid(&p, &cat, v),
+                };
+                match out {
+                    Some(o) => {
+                        std::fs::write(&o, &text)?;
+                        eprintln!("wrote {}", o.display());
+                    }
+                    None => print!("{text}"),
+                }
             }
         },
         Cmd::Tidy { project, out } => {

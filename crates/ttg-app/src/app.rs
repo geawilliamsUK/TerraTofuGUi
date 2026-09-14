@@ -10,8 +10,8 @@ use ttg_catalog::{Catalog, ResourceKind};
 use ttg_codegen::{Code, Diagnostic, Severity};
 use ttg_core::{Container, Id, Node, Position, Project, Relation, Size, Tool};
 
-pub const NODE_W: f32 = 176.0;
-pub const NODE_H: f32 = 64.0;
+pub const NODE_W: f32 = ttg_core::NODE_SIZE.w as f32;
+pub const NODE_H: f32 = ttg_core::NODE_SIZE.h as f32;
 
 /// Payload for palette -> canvas drag and drop.
 #[derive(Debug, Clone)]
@@ -44,6 +44,15 @@ pub enum PendingAction {
 }
 
 const MAX_RECENT: usize = 10;
+
+/// The open "save view" / "rename and describe view" prompt.
+#[derive(Debug, Clone)]
+pub struct ViewEdit {
+    /// The view being edited, or `None` while saving the current filter as a new one.
+    pub index: Option<usize>,
+    pub name: String,
+    pub description: String,
+}
 
 pub struct PendingEdge {
     pub source: Id,
@@ -90,6 +99,9 @@ pub struct TtgApp {
     pub edit_snapshot: Option<Project>,
     pub canvas_rect: Rect,
     pub fit_requested: bool,
+    /// Draw the canvas alone (no palette, inspector or agent window) for one frame:
+    /// used by screenshots that want the picture to fill the image.
+    pub hide_panels: bool,
     pub add_at: Option<(String, Pos2)>,
     /// `--screenshot` mode: write a PNG after a few frames and exit.
     pub screenshot: Option<PathBuf>,
@@ -119,8 +131,8 @@ pub struct TtgApp {
     /// Entities on the target provider's layer, computed per frame in concrete display
     /// mode; `None` in abstract mode (nothing is dimmed).
     pub layer: Option<BTreeSet<Id>>,
-    /// Name prompt for a new (`None`) or renamed (`Some(index)`) view.
-    pub view_edit: Option<(Option<usize>, String)>,
+    /// Name and description prompt for a new (`None`) or edited (`Some(index)`) view.
+    pub view_edit: Option<ViewEdit>,
     /// Selected group or flow annotation of the active view.
     pub selected_annotation: Option<crate::annotations::Annotation>,
     /// "Data flow from …" waiting for its target.
@@ -184,6 +196,7 @@ impl TtgApp {
             edit_snapshot: None,
             canvas_rect: Rect::NOTHING,
             fit_requested: false,
+            hide_panels: false,
             add_at: None,
             screenshot: None,
             frame_no: 0,
@@ -420,34 +433,12 @@ impl TtgApp {
 
     // ------------------------------------------------------------------ geometry
 
-    /// World rect of an entity as the active view sees it (view-owned positions and
-    /// sizes override the shared ones).
+    /// World rect of an entity as the active view sees it: view-owned positions and
+    /// sizes override the shared ones, and a view with its own layout wraps a container
+    /// around the members it still shows (see `ttg_core::view`).
     pub fn entity_rect(&self, id: &str) -> Option<Rect> {
-        let layout = self.active_layout();
-        if let Some(n) = self.project.nodes.get(id) {
-            let pos = layout
-                .and_then(|l| l.positions.get(id))
-                .copied()
-                .unwrap_or(n.position);
-            let size = layout
-                .and_then(|l| l.sizes.get(id))
-                .copied()
-                .or(n.size)
-                .map(|s| Vec2::new(s.w as f32, s.h as f32))
-                .unwrap_or(Vec2::new(NODE_W, NODE_H));
-            return Some(Rect::from_min_size(Pos2::new(pos.x as f32, pos.y as f32), size));
-        }
-        self.project.containers.get(id).map(|c| {
-            let pos = layout
-                .and_then(|l| l.positions.get(id))
-                .copied()
-                .unwrap_or(c.position);
-            let size = layout.and_then(|l| l.sizes.get(id)).copied().unwrap_or(c.size);
-            Rect::from_min_size(
-                Pos2::new(pos.x as f32, pos.y as f32),
-                Vec2::new(size.w as f32, size.h as f32),
-            )
-        })
+        let r = ttg_core::view::entity_rect(&self.project, self.active_view(), id, &|x| self.is_visible(x))?;
+        Some(crate::annotations::to_rect(r))
     }
 
     /// Deepest container whose rect contains `world`, excluding the given ids.
@@ -468,17 +459,35 @@ impl TtgApp {
         best.map(|(_, id)| id)
     }
 
+    /// Everything the canvas draws, including the active view's annotations, so "zoom
+    /// to fit" frames the whole document and not just the resources.
     pub fn world_bounds(&self) -> Option<Rect> {
         let mut r: Option<Rect> = None;
-        for e in self.project.entities() {
-            if !self.is_visible(e.id) {
-                continue;
-            }
-            let er = self.entity_rect(e.id).unwrap();
+        let mut add = |er: Rect| {
             r = Some(match r {
                 Some(x) => x.union(er),
                 None => er,
-            });
+            })
+        };
+        for e in self.project.entities() {
+            if self.is_visible(e.id) {
+                if let Some(er) = self.entity_rect(e.id) {
+                    add(er);
+                }
+            }
+        }
+        if let Some(v) = self.active_view() {
+            for g in &v.groups {
+                add(crate::annotations::to_rect(ttg_core::view::group_rect(g)));
+            }
+            for l in &v.logicals {
+                add(crate::annotations::to_rect(ttg_core::view::logical_rect(l)));
+            }
+            for n in &v.notes {
+                if let Some(nr) = self.note_rect(&n.id) {
+                    add(nr);
+                }
+            }
         }
         r
     }
@@ -1251,7 +1260,7 @@ impl TtgApp {
             self.export.diff_open = open;
         }
         #[cfg(feature = "mcp")]
-        if self.mcp.show_window {
+        if self.mcp.show_window && !self.hide_panels {
             let mut open = true;
             egui::Window::new("Agent (MCP server)")
                 .open(&mut open)
@@ -1321,6 +1330,8 @@ impl TtgApp {
                     self.activate_view(Some(i));
                 }
             }
+            // TTG_HIDE_PANELS=1 gives a canvas-only shot, as `screenshot`'s hide_panels does.
+            self.hide_panels = std::env::var("TTG_HIDE_PANELS").is_ok();
             self.fit_requested = true;
         }
         if self.frame_no == 8 {
@@ -1387,15 +1398,17 @@ impl eframe::App for TtgApp {
             .default_height(if self.show_diagnostics { 140.0 } else { 24.0 })
             .show(ctx, |ui| crate::inspector::status_ui(self, ui));
 
-        egui::SidePanel::left("palette")
-            .default_width(230.0)
-            .min_width(180.0)
-            .show(ctx, |ui| crate::palette::show(self, ui));
+        if !self.hide_panels {
+            egui::SidePanel::left("palette")
+                .default_width(230.0)
+                .min_width(180.0)
+                .show(ctx, |ui| crate::palette::show(self, ui));
 
-        egui::SidePanel::right("inspector")
-            .default_width(340.0)
-            .min_width(260.0)
-            .show(ctx, |ui| crate::inspector::show(self, ui));
+            egui::SidePanel::right("inspector")
+                .default_width(340.0)
+                .min_width(260.0)
+                .show(ctx, |ui| crate::inspector::show(self, ui));
+        }
 
         egui::CentralPanel::default()
             .frame(egui::Frame::new().fill(egui::Color32::from_rgb(246, 247, 249)))

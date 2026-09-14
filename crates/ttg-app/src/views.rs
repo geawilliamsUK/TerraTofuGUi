@@ -4,87 +4,32 @@
 
 use crate::app::TtgApp;
 use egui::{Color32, RichText, Ui};
-use std::collections::{BTreeSet, VecDeque};
-use ttg_catalog::Catalog;
-use ttg_core::{Id, Project, Relation, View, ViewFilter};
-
-/// Entities shown under `filter`, or `None` when everything is visible.
-pub fn visible_set(p: &Project, cat: &Catalog, filter: &ViewFilter) -> Option<BTreeSet<Id>> {
-    if filter.is_empty() {
-        return None;
-    }
-    let all: Vec<Id> = p.entities().iter().map(|e| e.id.to_string()).collect();
-    let mut vis: BTreeSet<Id> = if !filter.only.is_empty() {
-        all.iter()
-            .filter(|id| filter.only.contains(*id))
-            .cloned()
-            .collect()
-    } else if let Some(focus) = &filter.focus {
-        // Breadth-first over links (both directions) up to `depth` hops.
-        let mut seen: BTreeSet<Id> = BTreeSet::new();
-        let mut q: VecDeque<(Id, u32)> = VecDeque::new();
-        if p.entity(focus).is_some() {
-            seen.insert(focus.clone());
-            q.push_back((focus.clone(), 0));
-        }
-        while let Some((id, d)) = q.pop_front() {
-            if d >= filter.depth {
-                continue;
-            }
-            for e in &p.edges {
-                let other = if e.source == id {
-                    &e.target
-                } else if e.target == id {
-                    &e.source
-                } else {
-                    continue;
-                };
-                if !filter.relations.is_empty() && !filter.relations.contains(&e.relation) {
-                    continue;
-                }
-                if seen.insert(other.clone()) {
-                    q.push_back((other.clone(), d + 1));
-                }
-            }
-        }
-        seen
-    } else {
-        all.iter().cloned().collect()
-    };
-    if !filter.categories.is_empty() {
-        vis.retain(|id| {
-            p.entity(id)
-                .and_then(|e| cat.resource(e.resource_type))
-                .is_none_or(|d| filter.categories.contains(&d.resource.category))
-        });
-    }
-    for h in &filter.hidden {
-        vis.remove(h);
-    }
-    if !filter.containers {
-        vis.retain(|id| !p.containers.contains_key(id));
-        return Some(vis);
-    }
-    // Containers of visible entities stay visible so the picture keeps its structure.
-    let mut ancestors: BTreeSet<Id> = BTreeSet::new();
-    for id in &vis {
-        let mut cur = p.parent_of(id).map(|s| s.to_string());
-        while let Some(c) = cur {
-            if !ancestors.insert(c.clone()) {
-                break;
-            }
-            cur = p.parent_of(&c).map(|s| s.to_string());
-        }
-    }
-    vis.extend(ancestors);
-    Some(vis)
-}
+use std::collections::BTreeSet;
+use ttg_codegen::views::visible_set;
+use ttg_core::{Id, Origin, Relation, View, ViewFilter};
 
 impl TtgApp {
     /// Recompute the visible set for this frame and drop hidden entities from the
     /// selection so keyboard actions never hit something the user cannot see.
     pub fn refresh_visibility(&mut self) {
         self.visible = visible_set(&self.project, &self.catalog, &self.filter);
+        // A view that fits containers to their members has nothing to draw for a
+        // container whose members are all hidden.
+        if self.active_layout().is_some() {
+            if let Some(vis) = self.visible.take() {
+                self.visible = Some(
+                    vis.iter()
+                        .filter(|id| {
+                            !self.project.containers.contains_key(*id)
+                                || ttg_core::view::has_visible_members(&self.project, id, &|x| {
+                                    vis.contains(x)
+                                })
+                        })
+                        .cloned()
+                        .collect(),
+                );
+            }
+        }
         self.layer = if self.concrete_mode() {
             Some(ttg_codegen::layers::members(
                 &self.project,
@@ -109,7 +54,8 @@ impl TtgApp {
     }
 
     pub fn edge_visible(&self, e: &ttg_core::Edge) -> bool {
-        self.is_visible(&e.source)
+        !self.filter.hide_edges
+            && self.is_visible(&e.source)
             && self.is_visible(&e.target)
             && (self.filter.relations.is_empty() || self.filter.relations.contains(&e.relation))
     }
@@ -198,8 +144,12 @@ pub fn bar(app: &mut TtgApp, ui: &mut Ui) {
                 app.activate_view(Some(i));
             }
             resp.context_menu(|ui| {
-                if ui.button("Rename…").clicked() {
-                    app.view_edit = Some((Some(i), name.clone()));
+                if ui.button("Rename / describe…").clicked() {
+                    app.view_edit = Some(crate::app::ViewEdit {
+                        index: Some(i),
+                        name: name.clone(),
+                        description: app.project.views[i].description.clone(),
+                    });
                     ui.close();
                 }
                 let mut own = app.project.views[i].layout.is_some();
@@ -235,28 +185,77 @@ pub fn bar(app: &mut TtgApp, ui: &mut Ui) {
             .on_hover_text("Save the current filter as a named view (stored in the project file). Then use Filter to change what the view shows; it saves as you go.")
             .clicked()
         {
-            app.view_edit = Some((None, format!("View {}", n + 1)));
+            app.view_edit = Some(crate::app::ViewEdit {
+                index: None,
+                name: format!("View {}", n + 1),
+                description: String::new(),
+            });
         }
 
         ui.separator();
         filter_menu(app, ui);
         if app.active_view.is_some() {
+            let centre = app.camera.to_world(app.canvas_rect.min, app.canvas_rect.center());
             if ui
                 .small_button("+ Group")
                 .on_hover_text("Add a grouping box to this view (annotation only, never exported). Drag its title to move it with everything inside; right-click a resource or group for a data-flow arrow.")
                 .clicked()
             {
-                let c = app.camera.to_world(app.canvas_rect.min, app.canvas_rect.center());
                 let n = app.active_view().map(|v| v.groups.len()).unwrap_or(0);
                 app.add_group(
                     &format!("Group {}", n + 1),
                     ttg_core::Position {
-                        x: c.x as i32 - 200,
-                        y: c.y as i32 - 120,
+                        x: centre.x as i32 - 200,
+                        y: centre.y as i32 - 120,
                     },
                     ttg_core::Size { w: 400, h: 240 },
                     None,
                 );
+            }
+            if ui
+                .small_button("+ Note")
+                .on_hover_text("Add a note box explaining part of this view. Never exported; pin it to a resource, group or flow in the inspector and it travels with it.")
+                .clicked()
+            {
+                app.add_note(
+                    "Note",
+                    "",
+                    ttg_core::Position {
+                        x: centre.x as i32 - 130,
+                        y: centre.y as i32 - 60,
+                    },
+                    ttg_core::Size { w: 260, h: 120 },
+                    None,
+                );
+            }
+            if ui
+                .small_button("+ Logical")
+                .on_hover_text("Add an annotation-only node — a browser, a third-party service, one workload inside a cluster. Nothing is exported for it, but data flows can start and end there.")
+                .clicked()
+            {
+                let n = app.active_view().map(|v| v.logicals.len()).unwrap_or(0);
+                app.add_logical(
+                    &format!("Logical {}", n + 1),
+                    "",
+                    "",
+                    ttg_core::Position {
+                        x: centre.x as i32 - 88,
+                        y: centre.y as i32 - 32,
+                    },
+                    ttg_core::NODE_SIZE,
+                );
+            }
+            let mut legend = app.active_view().is_some_and(|v| v.legend);
+            if ui
+                .checkbox(&mut legend, "Legend")
+                .on_hover_text("Show what the group colours, flow colours and line styles on this view mean. Remembered with the view.")
+                .changed()
+            {
+                let before = app.snapshot();
+                if let Some(v) = app.active_view_mut() {
+                    v.legend = legend;
+                }
+                app.finish(before);
             }
             let own = app.active_layout().is_some();
             ui.label(
@@ -296,42 +295,71 @@ pub fn bar(app: &mut TtgApp, ui: &mut Ui) {
         }
     });
 
-    // Name prompt for new / renamed views.
-    if let Some((idx, mut name)) = app.view_edit.clone() {
+    // The active view's own description, under the bar.
+    if let Some(d) = app
+        .active_view()
+        .map(|v| v.description.clone())
+        .filter(|d| !d.is_empty())
+    {
+        ui.add_space(2.0);
+        ui.label(RichText::new(d).small().color(Color32::from_gray(90)));
+        ui.add_space(2.0);
+    }
+
+    // Name and description prompt for new / edited views.
+    if let Some(mut edit) = app.view_edit.clone() {
         let mut done: Option<bool> = None;
-        egui::Window::new(if idx.is_some() { "Rename view" } else { "Save view" })
-            .collapsible(false)
-            .resizable(false)
-            .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
-            .show(ui.ctx(), |ui| {
-                let r = ui.text_edit_singleline(&mut name);
-                r.request_focus();
-                if r.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter)) {
+        egui::Window::new(if edit.index.is_some() {
+            "View name and description"
+        } else {
+            "Save view"
+        })
+        .collapsible(false)
+        .resizable(false)
+        .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
+        .show(ui.ctx(), |ui| {
+            ui.label("Name");
+            let r = ui.text_edit_singleline(&mut edit.name);
+            if r.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter)) {
+                done = Some(true);
+            }
+            if edit.index.is_some() {
+                ui.label("Description");
+                ui.add(
+                    egui::TextEdit::multiline(&mut edit.description)
+                        .desired_rows(3)
+                        .desired_width(340.0)
+                        .hint_text("What this view is for; shown under the view bar and in its export"),
+                );
+            }
+            ui.horizontal(|ui| {
+                if ui.button("OK").clicked() {
                     done = Some(true);
                 }
-                ui.horizontal(|ui| {
-                    if ui.button("OK").clicked() {
-                        done = Some(true);
-                    }
-                    if ui.button("Cancel").clicked() {
-                        done = Some(false);
-                    }
-                });
+                if ui.button("Cancel").clicked() {
+                    done = Some(false);
+                }
             });
-        app.view_edit = Some((idx, name.clone()));
+        });
+        let name = edit.name.trim().to_string();
+        let desc = edit.description.trim().to_string();
+        let index = edit.index;
+        app.view_edit = Some(edit);
         match done {
-            Some(true) if !name.trim().is_empty() => {
+            Some(true) if !name.is_empty() => {
                 app.view_edit = None;
                 let before = app.snapshot();
-                match idx {
-                    Some(i) => app.project.views[i].name = name.trim().to_string(),
+                match index {
+                    Some(i) => {
+                        app.project.views[i].name = name;
+                        app.project.views[i].description = desc;
+                    }
                     None => {
-                        app.project.views.push(View::new(name.trim(), app.filter.clone()));
+                        app.project.views.push(View::new(&name, app.filter.clone()));
                         app.active_view = Some(app.project.views.len() - 1);
                         if app.filter.is_empty() {
                             app.status = format!(
-                                "View \"{}\" saved; it shows everything until you narrow it with Filter (changes save into the view as you go)",
-                                name.trim()
+                                "View \"{name}\" saved; it shows everything until you narrow it with Filter (changes save into the view as you go)"
                             );
                         }
                     }
@@ -447,6 +475,127 @@ fn filter_menu(app: &mut TtgApp, ui: &mut Ui) {
         }
 
         ui.separator();
+        ui.horizontal(|ui| {
+            ui.label("Name");
+            let mut glob = app.filter.name_glob.clone();
+            let r = ui.add(
+                egui::TextEdit::singleline(&mut glob)
+                    .desired_width(150.0)
+                    .hint_text("glob, e.g. jobs*"),
+            );
+            if r.changed() {
+                let mut f = app.filter.clone();
+                f.name_glob = glob;
+                app.set_filter(f);
+            }
+            r.on_hover_text("Show only resources whose display name matches this pattern; `*` is any run of characters, `?` one. Case-insensitive.");
+        });
+
+        ui.separator();
+        ui.label(RichText::new("Provider layers").small().color(Color32::from_gray(110)));
+        for pid in app.catalog.provider_ids() {
+            let all = app.filter.providers.is_empty();
+            let mut on = all || app.filter.providers.contains(&pid);
+            let label = app
+                .catalog
+                .provider(&pid)
+                .map(|p| p.provider.display_name.clone())
+                .unwrap_or_else(|| pid.clone());
+            if ui
+                .checkbox(&mut on, label)
+                .on_hover_text("Show only what is part of this provider's export (provider-only types and tagged resources decide).")
+                .changed()
+            {
+                let mut f = app.filter.clone();
+                if all {
+                    f.providers = app.catalog.provider_ids().into_iter().collect();
+                }
+                if on {
+                    f.providers.insert(pid.clone());
+                } else {
+                    f.providers.remove(&pid);
+                }
+                if f.providers.len() == app.catalog.provider_ids().len() {
+                    f.providers.clear();
+                }
+                app.set_filter(f);
+            }
+        }
+
+        ui.separator();
+        ui.label(RichText::new("Origin").small().color(Color32::from_gray(110)));
+        for (o, label, hint) in [
+            (Origin::All, "Everything", "Curated and native resources"),
+            (Origin::Curated, "Curated only", "Types from the definition catalog"),
+            (
+                Origin::Native,
+                "Native only",
+                "`native:<provider>:<resource>` resources added from the provider schema",
+            ),
+        ] {
+            if ui
+                .radio(app.filter.origin == o, label)
+                .on_hover_text(hint)
+                .clicked()
+            {
+                let mut f = app.filter.clone();
+                f.origin = o;
+                app.set_filter(f);
+            }
+        }
+
+        let types: BTreeSet<String> = app
+            .project
+            .entities()
+            .iter()
+            .map(|e| e.resource_type.to_string())
+            .collect();
+        ui.menu_button(format!("Types ({})", app.filter.types.len()), |ui| {
+            ui.set_min_width(220.0);
+            if !app.filter.types.is_empty() && ui.button("Show every type").clicked() {
+                let mut f = app.filter.clone();
+                f.types.clear();
+                app.set_filter(f);
+            }
+            for t in &types {
+                let all = app.filter.types.is_empty();
+                let mut on = all || app.filter.types.contains(t);
+                let label = app
+                    .catalog
+                    .resource(t)
+                    .map(|d| d.resource.display_name.clone())
+                    .unwrap_or_else(|| t.clone());
+                if ui.checkbox(&mut on, label).changed() {
+                    let mut f = app.filter.clone();
+                    if all {
+                        f.types = types.clone();
+                    }
+                    if on {
+                        f.types.insert(t.clone());
+                    } else {
+                        f.types.remove(t);
+                    }
+                    if f.types.len() == types.len() {
+                        f.types.clear();
+                    }
+                    app.set_filter(f);
+                }
+            }
+        })
+        .response
+        .on_hover_text("Show only these resource types (the ones this diagram uses).");
+
+        ui.separator();
+        let mut hide_edges = app.filter.hide_edges;
+        if ui
+            .checkbox(&mut hide_edges, "Hide structural links")
+            .on_hover_text("Draw no dependency lines at all, so a data-flow view shows only its own arrows. The links still exist and are still exported.")
+            .changed()
+        {
+            let mut f = app.filter.clone();
+            f.hide_edges = hide_edges;
+            app.set_filter(f);
+        }
         ui.label(RichText::new("Link kinds").small().color(Color32::from_gray(110)));
         for r in Relation::ALL {
             let all = app.filter.relations.is_empty();

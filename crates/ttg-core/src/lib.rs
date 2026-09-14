@@ -13,6 +13,7 @@ pub mod layout;
 pub mod project;
 pub mod validate;
 pub mod value;
+pub mod view;
 
 pub use ir::*;
 pub use value::{Record, Value};

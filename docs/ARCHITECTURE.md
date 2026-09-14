@@ -37,8 +37,9 @@ crates/
   ttg-core                 IR types, project file (JSON), structural validation, dependency graph
   ttg-catalog              loads + validates definition files; typed schema for the mapping format
   ttg-codegen              IR + catalog -> HCL files, MANUAL_STEPS.md, Terraform/OpenTofu toggle,
-                           design-time diagnostics, optional `validate` shell-out, multi-provider bundle
-  ttg-cli                  headless `ttg export` / `ttg check` — used for CI and by contributors
+                           design-time diagnostics, optional `validate` shell-out, multi-provider bundle,
+                           view filters and the Markdown / Mermaid renderer for a view
+  ttg-cli                  headless `ttg export` / `ttg check` / `ttg view export` — used for CI and by contributors
   ttg-app                  egui/eframe desktop application
 examples/                  sample .ttg.json projects
 docs/                      this file, MAPPING_FORMAT.md, PHASE2_PLAN.md
@@ -116,12 +117,30 @@ All types live in `ttg-core::ir`. Field names below are the serialized names.
 }
 ```
 
-`views` are saved canvas views: a filter (categories, `relations`, `focus` + `depth`,
-`hidden`, `only`), an optional `layout` (`positions` / `sizes` keyed by entity id that
-override the shared ones while the view is active), `groups` (labelled boxes with
-`position`, `size`, optional `color`) and `flows` (labelled arrows between
-`{ "entity": id }` / `{ "group": id }` ends, optionally `dashed`). All of it affects only
-what the GUI draws, never what is generated.
+`views` are saved canvas views, each a small document about the diagram:
+
+- a **filter** (`categories`, `relations`, `focus` + `depth`, `hidden`, `only`,
+  `containers`, plus `providers` = provider layers, `origin` = `all` | `curated` |
+  `native`, `types` = abstract type ids, `name_glob` = case-insensitive `*` / `?` glob on
+  the display name, and `hide_edges` to draw no structural links at all);
+- an optional `layout` (`positions` / `sizes` keyed by entity id that override the shared
+  ones while the view is active);
+- a `description` and a `legend` flag;
+- annotations: `groups` (labelled boxes with `position`, `size`, optional `color`;
+  nesting and membership are geometric), `flows` (labelled arrows between
+  `{ "entity": id }` / `{ "group": id }` / `{ "logical": id }` ends, optionally `dashed`,
+  with an optional `step` number and `color`), `notes` (`title`, `body`, `size` and
+  either a free `position` or an `anchor` — any flow end, or `{ "flow": id }` — with
+  `position` read as the offset from it) and `logicals` (annotation-only nodes: `name`,
+  `icon`, `subtitle`, `position`, `size`).
+
+All of it affects only what the GUI draws, never what is generated.
+`ttg_core::view` holds the geometry the canvas and the document renderer share: where a
+view puts an entity (in a view with its own layout a container is the padded bounding box
+of the members it still shows), which entities and logical nodes a box holds, where an
+anchored note lands, and how boxes nest. `ttg_codegen::views` holds the filter evaluation
+(`visible_set`, used by the canvas, the view bar, `view_get` and the CLI alike) and the
+Markdown / Mermaid renderers behind `ttg view export` and the `view_export` tool.
 
 ### 4.2 `Node`
 
@@ -381,6 +400,8 @@ no runtime dependency on either binary.
 | `inspector.rs` | typed property editors generated from the definition (`string`, `bool`, `int`, `cidr`, `enum`, `string_list`); provider-specific fields under a per-provider header; inline validation |
 | `menu.rs` | file new/open/save/save-as, undo/redo, tool toggle, target provider, export single / export all, validate |
 | `clipboard.rs` | copy/paste of a sub-diagram as JSON (fresh ids, de-duplicated names, edges between copied items kept) |
+| `views.rs` | the view bar (tabs, description, legend toggle, annotation buttons), the filter menu, and the per-frame visible set (`ttg_codegen::views::visible_set` plus the "a fitted container with no visible members is not drawn" rule) |
+| `annotations.rs` | drawing and editing a view's groups, flows, notes and logical nodes; the legend panel; geometry delegated to `ttg_core::view` |
 | `camera.rs` | world/screen transform, zoom-about-pointer, zoom-to-fit |
 | `history.rs` | snapshot-based undo/redo (the project is small; a clone per committed action is simpler and safer than command objects) |
 

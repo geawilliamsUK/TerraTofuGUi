@@ -19,6 +19,7 @@ pub mod layers;
 pub mod reach;
 pub mod tool;
 pub mod validate;
+pub mod views;
 
 pub use diagnostics::{Code, Diagnostic, Severity};
 pub use emit::{generate, Generated, ManualEntry};

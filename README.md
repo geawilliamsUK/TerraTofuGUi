@@ -112,26 +112,49 @@ OpenTofu installed, so a definition change that produces invalid HCL fails the b
   is available headless with `ttg tidy <project> [--out <file>]`.
 - In the inspector, an abstract field that the selected provider's mapping does not use
   is greyed out; its tooltip says which providers do use it.
-- **Views** (bar above the canvas) turn the wired diagram into architecture maps. The
-  *All* tab is the truth that gets exported; each view is a tab stored in the project
-  file with three things of its own:
-  - a **filter**: which resources and link kinds are shown (category, link kind, focus
-    on the selection within N hops, hide / show-only the selection, and *Show
-    containers* to drop networks and resource groups from a map; the menu stays open
+- **Views** (bar above the canvas) turn the wired diagram into architecture maps that
+  explain themselves. The *All* tab is the truth that gets exported; each view is a tab
+  stored in the project file with four things of its own:
+  - a **filter**: which resources and link kinds are shown — category, link kind, focus
+    on the selection within N hops, hide / show-only the selection, *Show containers* to
+    drop networks and resource groups from a map, a name glob (`jobs*`, `db-?`), one or
+    more provider layers, curated-vs-native origin, a list of resource types, and *Hide
+    structural links* so a data-flow view shows only its own arrows (the menu stays open
     until you click outside it). Containers of anything visible stay visible, and the
     filter saves into the active view as you change it;
   - its **own layout**: moving or resizing anything while the view is active changes
     only that view, so a "network" view can cluster subnets one way and a "data" view
-    can line the pipeline up another. Right-click the tab and untick *Own layout* to
-    share the All layout instead;
-  - **annotations**: `+ Group` adds a draw.io-style grouping box (label, colour; drag
-    its title and everything inside follows). Right-click a resource or group and choose
-    *Data flow from here*, then click the target, for a labelled arrow. Groups and flows
-    are pure documentation: they are never exported and never become dependencies.
+    can line the pipeline up another. In a view with its own layout a container is drawn
+    as the box its visible members need, so moving a resource takes its network with it
+    and a network whose members are all hidden is not drawn at all. Right-click the tab
+    and untick *Own layout* to share the All layout instead;
+  - **annotations**, none of which are ever exported or become dependencies:
+    - `+ Group` adds a draw.io-style grouping box (label, colour; drag its title and
+      everything inside follows, and a box drawn inside another nests). Membership is
+      geometric — whatever sits in the box is in the group, including after you move it.
+    - Right-click a resource, group or logical node and choose *Data flow from here*,
+      then click the target, for a labelled arrow. A flow can carry a **step number**
+      (drawn as a badge where it starts) and a colour, and labels stagger along the
+      arrows when several flows share an endpoint.
+    - `+ Note` adds a note box with a title and wrapped body. Pin it to a resource,
+      group, flow or logical node in the inspector and it is drawn beside that thing,
+      with a leader line, and travels with it.
+    - `+ Logical` adds an annotation-only node — a browser, a telephony platform, one
+      workload inside a cluster — drawn dashed and muted. Nothing is generated for it,
+      but flows can start and end there, so eleven arrows need not converge on one box.
+  - a **description and legend**: right-click the tab ▸ *Rename / describe…* writes a
+    paragraph shown under the view bar (and at the top of the view's export); the
+    *Legend* tick box shows what the group colours, flow colours and line styles mean,
+    and is remembered with the view.
   Hidden resources are still exported; the corner label says how many are hidden.
-  The job-pipeline example ships a "Data flow" view built this way:
+  A view can also be written out as a document:
+  `ttg view export <project> "Data flow" --format md|mermaid` gives the description, the
+  groups with their members, the flows in step order and the notes, or a Mermaid
+  `flowchart LR`; `ttg view list <project>` names them. For a picture, take a screenshot
+  with the canvas fitted and the panels hidden (the agent tool does both). The
+  job-pipeline example ships a "Data flow" view built this way:
 
-![The job pipeline's "Data flow" view: own layout, grouping boxes and labelled data-flow arrows, containers hidden](docs/screenshot-dataflow.png)
+![The job pipeline's "Data flow" view: own layout, grouping boxes, numbered data-flow arrows, a logical "users' browser" node, a pinned note and the legend](docs/screenshot-view-notes.png)
 - **Provider layers.** One diagram serves both providers. Anything not tagged is part of
   every provider's export; tick the *Providers* checkboxes on a resource or link to make
   it AWS-only or Azure-only, and provider-only types (Storage Queue, Service Bus
@@ -230,10 +253,15 @@ watch it happen. It is off until you switch it on:
    shows what the agent did. Saving to disk only happens when a tool is explicitly asked
    to, and opening another file goes through the same unsaved-changes prompt as the menu.
 
-The 34 tools cover reading (project, catalog, diagnostics, reachability, export preview,
-export diff, screenshot) and editing (add/update/move/resize/reparent/delete entities,
-links, selection, views, tidy/align/distribute, settings, save/open/new, export with
-optional validate, undo/redo). `project_apply` runs a list of diagram writes as **one**
+The 46 tools cover reading (project, catalog, diagnostics, reachability, export preview,
+export diff, `view_get`, `view_export`, screenshot) and editing (add/update/move/resize/
+reparent/delete entities, links, selection, views, tidy/align/distribute, settings,
+save/open/new, export with optional validate, undo/redo). An agent documents a view the
+way you would: `view_group_add`, `view_flow_add` (with `step` and `color`),
+`view_note_add`, `view_logical_add` and `view_annotation_remove` all take an optional
+`view`, so a whole map can be drawn in one `project_apply` without switching tabs, and
+`view_fit` plus `screenshot { view, fit, hide_panels }` let it look at what it drew.
+`project_apply` runs a list of diagram writes as **one**
 undo step and rolls all of them back if any fails; `project_changes` (or a subscription
 to the `ttg://project` resource) tells the agent when *you* changed something. The
 project, its summary, diagnostics, the catalog and the docs are also exposed as MCP

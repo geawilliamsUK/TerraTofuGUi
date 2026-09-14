@@ -758,11 +758,27 @@ fn views_round_trip_and_reach_incoming() {
         .expect("data-flow view");
     assert!(v.layout.as_ref().is_some_and(|l| !l.positions.is_empty()));
     assert_eq!(v.groups.len(), 4);
-    assert_eq!(v.flows.len(), 5);
+    assert_eq!(v.flows.len(), 6);
     assert!(v
         .flows
         .iter()
         .any(|f| matches!(f.from, ttg_core::FlowEnd::Group { .. })));
+    // It documents itself: a description, a note, a logical node and numbered steps.
+    assert!(!v.description.is_empty());
+    assert_eq!(v.notes.len(), 1);
+    assert_eq!(v.logicals.len(), 1);
+    assert!(v.notes[0].anchor.is_some());
+    assert!(v
+        .flows
+        .iter()
+        .any(|f| f.step == Some(1) && matches!(f.from, ttg_core::FlowEnd::Logical { .. })));
+    assert_eq!(
+        v.flows_in_step_order()
+            .iter()
+            .filter_map(|f| f.step)
+            .collect::<Vec<_>>(),
+        vec![1, 2, 3, 4]
+    );
     let mut stripped = jp.clone();
     stripped.views.clear();
     let a = generate(&jp, &cat, "aws", Tool::OpenTofu).unwrap();

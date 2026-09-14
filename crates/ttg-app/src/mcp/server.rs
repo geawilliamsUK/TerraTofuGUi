@@ -130,6 +130,7 @@ pub fn command_from_json(tool: &str, args: serde_json::Value) -> Result<AgentCom
                 entity: a.entity,
                 x: a.x,
                 y: a.y,
+                view: a.view,
             }
         }
         "entity_resize" => {
@@ -187,6 +188,7 @@ pub fn command_from_json(tool: &str, args: serde_json::Value) -> Result<AgentCom
         "view_group_add" => {
             let a: GroupAddArgs = parse(args)?;
             AgentCommand::GroupAdd {
+                view: a.view,
                 label: a.label,
                 x: a.x,
                 y: a.y,
@@ -198,15 +200,56 @@ pub fn command_from_json(tool: &str, args: serde_json::Value) -> Result<AgentCom
         "view_flow_add" => {
             let a: FlowAddArgs = parse(args)?;
             AgentCommand::FlowAdd {
+                view: a.view,
                 from: a.from,
                 to: a.to,
                 label: a.label.unwrap_or_default(),
                 dashed: a.dashed.unwrap_or(false),
+                step: a.step,
+                color: a.color,
+            }
+        }
+        "view_note_add" => {
+            let a: NoteAddArgs = parse(args)?;
+            AgentCommand::NoteAdd {
+                view: a.view,
+                title: a.title,
+                body: a.body.unwrap_or_default(),
+                x: a.x,
+                y: a.y,
+                w: a.w,
+                h: a.h,
+                anchor: a.anchor,
+            }
+        }
+        "view_logical_add" => {
+            let a: LogicalAddArgs = parse(args)?;
+            AgentCommand::LogicalAdd {
+                view: a.view,
+                name: a.name,
+                icon: a.icon,
+                subtitle: a.subtitle,
+                x: a.x,
+                y: a.y,
+                w: a.w,
+                h: a.h,
+            }
+        }
+        "view_update" => {
+            let a: ViewUpdateArgs = parse(args)?;
+            AgentCommand::ViewUpdate {
+                view: a.view,
+                name: a.name,
+                description: a.description,
+                legend: a.legend,
             }
         }
         "view_annotation_remove" => {
             let a: KeyArgs = parse(args)?;
-            AgentCommand::AnnotationRemove { key: a.key }
+            AgentCommand::AnnotationRemove {
+                view: a.view,
+                key: a.key,
+            }
         }
         "layout_tidy" => {
             let a: TidyArgs = parse(args)?;
@@ -234,7 +277,7 @@ pub fn command_from_json(tool: &str, args: serde_json::Value) -> Result<AgentCom
         }
         other => {
             return Err(format!(
-                "`{other}` cannot be used inside project_apply (only diagram writes: entity_*, link_*, view_*, layout_*, selection_set, settings_set)"
+                "`{other}` cannot be used inside project_apply (only diagram writes: entity_*, link_*, layout_*, selection_set, settings_set and the view_* writes — not the view_get / view_fit / view_export reads)"
             ))
         }
     })
@@ -339,6 +382,10 @@ pub struct MoveArgs {
     pub entity: String,
     pub x: i32,
     pub y: i32,
+    #[schemars(
+        description = "Move it in this view's own layout; defaults to the active view (the shared layout when that is All)"
+    )]
+    pub view: Option<String>,
 }
 
 #[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
@@ -384,7 +431,7 @@ pub struct LinkRemoveArgs {
 #[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
 pub struct ViewSetArgs {
     #[schemars(
-        description = "Filter object: { categories: [..], relations: [..], focus: entity, depth: n, hidden: [..], only: [..] }. Empty object shows everything"
+        description = "Filter object: { categories: [..], relations: [..], focus: entity, depth: n, hidden: [..], only: [..], containers: bool, providers: [\"aws\"], origin: \"all\"|\"curated\"|\"native\", types: [\"subnet\"], name_glob: \"jobs*\" (case-insensitive, `*` and `?`), hide_edges: bool (draw no structural links, for a pure data-flow view) }. Empty object shows everything"
     )]
     pub filter: serde_json::Value,
 }
@@ -392,6 +439,38 @@ pub struct ViewSetArgs {
 #[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
 pub struct NameArgs {
     pub name: String,
+}
+
+/// The view a drawing command lands in; the active one when omitted.
+#[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
+pub struct ViewNameArg {
+    #[schemars(description = "View name; defaults to the active view")]
+    pub view: Option<String>,
+}
+
+#[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
+pub struct ViewGetArgs {
+    #[schemars(description = "View name; defaults to the active view")]
+    pub name: Option<String>,
+}
+
+#[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
+pub struct ViewUpdateArgs {
+    #[schemars(description = "View to change; defaults to the active view")]
+    pub view: Option<String>,
+    #[schemars(description = "New name")]
+    pub name: Option<String>,
+    #[schemars(description = "What this view is for; shown under the view bar and in view_export")]
+    pub description: Option<String>,
+    #[schemars(description = "Show the legend panel on this view")]
+    pub legend: Option<bool>,
+}
+
+#[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
+pub struct ViewExportArgs {
+    pub view: Option<String>,
+    #[schemars(description = "`md` (default) or `mermaid`")]
+    pub format: Option<String>,
 }
 
 #[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
@@ -404,23 +483,82 @@ pub struct GroupAddArgs {
     pub h: i32,
     #[schemars(description = "`#rrggbb`; a palette colour when omitted")]
     pub color: Option<String>,
+    #[schemars(description = "View to draw in; defaults to the active view")]
+    pub view: Option<String>,
 }
 
 #[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
 pub struct FlowAddArgs {
-    #[schemars(description = "Resource (id or name) or group (id or label) the data comes from")]
+    #[schemars(
+        description = "Resource (id or name), group (id or label) or logical node (id or name) the data comes from"
+    )]
     pub from: String,
-    #[schemars(description = "Resource or group the data goes to")]
+    #[schemars(description = "Resource, group or logical node the data goes to")]
     pub to: String,
     #[schemars(description = "Arrow label, e.g. `job requests`")]
     pub label: Option<String>,
+    #[schemars(description = "Draw it dashed: optional or asynchronous")]
     pub dashed: Option<bool>,
+    #[schemars(description = "Position in the sequence, drawn as a badge where the arrow starts")]
+    pub step: Option<u32>,
+    #[schemars(description = "`#rrggbb` or a group palette colour; the default ink when omitted")]
+    pub color: Option<String>,
+    #[schemars(description = "View to draw in; defaults to the active view")]
+    pub view: Option<String>,
+}
+
+#[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
+pub struct NoteAddArgs {
+    pub title: String,
+    #[schemars(description = "Body text; wrapped when drawn")]
+    pub body: Option<String>,
+    #[schemars(
+        description = "Resource, group, logical node or flow (id, name or label) this note explains: the note is drawn beside it and moves with it"
+    )]
+    pub anchor: Option<String>,
+    #[schemars(description = "Top-left canvas position; defaults to the right of the diagram")]
+    pub x: Option<i32>,
+    pub y: Option<i32>,
+    pub w: Option<i32>,
+    pub h: Option<i32>,
+    #[schemars(description = "View to draw in; defaults to the active view")]
+    pub view: Option<String>,
+}
+
+#[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
+pub struct LogicalAddArgs {
+    #[schemars(description = "Display name, e.g. `users' browser`")]
+    pub name: String,
+    #[schemars(description = "Short text for the icon block, e.g. `WEB`")]
+    pub icon: Option<String>,
+    #[schemars(description = "One line under the name")]
+    pub subtitle: Option<String>,
+    pub x: Option<i32>,
+    pub y: Option<i32>,
+    pub w: Option<i32>,
+    pub h: Option<i32>,
+    #[schemars(description = "View to draw in; defaults to the active view")]
+    pub view: Option<String>,
 }
 
 #[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
 pub struct KeyArgs {
-    #[schemars(description = "Group id/label or flow id/label")]
+    #[schemars(description = "Id, label, title or name of the group, flow, note or logical node")]
     pub key: String,
+    #[schemars(description = "View to remove it from; defaults to the active view")]
+    pub view: Option<String>,
+}
+
+#[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
+pub struct ScreenshotArgs {
+    #[schemars(description = "Activate this view before capturing")]
+    pub view: Option<String>,
+    #[schemars(description = "Zoom to fit the view's content first")]
+    pub fit: Option<bool>,
+    #[schemars(
+        description = "Hide the palette, inspector and agent window for the frame so the canvas fills the image"
+    )]
+    pub hide_panels: Option<bool>,
 }
 
 #[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
@@ -628,11 +766,16 @@ impl TtgServer {
     }
 
     #[tool(
-        description = "A PNG screenshot of the app window as the user currently sees it (base64 in `data`)."
+        description = "A PNG screenshot of the app window (base64 in `data`). With `view` it switches to that view first, `fit` frames its content, and `hide_panels` drops the side panels so the canvas fills the image. Use it to look at what you have drawn."
     )]
-    async fn screenshot(&self) -> CallToolResult {
+    async fn screenshot(&self, Parameters(a): Parameters<ScreenshotArgs>) -> CallToolResult {
         let (reply_tx, reply_rx) = tokio::sync::oneshot::channel();
-        if self.tx.send((AgentCommand::Screenshot, reply_tx)).is_err() {
+        let cmd = AgentCommand::Screenshot {
+            fit: a.fit.unwrap_or(false),
+            view: a.view,
+            hide_panels: a.hide_panels.unwrap_or(false),
+        };
+        if self.tx.send((cmd, reply_tx)).is_err() {
             return fail("the app is shutting down");
         }
         self.ctx.request_repaint();
@@ -683,12 +826,15 @@ impl TtgServer {
         .await
     }
 
-    #[tool(description = "Move an entity to a canvas position (containers move with their contents).")]
+    #[tool(
+        description = "Move an entity to a canvas position (containers move with their contents). Lands in the view's own layout when one is active; pass `view` to arrange a named view without switching to it."
+    )]
     async fn entity_move(&self, Parameters(a): Parameters<MoveArgs>) -> CallToolResult {
         self.run(AgentCommand::EntityMove {
             entity: a.entity,
             x: a.x,
             y: a.y,
+            view: a.view,
         })
         .await
     }
@@ -773,10 +919,49 @@ impl TtgServer {
     }
 
     #[tool(
-        description = "Add a grouping box to the active view: an architecture-map annotation, never exported. Resources whose centre is inside it count as members and move with it."
+        description = "Everything one view holds: description, filter, own layout, which resources it shows, and its groups (with their current members), flows, notes and logical nodes. Defaults to the active view."
+    )]
+    async fn view_get(&self, Parameters(a): Parameters<ViewGetArgs>) -> CallToolResult {
+        self.run(AgentCommand::ViewGet { name: a.name }).await
+    }
+
+    #[tool(
+        description = "Rename a view, set the description shown under the view bar (and at the top of its export), or turn its legend panel on."
+    )]
+    async fn view_update(&self, Parameters(a): Parameters<ViewUpdateArgs>) -> CallToolResult {
+        self.run(AgentCommand::ViewUpdate {
+            view: a.view,
+            name: a.name,
+            description: a.description,
+            legend: a.legend,
+        })
+        .await
+    }
+
+    #[tool(
+        description = "Frame a view's content in the camera, as Zoom to fit does — switching to the view first when one is named. Returns the bounding box it fitted."
+    )]
+    async fn view_fit(&self, Parameters(a): Parameters<ViewNameArg>) -> CallToolResult {
+        self.run(AgentCommand::ViewFit { view: a.view }).await
+    }
+
+    #[tool(
+        description = "A view as a document: `md` gives the description, a table of the groups with their members, the flows in step order and the notes; `mermaid` gives a flowchart LR with the groups as subgraphs. For a picture, use screenshot with fit and hide_panels."
+    )]
+    async fn view_export(&self, Parameters(a): Parameters<ViewExportArgs>) -> CallToolResult {
+        self.run(AgentCommand::ViewExport {
+            view: a.view,
+            format: a.format.unwrap_or_else(|| "md".into()),
+        })
+        .await
+    }
+
+    #[tool(
+        description = "Add a grouping box to a view: an architecture-map annotation, never exported. Resources whose centre is inside it count as members and move with it; a box drawn inside another nests."
     )]
     async fn view_group_add(&self, Parameters(a): Parameters<GroupAddArgs>) -> CallToolResult {
         self.run(AgentCommand::GroupAdd {
+            view: a.view,
             label: a.label,
             x: a.x,
             y: a.y,
@@ -788,21 +973,64 @@ impl TtgServer {
     }
 
     #[tool(
-        description = "Add a labelled data-flow arrow to the active view between resources and/or groups. An annotation: not a dependency, never exported."
+        description = "Add a labelled data-flow arrow to a view between resources, groups and/or logical nodes, optionally numbered (`step`) and coloured. An annotation: not a dependency, never exported."
     )]
     async fn view_flow_add(&self, Parameters(a): Parameters<FlowAddArgs>) -> CallToolResult {
         self.run(AgentCommand::FlowAdd {
+            view: a.view,
             from: a.from,
             to: a.to,
             label: a.label.unwrap_or_default(),
             dashed: a.dashed.unwrap_or(false),
+            step: a.step,
+            color: a.color,
         })
         .await
     }
 
-    #[tool(description = "Remove a group or flow from the active view by id or label.")]
+    #[tool(
+        description = "Add a note box to a view: a title and a paragraph explaining part of the picture. Never exported. Anchor it to a resource, group, logical node or flow and it is drawn beside that thing and follows it."
+    )]
+    async fn view_note_add(&self, Parameters(a): Parameters<NoteAddArgs>) -> CallToolResult {
+        self.run(AgentCommand::NoteAdd {
+            view: a.view,
+            title: a.title,
+            body: a.body.unwrap_or_default(),
+            x: a.x,
+            y: a.y,
+            w: a.w,
+            h: a.h,
+            anchor: a.anchor,
+        })
+        .await
+    }
+
+    #[tool(
+        description = "Add an annotation-only node to a view — a browser, a telephony platform, one workload inside a cluster — so flows can start and end there instead of converging on one box. Nothing is generated for it."
+    )]
+    async fn view_logical_add(&self, Parameters(a): Parameters<LogicalAddArgs>) -> CallToolResult {
+        self.run(AgentCommand::LogicalAdd {
+            view: a.view,
+            name: a.name,
+            icon: a.icon,
+            subtitle: a.subtitle,
+            x: a.x,
+            y: a.y,
+            w: a.w,
+            h: a.h,
+        })
+        .await
+    }
+
+    #[tool(
+        description = "Remove a group, flow, note or logical node from a view by id, label, title or name."
+    )]
     async fn view_annotation_remove(&self, Parameters(a): Parameters<KeyArgs>) -> CallToolResult {
-        self.run(AgentCommand::AnnotationRemove { key: a.key }).await
+        self.run(AgentCommand::AnnotationRemove {
+            view: a.view,
+            key: a.key,
+        })
+        .await
     }
 
     #[tool(description = "Auto-layout: columns by dependency, containers fitted to contents. Undoable.")]

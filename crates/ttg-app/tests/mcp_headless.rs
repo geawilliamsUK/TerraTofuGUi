@@ -399,3 +399,153 @@ fn headless_server_tools_resources_and_batch() {
     let (err, msg) = c.call("screenshot", json!({}));
     assert!(err, "{msg}");
 }
+
+/// Views as documents: reading one back, drawing into a named view without switching to
+/// it, notes and logical nodes, and the Markdown / Mermaid export.
+#[test]
+fn headless_view_documents() {
+    let server = start("job-pipeline.ttg.json");
+    let mut c = Client::new(&server);
+    c.initialize();
+
+    let tools = c.request("tools/list", json!({}));
+    let names: Vec<&str> = tools["tools"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|t| t["name"].as_str().unwrap())
+        .collect();
+    for want in [
+        "view_get",
+        "view_update",
+        "view_fit",
+        "view_export",
+        "view_note_add",
+        "view_logical_add",
+    ] {
+        assert!(names.contains(&want), "missing tool {want}: {names:?}");
+    }
+
+    // view_get reports what the view holds, including the members a box currently has.
+    let (err, v) = c.call("view_get", json!({"name": "Data flow"}));
+    assert!(!err, "{v}");
+    assert!(v["description"].as_str().unwrap().len() > 20, "{v}");
+    assert_eq!(v["active"], json!(false), "{v}");
+    let ingress = v["groups"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|g| g["label"] == "Ingress (public)")
+        .unwrap_or_else(|| panic!("{v}"));
+    assert!(
+        ingress["members"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|m| m == "JobGateway"),
+        "{ingress}"
+    );
+    assert_eq!(v["logicals"][0]["name"], json!("users' browser"), "{v}");
+    assert_eq!(v["flows"][0]["step"], json!(1), "{v}");
+    assert_eq!(v["notes"][0]["anchor"], json!({"entity": "q-jobs"}), "{v}");
+
+    // Nothing is active, so every write below relies on the `view` argument.
+    let (_, summary) = c.call("project_summary", json!({}));
+    assert_eq!(summary["views"], json!(["Data flow"]), "{summary}");
+
+    let (err, added) = c.call(
+        "view_logical_add",
+        json!({"view": "Data flow", "name": "HuggingFace", "icon": "HF", "subtitle": "model download", "x": 1500, "y": 620}),
+    );
+    assert!(!err, "{added}");
+    let (err, flow) = c.call(
+        "view_flow_add",
+        json!({"view": "Data flow", "from": "JobRunner", "to": "HuggingFace", "label": "pulls model", "dashed": true, "step": 5, "color": "#b05aa0"}),
+    );
+    assert!(!err, "{flow}");
+    let (err, note) = c.call(
+        "view_note_add",
+        json!({"view": "Data flow", "title": "Cold start", "body": "The first job of the day waits for the model download.", "anchor": "HuggingFace"}),
+    );
+    assert!(!err, "{note}");
+    // A flow to something that is not in the view is refused with a readable message.
+    let (err, msg) = c.call(
+        "view_flow_add",
+        json!({"view": "Data flow", "from": "JobRunner", "to": "no such thing"}),
+    );
+    assert!(err, "{msg}");
+
+    // entity_move with `view` lands in that view's own layout, not the shared one.
+    let (err, moved) = c.call(
+        "entity_move",
+        json!({"entity": "JobGateway", "x": 150, "y": 260, "view": "Data flow"}),
+    );
+    assert!(!err, "{moved}");
+    assert_eq!(moved["in_view"], json!("Data flow"), "{moved}");
+    let proj = c.request("resources/read", json!({"uri": "ttg://project"}));
+    let project: Value = serde_json::from_str(proj["contents"][0]["text"].as_str().unwrap()).unwrap();
+    assert_eq!(
+        project["views"][0]["layout"]["positions"]["fn-gateway"],
+        json!({"x": 150, "y": 260}),
+        "{}",
+        project["views"][0]["layout"]
+    );
+    assert_ne!(
+        project["nodes"]["fn-gateway"]["position"],
+        json!({"x": 150, "y": 260}),
+        "the shared layout must not move"
+    );
+
+    // Description and legend through view_update.
+    let (err, upd) = c.call(
+        "view_update",
+        json!({"view": "Data flow", "description": "How one job travels through the pipeline.", "legend": true}),
+    );
+    assert!(!err, "{upd}");
+    assert_eq!(upd["view"]["legend"], json!(true), "{upd}");
+
+    // The document mentions the new logical node, its flow and the note.
+    let (err, md) = c.call("view_export", json!({"view": "Data flow"}));
+    assert!(!err, "{md}");
+    let text = md["text"].as_str().unwrap();
+    assert!(
+        text.contains("## Groups") && text.contains("HuggingFace"),
+        "{text}"
+    );
+    assert!(text.contains("Cold start"), "{text}");
+    let (err, mm) = c.call("view_export", json!({"view": "Data flow", "format": "mermaid"}));
+    assert!(!err, "{mm}");
+    assert!(mm["text"].as_str().unwrap().starts_with("flowchart LR"), "{mm}");
+
+    // view_fit answers with the bounding box even without a window.
+    let (err, fit) = c.call("view_fit", json!({"view": "Data flow"}));
+    assert!(!err, "{fit}");
+    assert!(fit["bounds"]["w"].as_f64().unwrap_or(0.0) > 0.0, "{fit}");
+
+    // Removal by title, and the whole lot batched as one undo step.
+    let (err, rm) = c.call(
+        "view_annotation_remove",
+        json!({"view": "Data flow", "key": "Cold start"}),
+    );
+    assert!(!err, "{rm}");
+    let (err, applied) = c.call(
+        "project_apply",
+        json!({"commands": [
+            {"tool": "view_logical_add", "args": {"view": "Data flow", "name": "pager", "x": 1500, "y": 800}},
+            {"tool": "view_flow_add", "args": {"view": "Data flow", "from": "pipeline logs", "to": "pager", "label": "alerts"}},
+            {"tool": "view_note_add", "args": {"view": "Data flow", "title": "On call", "body": "Alerts page the duty engineer.", "anchor": "pager"}}
+        ]}),
+    );
+    assert!(!err, "{applied}");
+    assert_eq!(applied["count"], json!(3), "{applied}");
+    let (_, before_undo) = c.call("view_get", json!({"name": "Data flow"}));
+    assert_eq!(before_undo["logicals"].as_array().unwrap().len(), 3);
+    let (err, _) = c.call("undo", json!({}));
+    assert!(!err);
+    let (_, after_undo) = c.call("view_get", json!({"name": "Data flow"}));
+    assert_eq!(
+        after_undo["logicals"].as_array().unwrap().len(),
+        2,
+        "one undo must take the whole batch: {after_undo}"
+    );
+}

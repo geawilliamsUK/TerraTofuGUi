@@ -156,7 +156,10 @@ pub fn show(app: &mut TtgApp, ui: &mut Ui) {
     for id in &nodes {
         entity_widget(app, ui, origin, id, false);
     }
+    crate::annotations::draw_logicals(app, ui, origin);
     crate::annotations::draw_flows(app, ui, origin);
+    crate::annotations::draw_notes(app, ui, origin);
+    crate::annotations::legend(app, ui);
     if app.flow_from.is_some() {
         painter.text(
             rect.center_top() + Vec2::new(0.0, 14.0),

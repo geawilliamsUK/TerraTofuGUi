@@ -103,6 +103,10 @@ impl Default for Size {
     }
 }
 
+/// Drawn size of a node (or a logical node) that has none of its own. The canvas and
+/// the view-geometry helpers share it so both agree on where things are.
+pub const NODE_SIZE: Size = Size { w: 176, h: 64 };
+
 /// Extra provider arguments set directly on a generated block, keyed by argument name.
 /// Values are JSON: scalars, lists, objects (maps / nested blocks), `{"$ref": {"entity":
 /// "<id or name>", "attr": "id"}}` for a traversal to another resource, or `{"$raw":
@@ -268,6 +272,25 @@ pub struct Anchor {
     pub offset: i32,
 }
 
+/// Where a resource came from: the curated catalog or the raw provider schema.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[serde(rename_all = "lowercase")]
+pub enum Origin {
+    #[default]
+    All,
+    /// Only types from the curated catalog.
+    Curated,
+    /// Only `native:<provider>:<resource>` types.
+    Native,
+}
+
+impl Origin {
+    pub fn is_all(&self) -> bool {
+        *self == Origin::All
+    }
+}
+
 /// A saved canvas filter: which entities and links are shown. Purely visual; codegen
 /// always sees the whole project.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -295,6 +318,21 @@ pub struct ViewFilter {
     /// that group things their own way.
     #[serde(default = "default_true", skip_serializing_if = "is_true")]
     pub containers: bool,
+    /// Only entities on these provider layers (empty = every layer).
+    #[serde(default, skip_serializing_if = "BTreeSet::is_empty")]
+    pub providers: BTreeSet<ProviderId>,
+    /// Curated types only, native (raw schema) types only, or both.
+    #[serde(default, skip_serializing_if = "Origin::is_all")]
+    pub origin: Origin,
+    /// Only these abstract type ids (empty = all).
+    #[serde(default, skip_serializing_if = "BTreeSet::is_empty")]
+    pub types: BTreeSet<String>,
+    /// Case-insensitive `*` / `?` glob on the display name (empty = all).
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub name_glob: String,
+    /// Hide the structural links, so a view shows only its data-flow arrows.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub hide_edges: bool,
 }
 
 fn default_depth() -> u32 {
@@ -305,6 +343,9 @@ fn default_true() -> bool {
 }
 fn is_true(b: &bool) -> bool {
     *b
+}
+fn is_false(b: &bool) -> bool {
+    !*b
 }
 
 impl Default for ViewFilter {
@@ -317,6 +358,11 @@ impl Default for ViewFilter {
             hidden: BTreeSet::new(),
             only: BTreeSet::new(),
             containers: true,
+            providers: BTreeSet::new(),
+            origin: Origin::All,
+            types: BTreeSet::new(),
+            name_glob: String::new(),
+            hide_edges: false,
         }
     }
 }
@@ -330,7 +376,48 @@ impl ViewFilter {
             && self.hidden.is_empty()
             && self.only.is_empty()
             && self.containers
+            && self.providers.is_empty()
+            && self.origin.is_all()
+            && self.types.is_empty()
+            && self.name_glob.is_empty()
+            && !self.hide_edges
     }
+}
+
+/// Case-insensitive glob with `*` (any run) and `?` (one character). Written out rather
+/// than pulled in as a dependency: the patterns are display names, not paths.
+pub fn glob_match(pattern: &str, text: &str) -> bool {
+    let p: Vec<char> = pattern.to_lowercase().chars().collect();
+    let t: Vec<char> = text.to_lowercase().chars().collect();
+    let (mut pi, mut ti) = (0usize, 0usize);
+    // Where to resume if the current `*` turns out to have eaten too little.
+    let (mut star, mut resume) = (None, 0usize);
+    while ti < t.len() {
+        match p.get(pi) {
+            Some('*') => {
+                star = Some(pi);
+                resume = ti;
+                pi += 1;
+            }
+            Some('?') => {
+                pi += 1;
+                ti += 1;
+            }
+            Some(c) if *c == t[ti] => {
+                pi += 1;
+                ti += 1;
+            }
+            _ => match star {
+                Some(s) => {
+                    pi = s + 1;
+                    resume += 1;
+                    ti = resume;
+                }
+                None => return false,
+            },
+        }
+    }
+    p[pi..].iter().all(|c| *c == '*')
 }
 
 /// Positions and sizes a view keeps separately from the shared layout. Entities not
@@ -360,13 +447,39 @@ pub struct Group {
     pub color: Option<String>,
 }
 
-/// One end of a data-flow arrow: a resource or a group.
+/// An annotation-only node on a view: something the diagram does not (and should not)
+/// generate — a browser, a third-party API, one workload inside a cluster. Never
+/// exported; flows may start and end at it, and it belongs to groups geometrically
+/// like a resource does.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+pub struct Logical {
+    pub id: Id,
+    pub name: String,
+    /// Short text drawn in the icon block, e.g. `WEB`.
+    #[serde(default)]
+    pub icon: String,
+    /// One line under the name.
+    #[serde(default)]
+    pub subtitle: String,
+    #[serde(default)]
+    pub position: Position,
+    #[serde(default = "default_logical_size")]
+    pub size: Size,
+}
+
+fn default_logical_size() -> Size {
+    NODE_SIZE
+}
+
+/// One end of a data-flow arrow: a resource, a group or a logical node.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(untagged)]
 pub enum FlowEnd {
     Entity { entity: Id },
     Group { group: Id },
+    Logical { logical: Id },
 }
 
 impl FlowEnd {
@@ -374,8 +487,51 @@ impl FlowEnd {
         match self {
             FlowEnd::Entity { entity } => entity,
             FlowEnd::Group { group } => group,
+            FlowEnd::Logical { logical } => logical,
         }
     }
+}
+
+/// What a note points at: anything a flow can attach to, or a flow itself.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[serde(untagged)]
+pub enum NoteAnchor {
+    End(FlowEnd),
+    Flow { flow: Id },
+}
+
+impl NoteAnchor {
+    pub fn id(&self) -> &str {
+        match self {
+            NoteAnchor::End(e) => e.id(),
+            NoteAnchor::Flow { flow } => flow,
+        }
+    }
+}
+
+/// A note box on a view: a title and a wrapped body explaining part of the picture.
+/// Never exported. With an `anchor` it is drawn beside what it explains and `position`
+/// is the offset from that thing's top-right corner; without one, `position` is the
+/// note's own place on the canvas.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+pub struct Note {
+    pub id: Id,
+    #[serde(default)]
+    pub title: String,
+    #[serde(default)]
+    pub body: String,
+    #[serde(default)]
+    pub position: Position,
+    #[serde(default = "default_note_size")]
+    pub size: Size,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub anchor: Option<NoteAnchor>,
+}
+
+fn default_note_size() -> Size {
+    Size { w: 260, h: 120 }
 }
 
 /// A labelled data-flow arrow on a view: architecture-map annotation, never exported
@@ -390,14 +546,24 @@ pub struct Flow {
     pub label: String,
     #[serde(default)]
     pub dashed: bool,
+    /// Position in the sequence, drawn as a badge at the arrow's start.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub step: Option<u32>,
+    /// `#rrggbb`; the default ink colour when absent.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub color: Option<String>,
 }
 
 /// A named, saved view shown as a tab above the canvas: a filter (what is shown), an
-/// optional layout of its own (where things are), and annotations (groups, flows).
+/// optional layout of its own (where things are), and annotations (groups, flows,
+/// notes, logical nodes) that document it.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub struct View {
     pub name: String,
+    /// What this view is for, shown under the view bar and in its exported document.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub description: String,
     #[serde(default)]
     pub filter: ViewFilter,
     /// `Some` = this view positions things itself; `None` = shares the All layout.
@@ -407,16 +573,27 @@ pub struct View {
     pub groups: Vec<Group>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub flows: Vec<Flow>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub notes: Vec<Note>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub logicals: Vec<Logical>,
+    /// Show the legend panel over the canvas.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub legend: bool,
 }
 
 impl View {
     pub fn new(name: &str, filter: ViewFilter) -> Self {
         View {
             name: name.to_string(),
+            description: String::new(),
             filter,
             layout: Some(ViewLayout::default()),
             groups: Vec::new(),
             flows: Vec::new(),
+            notes: Vec::new(),
+            logicals: Vec::new(),
+            legend: false,
         }
     }
     pub fn group(&self, id: &str) -> Option<&Group> {
@@ -430,6 +607,25 @@ impl View {
     }
     pub fn flow_mut(&mut self, id: &str) -> Option<&mut Flow> {
         self.flows.iter_mut().find(|f| f.id == id)
+    }
+    pub fn note(&self, id: &str) -> Option<&Note> {
+        self.notes.iter().find(|n| n.id == id)
+    }
+    pub fn note_mut(&mut self, id: &str) -> Option<&mut Note> {
+        self.notes.iter_mut().find(|n| n.id == id)
+    }
+    pub fn logical(&self, id: &str) -> Option<&Logical> {
+        self.logicals.iter().find(|l| l.id == id)
+    }
+    pub fn logical_mut(&mut self, id: &str) -> Option<&mut Logical> {
+        self.logicals.iter_mut().find(|l| l.id == id)
+    }
+    /// Flows in the order they should be read: numbered steps first, then the rest in
+    /// the order they were added.
+    pub fn flows_in_step_order(&self) -> Vec<&Flow> {
+        let mut out: Vec<&Flow> = self.flows.iter().collect();
+        out.sort_by_key(|f| f.step.unwrap_or(u32::MAX));
+        out
     }
 }
 
@@ -757,6 +953,12 @@ impl Project {
                 l.sizes.remove(id);
             }
             v.flows.retain(|f| f.from.id() != id && f.to.id() != id);
+            // Notes survive; they just stop pointing at something that is gone.
+            for n in &mut v.notes {
+                if n.anchor.as_ref().is_some_and(|a| a.id() == id) {
+                    n.anchor = None;
+                }
+            }
         }
     }
 
@@ -862,6 +1064,82 @@ mod tests {
         assert_eq!(slugify("  web-01 "), "web_01");
         assert_eq!(slugify("1abc"), "_1abc");
         assert_eq!(slugify("---"), "unnamed");
+    }
+
+    #[test]
+    fn globs() {
+        assert!(glob_match("*", "anything"));
+        assert!(glob_match("jobs*", "Jobs queue"));
+        assert!(glob_match("*queue", "jobs QUEUE"));
+        assert!(glob_match("*job*", "the jobs db"));
+        assert!(glob_match("db-?", "db-a"));
+        assert!(glob_match("runner", "runner"));
+        assert!(!glob_match("db-?", "db-ab"));
+        assert!(!glob_match("jobs*", "the jobs db"));
+        assert!(!glob_match("*queue", "queue of jobs"));
+        // Backtracking: the first `*` must give characters back.
+        assert!(glob_match("*ab*c", "xxabxxabc"));
+    }
+
+    /// Every annotation and filter field survives a trip through the project file, and
+    /// a file written before they existed still loads.
+    #[test]
+    fn view_documents_round_trip() {
+        let mut p = Project::new("t");
+        let mut v = View::new("map", ViewFilter::default());
+        v.description = "what this view is for".into();
+        v.legend = true;
+        v.filter.providers = ["aws".to_string()].into_iter().collect();
+        v.filter.origin = Origin::Native;
+        v.filter.types = ["subnet".to_string()].into_iter().collect();
+        v.filter.name_glob = "job*".into();
+        v.filter.hide_edges = true;
+        v.groups.push(Group {
+            id: "g1".into(),
+            label: "box".into(),
+            position: Position { x: 1, y: 2 },
+            size: Size { w: 300, h: 200 },
+            color: Some("#5b7fb5".into()),
+        });
+        v.logicals.push(Logical {
+            id: "l1".into(),
+            name: "users' browser".into(),
+            icon: "WEB".into(),
+            subtitle: "outside the cloud".into(),
+            position: Position { x: 3, y: 4 },
+            size: NODE_SIZE,
+        });
+        v.flows.push(Flow {
+            id: "f1".into(),
+            from: FlowEnd::Logical { logical: "l1".into() },
+            to: FlowEnd::Group { group: "g1".into() },
+            label: "HTTPS".into(),
+            dashed: true,
+            step: Some(2),
+            color: Some("#c95555".into()),
+        });
+        v.notes.push(Note {
+            id: "n1".into(),
+            title: "why".into(),
+            body: "because".into(),
+            position: Position { x: 5, y: 6 },
+            size: Size { w: 260, h: 120 },
+            anchor: Some(NoteAnchor::Flow { flow: "f1".into() }),
+        });
+        p.views.push(v.clone());
+        let text = serde_json::to_string_pretty(&p).unwrap();
+        let back: Project = serde_json::from_str(&text).unwrap();
+        assert_eq!(back.views[0], v);
+        // The untagged endpoint enums keep their variant, not just their id.
+        assert!(matches!(back.views[0].flows[0].from, FlowEnd::Logical { .. }));
+        assert!(matches!(
+            back.views[0].notes[0].anchor,
+            Some(NoteAnchor::Flow { .. })
+        ));
+        // A view as written by an older build (no annotations, no new filter keys).
+        let old: View = serde_json::from_str(r#"{"name":"old","filter":{"depth":1}}"#).unwrap();
+        assert!(old.notes.is_empty() && old.logicals.is_empty() && !old.legend);
+        assert!(old.filter.is_empty());
     }
 
     #[test]

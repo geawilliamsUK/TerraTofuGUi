@@ -658,6 +658,7 @@
   "views": [
     {
       "name": "Data flow",
+      "description": "How one job travels through the pipeline. The browser posts to the gateway, the queue buffers the request so the gateway can answer at once, the runner does the work and writes the result to the database. Dashed arrows are out-of-band: credentials read from the vault, logs written as the runner goes. Everything drawn here is annotation - it is never exported.",
       "filter": {
         "categories": [
           "serverless",
@@ -667,14 +668,8 @@
           "secrets"
         ],
         "depth": 1,
-        "relations": [
-          "sends_to",
-          "attribute_reference",
-          "reads",
-          "logs_to",
-          "attachment"
-        ],
-        "containers": false
+        "containers": false,
+        "hide_edges": true
       },
       "layout": {
         "positions": {
@@ -777,6 +772,18 @@
       ],
       "flows": [
         {
+          "id": "flow-0",
+          "from": {
+            "logical": "lg-browser"
+          },
+          "to": {
+            "entity": "fn-gateway"
+          },
+          "label": "HTTPS request",
+          "dashed": false,
+          "step": 1
+        },
+        {
           "id": "flow-1",
           "from": {
             "entity": "fn-gateway"
@@ -784,7 +791,8 @@
           "to": {
             "entity": "q-jobs"
           },
-          "label": "job requests"
+          "label": "job requests",
+          "step": 2
         },
         {
           "id": "flow-2",
@@ -794,7 +802,8 @@
           "to": {
             "entity": "fn-runner"
           },
-          "label": "triggers"
+          "label": "triggers",
+          "step": 3
         },
         {
           "id": "flow-3",
@@ -804,7 +813,8 @@
           "to": {
             "entity": "db-jobs"
           },
-          "label": "results"
+          "label": "results",
+          "step": 4
         },
         {
           "id": "flow-4",
@@ -815,7 +825,8 @@
             "entity": "fn-runner"
           },
           "label": "db credentials",
-          "dashed": true
+          "dashed": true,
+          "color": "#8a7f5a"
         },
         {
           "id": "flow-5",
@@ -826,9 +837,45 @@
             "entity": "log-pipeline"
           },
           "label": "logs",
-          "dashed": true
+          "dashed": true,
+          "color": "#5b7fb5"
         }
-      ]
+      ],
+      "notes": [
+        {
+          "id": "note-queue",
+          "title": "Why a queue in the middle",
+          "body": "The gateway answers in milliseconds; a job can take minutes. The queue holds the request until a runner is free, so a burst of traffic costs latency rather than errors.",
+          "position": {
+            "x": 30,
+            "y": -170
+          },
+          "size": {
+            "w": 300,
+            "h": 130
+          },
+          "anchor": {
+            "entity": "q-jobs"
+          }
+        }
+      ],
+      "logicals": [
+        {
+          "id": "lg-browser",
+          "name": "users' browser",
+          "icon": "WEB",
+          "subtitle": "outside the cloud",
+          "position": {
+            "x": -240,
+            "y": 200
+          },
+          "size": {
+            "w": 176,
+            "h": 64
+          }
+        }
+      ],
+      "legend": true
     }
   ]
 }

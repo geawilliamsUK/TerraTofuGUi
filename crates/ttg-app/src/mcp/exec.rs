@@ -57,6 +57,150 @@ impl TtgApp {
         })
     }
 
+    /// Index of a saved view by name (case-insensitive).
+    fn resolve_view(&self, name: &str) -> Result<usize, String> {
+        self.project
+            .views
+            .iter()
+            .position(|v| v.name.eq_ignore_ascii_case(name))
+            .ok_or_else(|| {
+                format!(
+                    "no view named \"{name}\" (views: {})",
+                    self.project
+                        .views
+                        .iter()
+                        .map(|v| v.name.clone())
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                )
+            })
+    }
+
+    /// Switch to a saved view, or to `All`.
+    pub fn activate_view_named(&mut self, name: &str) -> Result<(), String> {
+        if name.eq_ignore_ascii_case("all") {
+            self.activate_view(None);
+            return Ok(());
+        }
+        let i = self.resolve_view(name)?;
+        self.activate_view(Some(i));
+        Ok(())
+    }
+
+    /// Run a command against a named view without leaving the user somewhere else:
+    /// the view is made active for the duration (annotations and the layout belong to
+    /// whichever view is active) and the previous one comes back afterwards. With no
+    /// name the active view is used, so `view` is optional everywhere.
+    fn with_view<T>(
+        &mut self,
+        view: Option<String>,
+        f: impl FnOnce(&mut Self) -> Result<T, String>,
+    ) -> Result<T, String> {
+        let Some(name) = view else { return f(self) };
+        let i = self.resolve_view(&name)?;
+        let previous = self.active_view;
+        if previous == Some(i) {
+            return f(self);
+        }
+        // Keep a working filter the user set on "All" rather than resetting it.
+        let previous_filter = self.filter.clone();
+        self.activate_view(Some(i));
+        let r = f(self);
+        self.active_view = previous;
+        self.set_filter(previous_filter);
+        r
+    }
+
+    /// The view an annotation command lands in, for its answer.
+    fn view_name(&self) -> Option<String> {
+        self.active_view().map(|v| v.name.clone())
+    }
+
+    fn require_view(&self, what: &str) -> Result<(), String> {
+        if self.active_view.is_none() {
+            return Err(format!(
+                "{what} live in views: pass `view`, or call view_activate / view_save first"
+            ));
+        }
+        Ok(())
+    }
+
+    /// Where a new annotation goes when the agent gives no position: clear of the
+    /// diagram, so nothing lands on top of a resource.
+    fn annotation_spot(&self, x: Option<i32>, y: Option<i32>) -> ttg_core::Position {
+        let b = self.world_bounds();
+        ttg_core::Position {
+            x: x.unwrap_or_else(|| b.map(|r| r.max.x as i32 + 60).unwrap_or(60)),
+            y: y.unwrap_or_else(|| b.map(|r| r.min.y as i32).unwrap_or(60)),
+        }
+    }
+
+    /// One view in full: what it shows, where it puts things, and its annotations.
+    fn view_json(&self, i: usize) -> J {
+        let v = &self.project.views[i];
+        let shown_set = ttg_codegen::views::visible_set(&self.project, &self.catalog, &v.filter);
+        let visible = |id: &str| shown_set.as_ref().is_none_or(|s| s.contains(id));
+        let name_of = |id: &str| {
+            self.project
+                .entity(id)
+                .map(|e| e.name.to_string())
+                .unwrap_or_else(|| id.to_string())
+        };
+        let shown: Vec<J> = self
+            .project
+            .entities()
+            .iter()
+            .filter(|e| visible(e.id))
+            .map(|e| json!({"id": e.id, "name": e.name, "type": e.resource_type}))
+            .collect();
+        json!({
+            "name": v.name,
+            "description": v.description,
+            "active": self.active_view == Some(i),
+            "legend": v.legend,
+            "filter": v.filter,
+            "own_layout": v.layout.is_some(),
+            "layout": v.layout,
+            "shown": shown,
+            "groups": v.groups.iter().map(|g| json!({
+                "id": g.id, "label": g.label, "position": g.position, "size": g.size, "color": g.color,
+                "nested_in": ttg_core::view::group_parent(v, &g.id).map(|p| p.label.clone()),
+                "members": ttg_core::view::group_members(&self.project, v, &g.id, &visible)
+                    .iter().map(|m| name_of(m)).collect::<Vec<_>>(),
+                "logicals": ttg_core::view::group_logicals(v, &g.id).iter()
+                    .filter_map(|l| v.logical(l).map(|l| l.name.clone())).collect::<Vec<_>>(),
+            })).collect::<Vec<_>>(),
+            "flows": v.flows_in_step_order().iter().map(|f| json!({
+                "id": f.id, "step": f.step, "label": f.label, "dashed": f.dashed, "color": f.color,
+                "from": ttg_core::view::end_name(&self.project, v, &f.from),
+                "to": ttg_core::view::end_name(&self.project, v, &f.to),
+            })).collect::<Vec<_>>(),
+            "notes": v.notes.iter().map(|n| json!({
+                "id": n.id, "title": n.title, "body": n.body, "position": n.position, "size": n.size,
+                "anchor": n.anchor,
+            })).collect::<Vec<_>>(),
+            "logicals": v.logicals.iter().map(|l| json!({
+                "id": l.id, "name": l.name, "icon": l.icon, "subtitle": l.subtitle,
+                "position": l.position, "size": l.size,
+            })).collect::<Vec<_>>(),
+        })
+    }
+
+    /// Resolve what a note points at: a resource, group or logical node, or a flow.
+    fn resolve_anchor(&self, key: &str) -> Result<ttg_core::NoteAnchor, String> {
+        if let Some(end) = self.resolve_end(key) {
+            return Ok(ttg_core::NoteAnchor::End(end));
+        }
+        self.active_view()
+            .and_then(|v| {
+                v.flows
+                    .iter()
+                    .find(|f| f.id == key || (!f.label.is_empty() && f.label.eq_ignore_ascii_case(key)))
+            })
+            .map(|f| ttg_core::NoteAnchor::Flow { flow: f.id.clone() })
+            .ok_or_else(|| format!("nothing called \"{key}\" to pin the note to in this view"))
+    }
+
     fn modal_open(&self) -> Option<&'static str> {
         if self.confirm.is_some() {
             Some("the unsaved-changes prompt")
@@ -99,7 +243,7 @@ impl TtgApp {
                 Ok(self.reach_to_json(&id))
             }
             AgentCommand::ExportPreview { provider } => self.export_preview_json(provider),
-            AgentCommand::Screenshot => Err("screenshots are handled by the frame loop".into()),
+            AgentCommand::Screenshot { .. } => Err("screenshots are handled by the frame loop".into()),
             AgentCommand::EntityAdd {
                 type_id,
                 name,
@@ -198,19 +342,21 @@ impl TtgApp {
                 }
                 Ok(r)
             }
-            AgentCommand::EntityMove { entity, x, y } => {
+            AgentCommand::EntityMove { entity, x, y, view } => {
                 let id = self.resolve(&entity)?;
-                let before = self.snapshot();
-                let cur = self.entity_rect(&id).unwrap().min;
-                let (dx, dy) = (x - cur.x as i32, y - cur.y as i32);
-                let mut ids = vec![id.clone()];
-                ids.extend(self.project.descendants_of(&id));
-                self.shift_entities(&ids, dx, dy);
-                self.finish(before);
-                self.flash(&id);
-                Ok(
-                    json!({"status": "moved", "id": id, "in_view": self.active_view().map(|v| v.name.clone())}),
-                )
+                self.with_view(view, |app| {
+                    let before = app.snapshot();
+                    let cur = app.entity_rect(&id).unwrap().min;
+                    let (dx, dy) = (x - cur.x as i32, y - cur.y as i32);
+                    // Moving a container takes its contents with it, in this view only
+                    // when the view owns its layout.
+                    let mut ids = vec![id.clone()];
+                    ids.extend(app.project.descendants_of(&id));
+                    app.shift_entities(&ids, dx, dy);
+                    app.finish(before);
+                    app.flash(&id);
+                    Ok(json!({"status": "moved", "id": id, "in_view": app.view_name()}))
+                })
             }
             AgentCommand::EntityResize { entity, w, h } => {
                 let id = self.resolve(&entity)?;
@@ -416,43 +562,102 @@ impl TtgApp {
                 )
             }
             AgentCommand::ViewActivate { name } => {
-                if name.eq_ignore_ascii_case("all") {
-                    self.activate_view(None);
-                    return Ok(json!({"status": "showing everything (All)"}));
+                self.activate_view_named(&name)?;
+                match self.active_view() {
+                    None => Ok(json!({"status": "showing everything (All)"})),
+                    Some(v) => Ok(json!({
+                        "status": "view active",
+                        "name": v.name,
+                        "own_layout": v.layout.is_some(),
+                        "groups": v.groups.len(),
+                        "flows": v.flows.len(),
+                        "notes": v.notes.len(),
+                        "logicals": v.logicals.len(),
+                    })),
                 }
-                let i = self
-                    .project
-                    .views
-                    .iter()
-                    .position(|v| v.name.eq_ignore_ascii_case(&name))
-                    .ok_or_else(|| {
-                        format!(
-                            "no view named \"{name}\" (views: {})",
-                            self.project
-                                .views
-                                .iter()
-                                .map(|v| v.name.clone())
-                                .collect::<Vec<_>>()
-                                .join(", ")
-                        )
-                    })?;
-                self.activate_view(Some(i));
-                Ok(
-                    json!({"status": "view active", "name": self.project.views[i].name, "own_layout": self.project.views[i].layout.is_some(), "groups": self.project.views[i].groups.len(), "flows": self.project.views[i].flows.len()}),
-                )
+            }
+            AgentCommand::ViewGet { name } => {
+                let i = match name {
+                    Some(n) => self.resolve_view(&n)?,
+                    None => self
+                        .active_view
+                        .ok_or("no view is active; pass a name or call view_activate")?,
+                };
+                Ok(self.view_json(i))
+            }
+            AgentCommand::ViewUpdate {
+                view,
+                name,
+                description,
+                legend,
+            } => {
+                let i = match view {
+                    Some(n) => self.resolve_view(&n)?,
+                    None => self
+                        .active_view
+                        .ok_or("no view is active; pass `view` or call view_activate")?,
+                };
+                if let Some(n) = &name {
+                    if n.trim().is_empty() {
+                        return Err("a view needs a name".into());
+                    }
+                }
+                let before = self.snapshot();
+                let v = &mut self.project.views[i];
+                if let Some(n) = name {
+                    v.name = n.trim().to_string();
+                }
+                if let Some(d) = description {
+                    v.description = d;
+                }
+                if let Some(l) = legend {
+                    v.legend = l;
+                }
+                self.finish(before);
+                Ok(json!({"status": "view updated", "view": self.view_json(i)}))
+            }
+            AgentCommand::ViewFit { view } => {
+                if let Some(n) = view {
+                    self.activate_view_named(&n)?;
+                }
+                // The camera is fitted by the canvas on the next frame; headless there
+                // is no canvas, so the bounds themselves are the answer.
+                self.fit_requested = true;
+                self.refresh_visibility();
+                let b = self.world_bounds();
+                Ok(json!({
+                    "status": "fitted",
+                    "view": self.view_name().unwrap_or_else(|| "All".into()),
+                    "bounds": b.map(|r| json!({"x": r.min.x, "y": r.min.y, "w": r.width(), "h": r.height()})),
+                    "shown": self.project.entities().len() - self.hidden_count(),
+                }))
+            }
+            AgentCommand::ViewExport { view, format } => {
+                let i = match view {
+                    Some(n) => self.resolve_view(&n)?,
+                    None => self
+                        .active_view
+                        .ok_or("no view is active; pass `view` or call view_activate")?,
+                };
+                let v = &self.project.views[i];
+                let text = match format.to_lowercase().as_str() {
+                    "md" | "markdown" => ttg_codegen::views::markdown(&self.project, &self.catalog, v),
+                    "mermaid" => ttg_codegen::views::mermaid(&self.project, &self.catalog, v),
+                    other => return Err(format!("unknown format \"{other}\" (md | mermaid)")),
+                };
+                Ok(json!({"view": v.name, "format": format.to_lowercase(), "text": text}))
             }
             AgentCommand::GroupAdd {
+                view,
                 label,
                 x,
                 y,
                 w,
                 h,
                 color,
-            } => {
-                if self.active_view.is_none() {
-                    return Err("activate a view first (view_activate); groups live in views".into());
-                }
-                let id = self
+            } => self.with_view(view, |app| {
+                app.require_view("groups")?;
+                let id = app
                     .add_group(
                         &label,
                         ttg_core::Position { x, y },
@@ -463,51 +668,119 @@ impl TtgApp {
                         color,
                     )
                     .ok_or("could not add the group")?;
-                Ok(json!({"status": "group added", "id": id, "members": self.group_members(&id)}))
-            }
+                Ok(
+                    json!({"status": "group added", "id": id, "in_view": app.view_name(), "members": app.group_members(&id)}),
+                )
+            }),
             AgentCommand::FlowAdd {
+                view,
                 from,
                 to,
                 label,
                 dashed,
-            } => {
-                if self.active_view.is_none() {
-                    return Err("activate a view first (view_activate); flows live in views".into());
-                }
-                let f = self
+                step,
+                color,
+            } => self.with_view(view, |app| {
+                app.require_view("flows")?;
+                let f = app
                     .resolve_end(&from)
-                    .ok_or_else(|| format!("no resource or group \"{from}\""))?;
-                let t = self
+                    .ok_or_else(|| format!("no resource, group or logical node \"{from}\""))?;
+                let t = app
                     .resolve_end(&to)
-                    .ok_or_else(|| format!("no resource or group \"{to}\""))?;
-                let id = self
-                    .add_flow(f, t, &label, dashed)
+                    .ok_or_else(|| format!("no resource, group or logical node \"{to}\""))?;
+                let id = app
+                    .add_flow(f, t, &label, dashed, step, color)
                     .ok_or("a flow needs two different ends")?;
-                Ok(json!({"status": "flow added", "id": id}))
-            }
-            AgentCommand::AnnotationRemove { key } => {
-                let Some(v) = self.active_view() else {
+                Ok(json!({"status": "flow added", "id": id, "in_view": app.view_name()}))
+            }),
+            AgentCommand::NoteAdd {
+                view,
+                title,
+                body,
+                x,
+                y,
+                w,
+                h,
+                anchor,
+            } => self.with_view(view, |app| {
+                app.require_view("notes")?;
+                let anchor = anchor.map(|a| app.resolve_anchor(&a)).transpose()?;
+                let spot = app.annotation_spot(x, y);
+                let id = app
+                    .add_note(
+                        &title,
+                        &body,
+                        spot,
+                        ttg_core::Size {
+                            w: w.unwrap_or(260).max(120),
+                            h: h.unwrap_or(120).max(60),
+                        },
+                        anchor,
+                    )
+                    .ok_or("could not add the note")?;
+                Ok(json!({"status": "note added", "id": id, "in_view": app.view_name()}))
+            }),
+            AgentCommand::LogicalAdd {
+                view,
+                name,
+                icon,
+                subtitle,
+                x,
+                y,
+                w,
+                h,
+            } => self.with_view(view, |app| {
+                app.require_view("logical nodes")?;
+                let spot = app.annotation_spot(x, y);
+                let id = app
+                    .add_logical(
+                        &name,
+                        icon.as_deref().unwrap_or_default(),
+                        subtitle.as_deref().unwrap_or_default(),
+                        spot,
+                        ttg_core::Size {
+                            w: w.unwrap_or(ttg_core::NODE_SIZE.w).max(120),
+                            h: h.unwrap_or(ttg_core::NODE_SIZE.h).max(48),
+                        },
+                    )
+                    .ok_or("could not add the logical node")?;
+                Ok(json!({"status": "logical node added", "id": id, "in_view": app.view_name()}))
+            }),
+            AgentCommand::AnnotationRemove { view, key } => self.with_view(view, |app| {
+                let Some(v) = app.active_view() else {
                     return Err("no view is active".into());
                 };
+                use crate::annotations::Annotation;
+                let named = |id: &str, label: &str| id == key || (!label.is_empty() && label.eq_ignore_ascii_case(&key));
                 let target = v
                     .groups
                     .iter()
-                    .find(|g| g.id == key || g.label.eq_ignore_ascii_case(&key))
-                    .map(|g| crate::annotations::Annotation::Group(g.id.clone()))
+                    .find(|g| named(&g.id, &g.label))
+                    .map(|g| Annotation::Group(g.id.clone()))
                     .or_else(|| {
                         v.flows
                             .iter()
-                            .find(|f| {
-                                f.id == key || (!f.label.is_empty() && f.label.eq_ignore_ascii_case(&key))
-                            })
-                            .map(|f| crate::annotations::Annotation::Flow(f.id.clone()))
+                            .find(|f| named(&f.id, &f.label))
+                            .map(|f| Annotation::Flow(f.id.clone()))
                     })
-                    .ok_or_else(|| format!("no group or flow \"{key}\" in this view"))?;
-                let before = self.snapshot();
-                self.remove_annotation(&target);
-                self.finish(before);
-                Ok(json!({"status": "removed"}))
-            }
+                    .or_else(|| {
+                        v.notes
+                            .iter()
+                            .find(|n| named(&n.id, &n.title))
+                            .map(|n| Annotation::Note(n.id.clone()))
+                    })
+                    .or_else(|| {
+                        v.logicals
+                            .iter()
+                            .find(|l| named(&l.id, &l.name))
+                            .map(|l| Annotation::Logical(l.id.clone()))
+                    })
+                    .ok_or_else(|| format!("no group, flow, note or logical node \"{key}\" in this view"))?;
+                let before = app.snapshot();
+                app.remove_annotation(&target);
+                app.finish(before);
+                Ok(json!({"status": "removed", "in_view": app.view_name()}))
+            }),
             AgentCommand::ViewSave { name } => {
                 let before = self.snapshot();
                 self.project

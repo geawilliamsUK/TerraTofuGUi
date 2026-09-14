@@ -79,7 +79,13 @@ pub enum AgentCommand {
     ExportPreview {
         provider: Option<String>,
     },
-    Screenshot,
+    /// A PNG of the window. `view` activates a view first, `fit` frames its content and
+    /// `hide_panels` drops the side panels for that one frame.
+    Screenshot {
+        fit: bool,
+        view: Option<String>,
+        hide_panels: bool,
+    },
     EntityAdd {
         type_id: String,
         name: Option<String>,
@@ -115,6 +121,8 @@ pub enum AgentCommand {
         entity: String,
         x: i32,
         y: i32,
+        /// Move it in this view's own layout instead of the active view's.
+        view: Option<String>,
     },
     EntityResize {
         entity: String,
@@ -151,7 +159,28 @@ pub enum AgentCommand {
     ViewActivate {
         name: String,
     },
+    /// Everything one view holds: filter, description, layout and annotations.
+    ViewGet {
+        name: Option<String>,
+    },
+    /// Rename a view, describe it, or turn its legend on.
+    ViewUpdate {
+        view: Option<String>,
+        name: Option<String>,
+        description: Option<String>,
+        legend: Option<bool>,
+    },
+    /// Frame a view's content in the camera (and switch to it when named).
+    ViewFit {
+        view: Option<String>,
+    },
+    /// A view as a Markdown or Mermaid document.
+    ViewExport {
+        view: Option<String>,
+        format: String,
+    },
     GroupAdd {
+        view: Option<String>,
         label: String,
         x: i32,
         y: i32,
@@ -160,12 +189,37 @@ pub enum AgentCommand {
         color: Option<String>,
     },
     FlowAdd {
+        view: Option<String>,
         from: String,
         to: String,
         label: String,
         dashed: bool,
+        step: Option<u32>,
+        color: Option<String>,
+    },
+    NoteAdd {
+        view: Option<String>,
+        title: String,
+        body: String,
+        x: Option<i32>,
+        y: Option<i32>,
+        w: Option<i32>,
+        h: Option<i32>,
+        /// Resource, group, logical node or flow the note explains.
+        anchor: Option<String>,
+    },
+    LogicalAdd {
+        view: Option<String>,
+        name: String,
+        icon: Option<String>,
+        subtitle: Option<String>,
+        x: Option<i32>,
+        y: Option<i32>,
+        w: Option<i32>,
+        h: Option<i32>,
     },
     AnnotationRemove {
+        view: Option<String>,
         key: String,
     },
     LayoutTidy {
@@ -269,7 +323,10 @@ impl AgentCommand {
                 | AgentCommand::ReachFrom { .. }
                 | AgentCommand::ReachTo { .. }
                 | AgentCommand::ExportPreview { .. }
-                | AgentCommand::Screenshot
+                | AgentCommand::Screenshot { .. }
+                | AgentCommand::ViewGet { .. }
+                | AgentCommand::ViewExport { .. }
+                | AgentCommand::ViewFit { .. }
                 | AgentCommand::SchemaSearch { .. }
                 | AgentCommand::SchemaShow { .. }
                 | AgentCommand::ExportDiff { .. }
@@ -325,6 +382,8 @@ pub struct McpState {
     pub tx: mpsc::Sender<(AgentCommand, AgentReply)>,
     /// Screenshot requests waiting for the next `Event::Screenshot`.
     pub pending_screenshots: Vec<AgentReply>,
+    /// Frames to let the view settle (activate, fit, hidden panels) before capturing.
+    pub screenshot_after: u8,
     pub log: Vec<LogEntry>,
     /// Entities changed by the agent, flashed on the canvas for a moment.
     pub flash: Vec<(Id, Instant)>,
@@ -356,6 +415,7 @@ impl Default for McpState {
             rx,
             tx,
             pending_screenshots: Vec::new(),
+            screenshot_after: 0,
             log: Vec::new(),
             flash: Vec::new(),
             last_error: None,
@@ -485,13 +545,28 @@ impl TtgApp {
         loop {
             let next = self.mcp.rx.try_recv();
             let Ok((cmd, reply)) = next else { break };
-            if matches!(cmd, AgentCommand::Screenshot) {
+            if let AgentCommand::Screenshot {
+                fit,
+                view,
+                hide_panels,
+            } = cmd
+            {
                 if self.mcp.headless {
                     let _ = reply.send(Err("no display in --serve mode".into()));
                     continue;
                 }
+                if let Some(name) = view {
+                    if let Err(e) = self.activate_view_named(&name) {
+                        let _ = reply.send(Err(e));
+                        continue;
+                    }
+                }
+                self.hide_panels = hide_panels;
+                self.fit_requested = fit;
                 self.mcp.pending_screenshots.push(reply);
-                ctx.send_viewport_cmd(egui::ViewportCommand::Screenshot(Default::default()));
+                // The view has to be laid out (and fitted) before the pixels are worth
+                // capturing, so ask a couple of frames from now.
+                self.mcp.screenshot_after = 2;
                 self.mcp.push_log(
                     "Screenshot".into(),
                     &Ok(serde_json::json!({"status": "requested"})),
@@ -509,6 +584,14 @@ impl TtgApp {
                 continue;
             }
             self.offer_or_run(cmd, reply);
+        }
+        // Ask for the capture once the requested view has had a frame to settle.
+        if !self.mcp.pending_screenshots.is_empty() && self.mcp.screenshot_after > 0 {
+            self.mcp.screenshot_after -= 1;
+            if self.mcp.screenshot_after == 0 {
+                ctx.send_viewport_cmd(egui::ViewportCommand::Screenshot(Default::default()));
+            }
+            ctx.request_repaint();
         }
         // Deliver screenshots.
         if !self.mcp.pending_screenshots.is_empty() {
@@ -533,6 +616,8 @@ impl TtgApp {
                 for r in self.mcp.pending_screenshots.drain(..) {
                     let _ = r.send(result.clone());
                 }
+                // Whatever the shot hid comes back.
+                self.hide_panels = false;
             }
         }
         // Keep repainting while something is flashing.

@@ -467,10 +467,14 @@
       }
     },
     "View": {
-      "description": "A named, saved view shown as a tab above the canvas: a filter (what is shown), an\noptional layout of its own (where things are), and annotations (groups, flows).",
+      "description": "A named, saved view shown as a tab above the canvas: a filter (what is shown), an\noptional layout of its own (where things are), and annotations (groups, flows,\nnotes, logical nodes) that document it.",
       "type": "object",
       "properties": {
         "name": {
+          "type": "string"
+        },
+        "description": {
+          "description": "What this view is for, shown under the view bar and in its exported document.",
           "type": "string"
         },
         "filter": {
@@ -501,6 +505,22 @@
           "items": {
             "$ref": "#/$defs/Flow"
           }
+        },
+        "notes": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/Note"
+          }
+        },
+        "logicals": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/Logical"
+          }
+        },
+        "legend": {
+          "description": "Show the legend panel over the canvas.",
+          "type": "boolean"
         }
       },
       "required": [
@@ -559,8 +579,57 @@
         "containers": {
           "description": "Draw containers (networks, resource groups, vaults). Off for architecture maps\nthat group things their own way.",
           "type": "boolean"
+        },
+        "providers": {
+          "description": "Only entities on these provider layers (empty = every layer).",
+          "type": "array",
+          "uniqueItems": true,
+          "items": {
+            "type": "string"
+          }
+        },
+        "origin": {
+          "description": "Curated types only, native (raw schema) types only, or both.",
+          "$ref": "#/$defs/Origin"
+        },
+        "types": {
+          "description": "Only these abstract type ids (empty = all).",
+          "type": "array",
+          "uniqueItems": true,
+          "items": {
+            "type": "string"
+          }
+        },
+        "name_glob": {
+          "description": "Case-insensitive `*` / `?` glob on the display name (empty = all).",
+          "type": "string"
+        },
+        "hide_edges": {
+          "description": "Hide the structural links, so a view shows only its data-flow arrows.",
+          "type": "boolean"
         }
       }
+    },
+    "Origin": {
+      "description": "Where a resource came from: the curated catalog or the raw provider schema.",
+      "oneOf": [
+        {
+          "type": "string",
+          "enum": [
+            "all"
+          ]
+        },
+        {
+          "description": "Only types from the curated catalog.",
+          "type": "string",
+          "const": "curated"
+        },
+        {
+          "description": "Only `native:<provider>:<resource>` types.",
+          "type": "string",
+          "const": "native"
+        }
+      ]
     },
     "ViewLayout": {
       "description": "Positions and sizes a view keeps separately from the shared layout. Entities not\nlisted use the shared position, so an empty layout is \"same as All, until moved\".",
@@ -637,6 +706,22 @@
         "dashed": {
           "type": "boolean",
           "default": false
+        },
+        "step": {
+          "description": "Position in the sequence, drawn as a badge at the arrow's start.",
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint32",
+          "minimum": 0
+        },
+        "color": {
+          "description": "`#rrggbb`; the default ink colour when absent.",
+          "type": [
+            "string",
+            "null"
+          ]
         }
       },
       "required": [
@@ -646,7 +731,7 @@
       ]
     },
     "FlowEnd": {
-      "description": "One end of a data-flow arrow: a resource or a group.",
+      "description": "One end of a data-flow arrow: a resource, a group or a logical node.",
       "anyOf": [
         {
           "type": "object",
@@ -669,7 +754,121 @@
           "required": [
             "group"
           ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "logical": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "logical"
+          ]
         }
+      ]
+    },
+    "Note": {
+      "description": "A note box on a view: a title and a wrapped body explaining part of the picture.\nNever exported. With an `anchor` it is drawn beside what it explains and `position`\nis the offset from that thing's top-right corner; without one, `position` is the\nnote's own place on the canvas.",
+      "type": "object",
+      "properties": {
+        "id": {
+          "type": "string"
+        },
+        "title": {
+          "type": "string",
+          "default": ""
+        },
+        "body": {
+          "type": "string",
+          "default": ""
+        },
+        "position": {
+          "$ref": "#/$defs/Position",
+          "default": {
+            "x": 0,
+            "y": 0
+          }
+        },
+        "size": {
+          "$ref": "#/$defs/Size",
+          "default": {
+            "w": 260,
+            "h": 120
+          }
+        },
+        "anchor": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/NoteAnchor"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "required": [
+        "id"
+      ]
+    },
+    "NoteAnchor": {
+      "description": "What a note points at: anything a flow can attach to, or a flow itself.",
+      "anyOf": [
+        {
+          "$ref": "#/$defs/FlowEnd"
+        },
+        {
+          "type": "object",
+          "properties": {
+            "flow": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "flow"
+          ]
+        }
+      ]
+    },
+    "Logical": {
+      "description": "An annotation-only node on a view: something the diagram does not (and should not)\ngenerate — a browser, a third-party API, one workload inside a cluster. Never\nexported; flows may start and end at it, and it belongs to groups geometrically\nlike a resource does.",
+      "type": "object",
+      "properties": {
+        "id": {
+          "type": "string"
+        },
+        "name": {
+          "type": "string"
+        },
+        "icon": {
+          "description": "Short text drawn in the icon block, e.g. `WEB`.",
+          "type": "string",
+          "default": ""
+        },
+        "subtitle": {
+          "description": "One line under the name.",
+          "type": "string",
+          "default": ""
+        },
+        "position": {
+          "$ref": "#/$defs/Position",
+          "default": {
+            "x": 0,
+            "y": 0
+          }
+        },
+        "size": {
+          "$ref": "#/$defs/Size",
+          "default": {
+            "w": 176,
+            "h": 64
+          }
+        }
+      },
+      "required": [
+        "id",
+        "name"
       ]
     }
   }
