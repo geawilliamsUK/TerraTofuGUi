@@ -98,6 +98,14 @@ const BUILTIN_RESOURCES: &[(&str, &str)] = &[
         include_str!("../../../definitions/resources/kubernetes_cluster.toml"),
     ),
     (
+        "resources/kubernetes_node_pool.toml",
+        include_str!("../../../definitions/resources/kubernetes_node_pool.toml"),
+    ),
+    (
+        "resources/kubernetes_workload.toml",
+        include_str!("../../../definitions/resources/kubernetes_workload.toml"),
+    ),
+    (
         "resources/dns_zone.toml",
         include_str!("../../../definitions/resources/dns_zone.toml"),
     ),

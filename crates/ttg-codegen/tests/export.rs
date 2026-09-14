@@ -196,6 +196,79 @@ resource = "aws_thing"
 }
 
 #[test]
+fn list_shapes_must_match_the_field_type() {
+    let aws = include_str!("../../../definitions/providers/aws.toml");
+    // `{name}` stands in for the argument source under test.
+    let def = |arg: &str| {
+        format!(
+            r#"
+schema_version = 2
+[resource]
+type = "thing"
+category = "network"
+display_name = "Thing"
+[[fields]]
+name = "labels"
+type = "string_list"
+[[fields]]
+name = "rules"
+type = "struct_list"
+[[fields.items]]
+name = "port"
+type = "int"
+[providers.aws]
+[[providers.aws.blocks]]
+key = "main"
+resource = "aws_eks_node_group"
+[providers.aws.blocks.args]
+labels = {arg}
+"#
+        )
+    };
+    let reject = |arg: &str, needle: &str| {
+        let src = def(arg);
+        let err = Catalog::from_sources(
+            [("thing.toml", src.as_str())].into_iter(),
+            [("aws.toml", aws)].into_iter(),
+        )
+        .expect_err("must be rejected");
+        assert!(err.to_string().contains(needle), "{err}");
+    };
+    reject(
+        r#"{ field = "rules", wrap = "map" }"#,
+        "wrap = \"map\" needs a string_list",
+    );
+    reject(
+        r#"{ field = "labels", column = "port" }"#,
+        "column needs a struct_list field",
+    );
+    reject(
+        r#"{ field = "rules", column = "missing" }"#,
+        "column 'missing' is not an item of 'rules'",
+    );
+    reject(
+        r#"{ field = "rules", column = "port", transform = "kebab" }"#,
+        "column cannot be combined with wrap or transform",
+    );
+    reject(
+        r#"{ relation = "attachment", attr = "id", wrap = "map" }"#,
+        "wrap = \"map\" is only valid on a field or provider_field",
+    );
+    // The valid shapes load.
+    for arg in [
+        r#"{ field = "labels", wrap = "map" }"#,
+        r#"{ field = "rules", column = "port" }"#,
+    ] {
+        let src = def(arg);
+        Catalog::from_sources(
+            [("thing.toml", src.as_str())].into_iter(),
+            [("aws.toml", aws)].into_iter(),
+        )
+        .unwrap_or_else(|e| panic!("{arg} should load: {e}"));
+    }
+}
+
+#[test]
 fn step4_network_database_load_balancer() {
     let cat = Catalog::builtin();
     let p = example("three-tier.ttg.json");
@@ -1301,4 +1374,156 @@ fn older_projects_gain_the_safe_defaults() {
         "{}",
         g.files["providers.tf"]
     );
+}
+
+/// The Kubernetes story: extra node pools, workload identity, cluster add-ons and logs,
+/// and a load balancer that forwards to the cluster.
+#[test]
+fn kubernetes_example_node_pools_and_workload_identity() {
+    let cat = Catalog::builtin();
+    let p = example("kubernetes.ttg.json");
+
+    // ------------------------------------------------------------------ AWS
+    let aws = generate(&p, &cat, "aws", Tool::OpenTofu).unwrap();
+    let c = &aws.files["container.tf"];
+    // The GPU pool: its own node group on the cluster's node role, scaling to zero, spot
+    // capacity, the NVIDIA image, labels as a map and the taint as a nested block.
+    assert!(c.contains("resource \"aws_eks_node_group\" \"gpu\""), "{c}");
+    assert!(
+        c.contains("node_role_arn   = aws_iam_role.platform_node_role.arn"),
+        "{c}"
+    );
+    assert!(
+        c.contains("subnet_ids      = aws_eks_cluster.platform.vpc_config[0].subnet_ids"),
+        "the pool inherits the cluster's subnets when none are linked: {c}"
+    );
+    assert!(c.contains("capacity_type = \"SPOT\""), "{c}");
+    assert!(c.contains("ami_type      = \"AL2023_x86_64_NVIDIA\""), "{c}");
+    assert!(
+        c.contains("labels        = {\n    workload = \"asr\"\n  }"),
+        "{c}"
+    );
+    assert!(
+        c.contains("desired_size = 0\n    min_size     = 0\n    max_size     = 4"),
+        "{c}"
+    );
+    assert!(
+        c.contains("taint {\n    key    = \"nvidia.com/gpu\"\n    value  = \"present\"\n    effect = \"NO_SCHEDULE\"\n  }"),
+        "{c}"
+    );
+    // Add-ons: one aws_eks_addon per entry of the abstract list.
+    assert_eq!(c.matches("resource \"aws_eks_addon\"").count(), 3, "{c}");
+    assert!(c.contains("addon_name   = \"eks-pod-identity-agent\""), "{c}");
+    assert!(c.contains("addon_name   = \"aws-ebs-csi-driver\""), "{c}");
+    // Cluster logs and API endpoint access.
+    assert!(c.contains("enabled_cluster_log_types = ["), "{c}");
+    assert!(c.contains("endpoint_private_access = false"), "{c}");
+    // Workload identity: pod identity association + a least-privilege policy per workload.
+    assert!(
+        c.contains("resource \"aws_eks_pod_identity_association\" \"api\""),
+        "{c}"
+    );
+    assert!(c.contains("service_account = \"asr-worker\""), "{c}");
+    assert!(c.contains("role_arn        = aws_iam_role.api_role.arn"), "{c}");
+    assert!(
+        c.contains("Sid = \"QueueSend\"") && c.contains("Sid = \"Secrets\""),
+        "the api workload's links become policy statements: {c}"
+    );
+    assert!(
+        c.contains("Sid = \"QueueConsume\"") && c.contains("Sid = \"Bucket\""),
+        "the asr worker consumes the queue and writes the bucket: {c}"
+    );
+    // A role pods may assume: EKS Pod Identity principal and sts:TagSession.
+    let iam = &aws.files["iam.tf"];
+    assert!(
+        iam.contains("Action = [\"sts:AssumeRole\", \"sts:TagSession\"]")
+            && iam.contains("Service = \"pods.eks.amazonaws.com\""),
+        "{iam}"
+    );
+    // A load balancer forwarding to the cluster registers pod IPs, not instances.
+    let lb = &aws.files["load_balancer.tf"];
+    assert!(lb.contains("target_type = \"ip\""), "{lb}");
+    assert!(!lb.contains("aws_lb_target_group_attachment"), "{lb}");
+    assert!(aws
+        .manual_steps
+        .iter()
+        .any(|s| s.title.contains("Bind the target group")));
+    assert!(aws.diagnostics.iter().all(|d| d.severity != Severity::Error));
+
+    // ---------------------------------------------------------------- Azure
+    let az = generate(&p, &cat, "azure", Tool::OpenTofu).unwrap();
+    let c = &az.files["container.tf"];
+    assert!(c.contains("oidc_issuer_enabled       = true"), "{c}");
+    assert!(c.contains("workload_identity_enabled = true"), "{c}");
+    assert!(
+        c.contains("resource \"azurerm_kubernetes_cluster_node_pool\" \"gpu\""),
+        "{c}"
+    );
+    assert!(c.contains("gpu_driver      = \"Install\""), "{c}");
+    assert!(c.contains("priority        = \"Spot\""), "{c}");
+    assert!(c.contains("min_count             = 0"), "{c}");
+    assert!(
+        c.contains("node_taints     = formatlist(\"%s=%s:%s\", [\"nvidia.com/gpu\"], [\"present\"], [\"NoSchedule\"])"),
+        "struct_list columns become the three lists AKS wants: {c}"
+    );
+    assert!(
+        c.contains("node_labels           = {\n    workload = \"asr\"\n  }"),
+        "{c}"
+    );
+    // The federated credential binds the identity to <ns>/<sa> on the cluster's issuer.
+    assert!(
+        c.contains("resource \"azurerm_federated_identity_credential\" \"api\""),
+        "{c}"
+    );
+    assert!(
+        c.contains("issuer  = azurerm_kubernetes_cluster.platform.oidc_issuer_url"),
+        "{c}"
+    );
+    assert!(
+        c.contains("subject = format(\"system:serviceaccount:%s:%s\", \"platform\", \"api\")"),
+        "{c}"
+    );
+    assert!(
+        c.contains("role_definition_name = \"Azure Service Bus Data Receiver\""),
+        "{c}"
+    );
+    assert!(
+        c.contains("resource \"azurerm_monitor_diagnostic_setting\" \"platform_diag_0\""),
+        "{c}"
+    );
+
+    // ------------------------------------------------------------------ GCP
+    let gcp = generate(&p, &cat, "gcp", Tool::OpenTofu).unwrap();
+    let c = &gcp.files["container.tf"];
+    assert!(
+        c.contains("workload_pool = format(\"%s.svc.id.goog\", var.project)"),
+        "{c}"
+    );
+    assert!(
+        c.contains("resource \"google_container_node_pool\" \"gpu\""),
+        "{c}"
+    );
+    assert!(c.contains("spot   = true"), "{c}");
+    assert!(c.contains("guest_accelerator {"), "{c}");
+    assert!(c.contains("gpu_driver_version = \"LATEST\""), "{c}");
+    assert!(c.contains("min_node_count = 0"), "{c}");
+    assert!(
+        c.contains("format(\"serviceAccount:%s[%s/%s]\", google_container_cluster.platform.workload_identity_config[0].workload_pool, \"platform\", \"api\")"),
+        "{c}"
+    );
+    assert!(
+        c.contains("role               = \"roles/iam.workloadIdentityUser\""),
+        "{c}"
+    );
+    assert!(c.contains("enable_components = ["), "cluster logging: {c}");
+
+    // A mapping that documents a relation in its own manual step does not also get the
+    // generic "link by hand" entry.
+    for g in [&az, &gcp] {
+        assert!(
+            !g.manual_steps.iter().any(|s| s.title.contains("Link \"edge\"")),
+            "{:?}",
+            g.manual_steps.iter().map(|s| &s.title).collect::<Vec<_>>()
+        );
+    }
 }

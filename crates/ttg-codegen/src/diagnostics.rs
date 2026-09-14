@@ -948,6 +948,19 @@ pub fn consumed_relations(m: &ProviderMapping) -> Vec<Consumed> {
     rel.into_iter().collect()
 }
 
+/// Relations a mapping talks about in a `when`-guarded manual step. It cannot generate
+/// the link, but it says so in its own words, so the generic "link by hand" entry would
+/// only repeat that. The `depends_on` for ordering is still emitted.
+pub fn relations_with_manual_step(m: &ProviderMapping) -> Vec<Consumed> {
+    let mut rel = HashSet::new();
+    for step in &m.manual_steps {
+        if let Some(c) = &step.when {
+            scan_cond(c, &mut rel);
+        }
+    }
+    rel.into_iter().collect()
+}
+
 /// Container types referenced by non-optional `ancestor` sources in a mapping.
 pub fn required_ancestors(m: &ProviderMapping) -> HashSet<String> {
     let mut rel = HashSet::new();

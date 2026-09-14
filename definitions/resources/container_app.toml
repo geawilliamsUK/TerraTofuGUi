@@ -151,6 +151,32 @@ subnets          = { relation = "network_membership", attr = "id", wrap = "list"
 security_groups  = { relation = "attribute_reference", target_type = "security_group", attr = "id", wrap = "list" }
 assign_public_ip = { field = "public" }
 
+# Least-privilege inline policy on the linked role, derived from this app's links — the
+# same statements a Function or a Kubernetes Workload gets.
+[[providers.aws.blocks]]
+key = "policy"
+resource = "aws_iam_role_policy"
+when = { any = [ { relation = "sends_to", target_type = "event_queue" }, { relation = "sends_to", target_type = "topic" } ] }
+
+[providers.aws.blocks.args]
+name = { template = "{name}-policy", transform = "kebab" }
+role = { relation = "iam_binding", attr = "id" }
+
+[providers.aws.blocks.args.policy]
+func = "jsonencode"
+
+[[providers.aws.blocks.args.policy.args]]
+[providers.aws.blocks.args.policy.args.object]
+Version = { value = "2012-10-17" }
+
+[[providers.aws.blocks.args.policy.args.object.Statement.list]]
+if = { relation = "sends_to", target_type = "event_queue" }
+then = { object = { Sid = { value = "QueueSend" }, Effect = { value = "Allow" }, Action = { value = ["sqs:SendMessage", "sqs:GetQueueUrl", "sqs:GetQueueAttributes"] }, Resource = { relation = "sends_to", target_type = "event_queue", attr = "arn", wrap = "list" } } }
+
+[[providers.aws.blocks.args.policy.args.object.Statement.list]]
+if = { relation = "sends_to", target_type = "topic" }
+then = { object = { Sid = { value = "TopicPublish" }, Effect = { value = "Allow" }, Action = { value = ["sns:Publish"] }, Resource = { relation = "sends_to", target_type = "topic", attr = "arn", wrap = "list" } } }
+
 [providers.aws.outputs]
 service_name = { attr = "name", description = "ECS service name" }
 cluster_arn  = { block = "cluster", attr = "arn", description = "ECS cluster ARN" }

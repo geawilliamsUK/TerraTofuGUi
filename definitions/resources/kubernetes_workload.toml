@@ -1,0 +1,361 @@
+# Abstract type: Kubernetes Workload  (schema_version 2)
+#
+# A deployment running *inside* a cluster, drawn so that its cloud permissions can be
+# generated. The manifests stay in the repository; what the diagram owns is the identity
+# plumbing and the least-privilege policy that the links imply — exactly what
+# `function.toml` does for a Lambda, one layer up.
+#
+#   AWS:   aws_eks_pod_identity_association (cluster / namespace / service account -> role)
+#          plus one aws_iam_role_policy on the linked role, built from the links.
+#   Azure: azurerm_federated_identity_credential on the linked user-assigned identity
+#          (issuer = the cluster's OIDC issuer, subject = system:serviceaccount:<ns>/<sa>)
+#          plus one azurerm_role_assignment per linked resource.
+#   GCP:   google_service_account_iam_member granting the Kubernetes service account
+#          roles/iam.workloadIdentityUser on the linked service account, plus one IAM
+#          member per linked resource.
+#
+# Every provider is `partial`: the Deployment and its ServiceAccount are yours to apply,
+# and each provider needs a specific annotation or label on them.
+
+schema_version = 2
+
+[resource]
+type = "kubernetes_workload"
+category = "container"
+display_name = "Kubernetes Workload"
+description = "A deployment inside a Kubernetes cluster. Link the cluster it runs on, the role it runs as, and the queues, secrets and buckets it uses; the identity binding and a least-privilege policy are generated."
+kind = "node"
+allowed_parents = ["resource_group", "virtual_network"]
+network_agnostic = true
+icon = "POD"
+
+[[fields]]
+name = "namespace"
+label = "Namespace"
+type = "string"
+required = true
+default = "default"
+pattern = "^[a-z0-9]([-a-z0-9]*[a-z0-9])?$"
+pattern_hint = "a Kubernetes namespace: lowercase letters, digits and hyphens"
+
+[[fields]]
+name = "service_account"
+label = "Service account"
+type = "string"
+pattern = "^[a-z0-9]([-a-z0-9.]*[a-z0-9])?$"
+pattern_hint = "a Kubernetes service account name: lowercase letters, digits, hyphens and dots"
+description = "Defaults to the display name in kebab case. This is the ServiceAccount the pods must use."
+
+[[relations]]
+kind = "attachment"
+label = "Runs on"
+targets = ["kubernetes_cluster"]
+cardinality = "one"
+
+[[relations]]
+kind = "iam_binding"
+label = "Runs as role / identity"
+targets = ["iam_role"]
+cardinality = "one"
+
+[[relations]]
+kind = "attribute_reference"
+label = "Uses (consumes queue, database, cache, bucket)"
+targets = ["event_queue", "relational_database", "cache", "object_storage"]
+cardinality = "many"
+
+[[relations]]
+kind = "sends_to"
+label = "Sends to (queue, topic)"
+targets = ["event_queue", "topic"]
+cardinality = "many"
+
+[[relations]]
+kind = "reads"
+label = "Reads secrets"
+targets = ["secret"]
+cardinality = "many"
+
+# ---------------------------------------------------------------- AWS
+[providers.aws]
+status = "partial"
+file = "container"
+
+[[providers.aws.checks]]
+when = { relation = "iam_binding", target_field = "trusted_service", not_equals = "kubernetes" }
+severity = "error"
+message = "\"{name}\" runs as a role that pods cannot assume; set the linked Role's 'Assumable by' to kubernetes so its trust policy names pods.eks.amazonaws.com"
+
+[[providers.aws.blocks]]
+key = "main"
+resource = "aws_eks_pod_identity_association"
+
+[providers.aws.blocks.args]
+cluster_name    = { relation = "attachment", target_type = "kubernetes_cluster", attr = "name" }
+namespace       = { field = "namespace" }
+service_account = { field = "service_account", fallback = { field = "name", transform = "kebab" } }
+role_arn        = { relation = "iam_binding", attr = "arn" }
+tags            = { object = { Name = { field = "name" } } }
+
+# Least-privilege inline policy on the linked role, derived from this workload's links.
+[[providers.aws.blocks]]
+key = "policy"
+resource = "aws_iam_role_policy"
+when = { any = [ { relation = "attribute_reference", target_type = "event_queue" }, { relation = "attribute_reference", target_type = "object_storage" }, { relation = "sends_to", target_type = "event_queue" }, { relation = "sends_to", target_type = "topic" }, { relation = "reads" } ] }
+
+[providers.aws.blocks.args]
+name = { template = "{name}-policy", transform = "kebab" }
+role = { relation = "iam_binding", attr = "id" }
+
+[providers.aws.blocks.args.policy]
+func = "jsonencode"
+
+[[providers.aws.blocks.args.policy.args]]
+[providers.aws.blocks.args.policy.args.object]
+Version = { value = "2012-10-17" }
+
+# Consume the queue(s) it reads from.
+[[providers.aws.blocks.args.policy.args.object.Statement.list]]
+if = { relation = "attribute_reference", target_type = "event_queue" }
+then = { object = { Sid = { value = "QueueConsume" }, Effect = { value = "Allow" }, Action = { value = ["sqs:ReceiveMessage", "sqs:DeleteMessage", "sqs:GetQueueAttributes", "sqs:GetQueueUrl"] }, Resource = { relation = "attribute_reference", target_type = "event_queue", attr = "arn", wrap = "list" } } }
+
+# Publish to the queue(s) it sends to.
+[[providers.aws.blocks.args.policy.args.object.Statement.list]]
+if = { relation = "sends_to", target_type = "event_queue" }
+then = { object = { Sid = { value = "QueueSend" }, Effect = { value = "Allow" }, Action = { value = ["sqs:SendMessage", "sqs:GetQueueUrl", "sqs:GetQueueAttributes"] }, Resource = { relation = "sends_to", target_type = "event_queue", attr = "arn", wrap = "list" } } }
+
+# Publish to the topic(s) it sends to.
+[[providers.aws.blocks.args.policy.args.object.Statement.list]]
+if = { relation = "sends_to", target_type = "topic" }
+then = { object = { Sid = { value = "TopicPublish" }, Effect = { value = "Allow" }, Action = { value = ["sns:Publish"] }, Resource = { relation = "sends_to", target_type = "topic", attr = "arn", wrap = "list" } } }
+
+# Read the secrets it reads.
+[[providers.aws.blocks.args.policy.args.object.Statement.list]]
+if = { relation = "reads" }
+then = { object = { Sid = { value = "Secrets" }, Effect = { value = "Allow" }, Action = { value = ["secretsmanager:GetSecretValue", "secretsmanager:DescribeSecret"] }, Resource = { relation = "reads", attr = "arn", wrap = "list" } } }
+
+# Read / write the bucket(s) it uses.
+[[providers.aws.blocks.args.policy.args.object.Statement.list]]
+if = { relation = "attribute_reference", target_type = "object_storage" }
+then = { object = { Sid = { value = "Bucket" }, Effect = { value = "Allow" }, Action = { value = ["s3:GetObject", "s3:PutObject", "s3:DeleteObject", "s3:ListBucket"] }, Resource = { func = "concat", args = [ { relation = "attribute_reference", target_type = "object_storage", attr = "arn", wrap = "list" }, { func = "formatlist", args = [ { value = "%s/*" }, { relation = "attribute_reference", target_type = "object_storage", attr = "arn", wrap = "list" } ] } ] } } }
+
+[providers.aws.outputs]
+service_account = { attr = "service_account", description = "ServiceAccount the pods must run as" }
+
+[[providers.aws.manual_steps]]
+title = "Apply the Deployment and its ServiceAccount"
+body = """
+The association binds `<namespace>/<service account>` in the cluster to the IAM role. The
+ServiceAccount and the Deployment that uses it are not generated: apply a ServiceAccount of
+that exact name in that namespace and set `serviceAccountName` on the pod template. EKS Pod
+Identity needs no annotation on the ServiceAccount, but the cluster **must** run the
+`eks-pod-identity-agent` add-on — tick it in the cluster's Add-ons field.
+"""
+
+[[providers.aws.manual_steps]]
+title = "Database and cache access is not an IAM grant"
+when = { any = [ { relation = "attribute_reference", target_type = "relational_database" }, { relation = "attribute_reference", target_type = "cache" } ] }
+body = """
+No policy statement is generated for a linked database or cache, because neither is
+reached with the pod's IAM role by default: RDS wants a user name and password (put them in
+a Secret and link it with 'Reads'), and ElastiCache has no IAM at all. Switch the database
+to IAM database authentication if you want the role to be enough — that adds an
+`rds-db:connect` statement whose resource names the database user, which the diagram does
+not know.
+"""
+
+# ---------------------------------------------------------------- Azure
+[providers.azure]
+status = "partial"
+file = "container"
+
+[[providers.azure.blocks]]
+key = "main"
+resource = "azurerm_federated_identity_credential"
+
+[providers.azure.blocks.args]
+name                = { template = "{name}-fic", transform = "kebab" }
+resource_group_name = { ancestor = "resource_group", attr = "name" }
+parent_id           = { relation = "iam_binding", attr = "id" }
+audience            = { value = ["api://AzureADTokenExchange"] }
+issuer              = { relation = "attachment", target_type = "kubernetes_cluster", attr = "oidc_issuer_url" }
+subject             = { func = "format", args = [ { value = "system:serviceaccount:%s:%s" }, { field = "namespace" }, { field = "service_account", fallback = { field = "name", transform = "kebab" } } ] }
+
+# Least-privilege role assignments for the identity, one per linked resource.
+[[providers.azure.blocks]]
+key = "send"
+resource = "azurerm_role_assignment"
+for_each_relation = "sends_to"
+for_each_target_type = "event_queue"
+
+[providers.azure.blocks.args]
+scope                = { target = "id" }
+role_definition_name = { value = "Azure Service Bus Data Sender" }
+principal_id         = { relation = "iam_binding", attr = "principal_id" }
+
+[[providers.azure.blocks]]
+key = "publish"
+resource = "azurerm_role_assignment"
+for_each_relation = "sends_to"
+for_each_target_type = "topic"
+
+[providers.azure.blocks.args]
+scope                = { target = "id" }
+role_definition_name = { value = "Azure Service Bus Data Sender" }
+principal_id         = { relation = "iam_binding", attr = "principal_id" }
+
+[[providers.azure.blocks]]
+key = "receive"
+resource = "azurerm_role_assignment"
+for_each_relation = "attribute_reference"
+for_each_target_type = "event_queue"
+
+[providers.azure.blocks.args]
+scope                = { target = "id" }
+role_definition_name = { value = "Azure Service Bus Data Receiver" }
+principal_id         = { relation = "iam_binding", attr = "principal_id" }
+
+[[providers.azure.blocks]]
+key = "secret_read"
+resource = "azurerm_role_assignment"
+for_each_relation = "reads"
+
+[providers.azure.blocks.args]
+scope                = { target = "id" }
+role_definition_name = { value = "Key Vault Secrets User" }
+principal_id         = { relation = "iam_binding", attr = "principal_id" }
+
+[[providers.azure.blocks]]
+key = "blob"
+resource = "azurerm_role_assignment"
+for_each_relation = "attribute_reference"
+for_each_target_type = "object_storage"
+
+[providers.azure.blocks.args]
+scope                = { target = "id" }
+role_definition_name = { value = "Storage Blob Data Contributor" }
+principal_id         = { relation = "iam_binding", attr = "principal_id" }
+
+[providers.azure.outputs]
+subject = { attr = "subject", description = "Service account the pods must run as (system:serviceaccount:<ns>:<sa>)" }
+
+[[providers.azure.manual_steps]]
+title = "Label the pods and annotate the ServiceAccount"
+body = """
+Azure workload identity only injects a token into pods that ask for it. On the pod
+template add the label
+
+    azure.workload.identity/use: "true"
+
+and annotate the ServiceAccount `<namespace>/<service account>` with
+
+    azure.workload.identity/client-id: <client id of the linked identity>
+
+taking the client id from the linked Role's managed identity (its `client_id` output).
+"""
+
+[[providers.azure.manual_steps]]
+title = "Database and cache access is not a role assignment"
+when = { any = [ { relation = "attribute_reference", target_type = "relational_database" }, { relation = "attribute_reference", target_type = "cache" } ] }
+body = """
+No role assignment is generated for a linked database or cache. PostgreSQL Flexible Server
+can authenticate the managed identity through Microsoft Entra, but that needs an Entra
+administrator and a database role created inside the server; Azure Cache for Redis uses
+access keys. Link a Secret with the credentials instead, or wire Entra authentication by
+hand.
+"""
+
+# ---------------------------------------------------------------- GCP
+[providers.gcp]
+status = "partial"
+file = "container"
+notes = "The Kubernetes service account is bound to the linked Google service account with roles/iam.workloadIdentityUser; the links become IAM members on each resource."
+
+[[providers.gcp.blocks]]
+key = "main"
+resource = "google_service_account_iam_member"
+
+[providers.gcp.blocks.args]
+service_account_id = { relation = "iam_binding", attr = "name" }
+role               = { value = "roles/iam.workloadIdentityUser" }
+# The member is `<workload pool>[<namespace>/<service account>]`, and the pool is read off
+# the cluster rather than rebuilt from var.project, so the binding follows the cluster.
+member             = { func = "format", args = [ { value = "serviceAccount:%s[%s/%s]" }, { relation = "attachment", target_type = "kubernetes_cluster", attr = "workload_identity_config.0.workload_pool" }, { field = "namespace" }, { field = "service_account", fallback = { field = "name", transform = "kebab" } } ] }
+
+[[providers.gcp.blocks]]
+key = "publish"
+resource = "google_pubsub_topic_iam_member"
+for_each_relation = "sends_to"
+for_each_target_type = "event_queue"
+
+[providers.gcp.blocks.args]
+topic  = { target = "id" }
+role   = { value = "roles/pubsub.publisher" }
+member = { relation = "iam_binding", attr = "member" }
+
+[[providers.gcp.blocks]]
+key = "publish_topic"
+resource = "google_pubsub_topic_iam_member"
+for_each_relation = "sends_to"
+for_each_target_type = "topic"
+
+[providers.gcp.blocks.args]
+topic  = { target = "id" }
+role   = { value = "roles/pubsub.publisher" }
+member = { relation = "iam_binding", attr = "member" }
+
+[[providers.gcp.blocks]]
+key = "consume"
+resource = "google_pubsub_subscription_iam_member"
+for_each_relation = "attribute_reference"
+for_each_target_type = "event_queue"
+
+[providers.gcp.blocks.args]
+subscription = { target = "id", block = "sub" }
+role         = { value = "roles/pubsub.subscriber" }
+member       = { relation = "iam_binding", attr = "member" }
+
+[[providers.gcp.blocks]]
+key = "secret_read"
+resource = "google_secret_manager_secret_iam_member"
+for_each_relation = "reads"
+
+[providers.gcp.blocks.args]
+secret_id = { target = "id" }
+role      = { value = "roles/secretmanager.secretAccessor" }
+member    = { relation = "iam_binding", attr = "member" }
+
+[[providers.gcp.blocks]]
+key = "bucket_rw"
+resource = "google_storage_bucket_iam_member"
+for_each_relation = "attribute_reference"
+for_each_target_type = "object_storage"
+
+[providers.gcp.blocks.args]
+bucket = { target = "name" }
+role   = { value = "roles/storage.objectAdmin" }
+member = { relation = "iam_binding", attr = "member" }
+
+[providers.gcp.outputs]
+member = { attr = "member", description = "Workload identity member (serviceAccount:<workload pool>[<ns>/<sa>])" }
+
+[[providers.gcp.manual_steps]]
+title = "Annotate the ServiceAccount"
+body = """
+Create the ServiceAccount `<namespace>/<service account>` in the cluster and annotate it
+
+    iam.gke.io/gcp-service-account: <email of the linked service account>
+
+taking the email from the linked Role's `email` output, then set `serviceAccountName` on
+the pod template. Without the annotation the pods fall back to the node's service account.
+"""
+
+[[providers.gcp.manual_steps]]
+title = "Database and cache access is not an IAM grant"
+when = { any = [ { relation = "attribute_reference", target_type = "relational_database" }, { relation = "attribute_reference", target_type = "cache" } ] }
+body = """
+No IAM member is generated for a linked database or cache. Cloud SQL accepts the service
+account through the Cloud SQL Auth Proxy with `roles/cloudsql.client`, which also needs the
+proxy as a sidecar; Memorystore has no IAM data plane. Link a Secret with the credentials
+instead.
+"""

@@ -327,6 +327,45 @@ Three mechanisms were added to carry this: a relation condition may look at **in
 edges, a provider definition may declare **helper providers** (`hashicorp/random`, pulled
 into `required_providers` only when a `random_*` resource is emitted) and where its
 **default tags** go. `examples/hardened.ttg.json` exercises the lot on all three providers.
+## Gap report WP2 — the Kubernetes story (done 2026-09-14)
+
+Gap-report items 2.1, 2.5, 2.6, 2.14, 2.15 and the workload half of 6.2. The curated
+`kubernetes_cluster` had exactly one node pool with three sizes, roles could not be
+trusted by Kubernetes, and only Functions turned their links into a policy.
+
+- **`kubernetes_node_pool`** — extra pools linked to a cluster with 'Runs on'
+  (`aws_eks_node_group` on the cluster's node role, `azurerm_kubernetes_cluster_node_pool`,
+  `google_container_node_pool`). Size class with a per-provider instance-type override,
+  min / desired / max (0 allowed), spot, GPU, node labels and taints. A pool with no
+  'Subnets' link inherits the cluster's: a relation source cannot reach a target's
+  relations, so the fallback reads `vpc_config[0].subnet_ids` /
+  `default_node_pool[0].vnet_subnet_id` off the emitted cluster.
+- **`kubernetes_workload`** — a deployment inside a cluster, drawn for its cloud identity.
+  AWS `aws_eks_pod_identity_association` plus an `aws_iam_role_policy` built from the
+  links; Azure `azurerm_federated_identity_credential` on the linked identity plus the
+  role assignments `function.toml` uses; GCP a `roles/iam.workloadIdentityUser` member on
+  the linked service account plus IAM members per link. Every provider is `partial`: the
+  Deployment, the ServiceAccount and its annotations stay in the repository.
+  `container_app` now derives the same AWS policy from its queue and topic links.
+- **`iam_role.trusted_service = "kubernetes"`** — the AWS trust policy becomes
+  `pods.eks.amazonaws.com` with `sts:AssumeRole` + `sts:TagSession`. Azure and GCP
+  identities are generic, so nothing changes there.
+- **Cluster** — `logs_to` a Log Group (`enabled_cluster_log_types`, an AKS diagnostic
+  setting, GKE `logging_config`), a Kubernetes version, private API endpoint and public
+  access CIDRs in the block each provider already writes, and an `addons` list rendered as
+  `aws_eks_addon` resources on AWS with honest notes for AKS and GKE. Workload identity
+  (`oidc_issuer_enabled` / `workload_identity_enabled`, `workload_identity_config`,
+  `access_config`) is switched on so the Workload type has something to bind to.
+- **Load balancer → cluster** — AWS gives the target group `target_type = "ip"` and no
+  attachments, with a `TargetGroupBinding` manual step; Azure and GCP say what an AGIC
+  Application Gateway or a standalone NEG needs instead.
+- **Mapping language** — `wrap = "map"` (a `string_list` of `key=value` as an object) and
+  `column = "<item>"` (one column of a `struct_list` as a list). A `when`-guarded manual
+  step that names an unexpressible relation now replaces the generic "link by hand" entry.
+- **Reachability** — a workload initiates traffic and lives in its cluster's subnets.
+- `examples/kubernetes.ttg.json`: a cluster with a default pool, a GPU spot pool that
+  scales to zero, two workloads sharing a queue, a load balancer in front of the cluster
+  and control-plane logs.
 
 ## Explicitly still out of scope
 

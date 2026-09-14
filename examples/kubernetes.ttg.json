@@ -1,0 +1,560 @@
+{
+  "schema_version": 1,
+  "name": "kubernetes",
+  "settings": {
+    "tool": "opentofu",
+    "target_provider": "aws",
+    "provider_settings": {
+      "aws": {
+        "region": "eu-west-2"
+      },
+      "azure": {
+        "location": "uksouth"
+      }
+    },
+    "backend": null,
+    "state_encryption": false
+  },
+  "containers": {
+    "rg-k8s": {
+      "id": "rg-k8s",
+      "name": "kubernetes",
+      "container_type": "resource_group",
+      "config": {},
+      "provider_config": {},
+      "position": {
+        "x": 40,
+        "y": 40
+      },
+      "size": {
+        "w": 1760,
+        "h": 1180
+      },
+      "parent": null,
+      "manual": false
+    },
+    "vnet-core": {
+      "id": "vnet-core",
+      "name": "core",
+      "container_type": "virtual_network",
+      "config": {
+        "cidr_block": "10.0.0.0/16"
+      },
+      "provider_config": {
+        "aws": {
+          "enable_dns_hostnames": true
+        }
+      },
+      "position": {
+        "x": 80,
+        "y": 100
+      },
+      "size": {
+        "w": 1100,
+        "h": 800
+      },
+      "parent": "rg-k8s",
+      "manual": false
+    },
+    "kv-platform": {
+      "id": "kv-platform",
+      "name": "platform secrets",
+      "container_type": "key_vault",
+      "config": {},
+      "provider_config": {
+        "azure": {
+          "vault_name": "k8s-kv-x7q2"
+        }
+      },
+      "position": {
+        "x": 80,
+        "y": 940
+      },
+      "size": {
+        "w": 620,
+        "h": 180
+      },
+      "parent": "rg-k8s",
+      "manual": false
+    }
+  },
+  "nodes": {
+    "subnet-edge-a": {
+      "id": "subnet-edge-a",
+      "name": "edge a",
+      "resource_type": "subnet",
+      "config": {
+        "cidr_block": "10.0.1.0/24"
+      },
+      "provider_config": {
+        "aws": {
+          "availability_zone": "eu-west-2a",
+          "map_public_ip": true
+        },
+        "azure": {
+          "delegation": "none"
+        }
+      },
+      "position": {
+        "x": 120,
+        "y": 180
+      },
+      "parent": "vnet-core",
+      "manual": false
+    },
+    "subnet-edge-b": {
+      "id": "subnet-edge-b",
+      "name": "edge b",
+      "resource_type": "subnet",
+      "config": {
+        "cidr_block": "10.0.2.0/24"
+      },
+      "provider_config": {
+        "aws": {
+          "availability_zone": "eu-west-2b",
+          "map_public_ip": true
+        },
+        "azure": {
+          "delegation": "none"
+        }
+      },
+      "position": {
+        "x": 120,
+        "y": 260
+      },
+      "parent": "vnet-core",
+      "manual": false
+    },
+    "subnet-nodes-a": {
+      "id": "subnet-nodes-a",
+      "name": "nodes a",
+      "resource_type": "subnet",
+      "config": {
+        "cidr_block": "10.0.10.0/24"
+      },
+      "provider_config": {
+        "aws": {
+          "availability_zone": "eu-west-2a"
+        },
+        "azure": {
+          "delegation": "none"
+        }
+      },
+      "position": {
+        "x": 120,
+        "y": 380
+      },
+      "parent": "vnet-core",
+      "manual": false
+    },
+    "subnet-nodes-b": {
+      "id": "subnet-nodes-b",
+      "name": "nodes b",
+      "resource_type": "subnet",
+      "config": {
+        "cidr_block": "10.0.11.0/24"
+      },
+      "provider_config": {
+        "aws": {
+          "availability_zone": "eu-west-2b"
+        },
+        "azure": {
+          "delegation": "none"
+        }
+      },
+      "position": {
+        "x": 120,
+        "y": 460
+      },
+      "parent": "vnet-core",
+      "manual": false
+    },
+    "igw-core": {
+      "id": "igw-core",
+      "name": "internet",
+      "resource_type": "internet_gateway",
+      "config": {},
+      "provider_config": {},
+      "position": {
+        "x": 400,
+        "y": 180
+      },
+      "parent": "vnet-core",
+      "manual": false
+    },
+    "nat-core": {
+      "id": "nat-core",
+      "name": "egress nat",
+      "resource_type": "nat_gateway",
+      "config": {},
+      "provider_config": {},
+      "position": {
+        "x": 400,
+        "y": 260
+      },
+      "parent": "vnet-core",
+      "manual": false
+    },
+    "rt-public": {
+      "id": "rt-public",
+      "name": "public routes",
+      "resource_type": "route_table",
+      "config": {},
+      "provider_config": {},
+      "position": {
+        "x": 400,
+        "y": 340
+      },
+      "parent": "vnet-core",
+      "manual": false
+    },
+    "rt-private": {
+      "id": "rt-private",
+      "name": "private routes",
+      "resource_type": "route_table",
+      "config": {},
+      "provider_config": {},
+      "position": {
+        "x": 400,
+        "y": 420
+      },
+      "parent": "vnet-core",
+      "manual": false
+    },
+    "k8s-platform": {
+      "id": "k8s-platform",
+      "name": "platform",
+      "resource_type": "kubernetes_cluster",
+      "config": {
+        "node_size": "medium",
+        "node_count": 2,
+        "min_nodes": 2,
+        "max_nodes": 4,
+        "private_endpoint": false,
+        "addons": [
+          "pod_identity_agent",
+          "ebs_csi",
+          "metrics_server"
+        ]
+      },
+      "provider_config": {},
+      "position": {
+        "x": 700,
+        "y": 380
+      },
+      "parent": "vnet-core",
+      "manual": false
+    },
+    "pool-gpu": {
+      "id": "pool-gpu",
+      "name": "gpu",
+      "resource_type": "kubernetes_node_pool",
+      "config": {
+        "size": "large",
+        "min_nodes": 0,
+        "max_nodes": 4,
+        "desired_nodes": 0,
+        "spot": true,
+        "gpu": true,
+        "labels": [
+          "workload=asr"
+        ],
+        "taints": [
+          {
+            "key": "nvidia.com/gpu",
+            "value": "present",
+            "effect": "NoSchedule"
+          }
+        ]
+      },
+      "provider_config": {
+        "aws": {
+          "instance_type": "g5.xlarge"
+        },
+        "azure": {
+          "pool_name": "gpu",
+          "instance_type": "Standard_NC6s_v3"
+        },
+        "gcp": {
+          "instance_type": "n1-standard-4",
+          "accelerator_type": "nvidia-tesla-t4",
+          "accelerator_count": 1
+        }
+      },
+      "position": {
+        "x": 700,
+        "y": 560
+      },
+      "parent": "vnet-core",
+      "manual": false
+    },
+    "lb-edge": {
+      "id": "lb-edge",
+      "name": "edge",
+      "resource_type": "load_balancer",
+      "config": {
+        "scheme": "internet_facing",
+        "protocol": "http",
+        "listener_port": 80,
+        "target_port": 8080
+      },
+      "provider_config": {},
+      "position": {
+        "x": 700,
+        "y": 180
+      },
+      "parent": "vnet-core",
+      "manual": false
+    },
+    "role-api": {
+      "id": "role-api",
+      "name": "api role",
+      "resource_type": "iam_role",
+      "config": {
+        "trusted_service": "kubernetes",
+        "permissions": "none"
+      },
+      "provider_config": {},
+      "position": {
+        "x": 1260,
+        "y": 180
+      },
+      "parent": "rg-k8s",
+      "manual": false
+    },
+    "role-asr": {
+      "id": "role-asr",
+      "name": "asr role",
+      "resource_type": "iam_role",
+      "config": {
+        "trusted_service": "kubernetes",
+        "permissions": "none"
+      },
+      "provider_config": {},
+      "position": {
+        "x": 1260,
+        "y": 260
+      },
+      "parent": "rg-k8s",
+      "manual": false
+    },
+    "wl-api": {
+      "id": "wl-api",
+      "name": "api",
+      "resource_type": "kubernetes_workload",
+      "config": {
+        "namespace": "platform",
+        "service_account": "api"
+      },
+      "provider_config": {},
+      "position": {
+        "x": 1260,
+        "y": 380
+      },
+      "parent": "rg-k8s",
+      "manual": false
+    },
+    "wl-asr": {
+      "id": "wl-asr",
+      "name": "asr worker",
+      "resource_type": "kubernetes_workload",
+      "config": {
+        "namespace": "platform",
+        "service_account": "asr-worker"
+      },
+      "provider_config": {},
+      "position": {
+        "x": 1260,
+        "y": 480
+      },
+      "parent": "rg-k8s",
+      "manual": false
+    },
+    "q-jobs": {
+      "id": "q-jobs",
+      "name": "jobs",
+      "resource_type": "event_queue",
+      "config": {
+        "visibility_timeout_seconds": 300
+      },
+      "provider_config": {
+        "azure": {
+          "namespace_name": "k8s-bus-x7q2"
+        }
+      },
+      "position": {
+        "x": 1560,
+        "y": 380
+      },
+      "parent": "rg-k8s",
+      "manual": false
+    },
+    "obj-transcripts": {
+      "id": "obj-transcripts",
+      "name": "transcripts",
+      "resource_type": "object_storage",
+      "config": {
+        "versioning": false
+      },
+      "provider_config": {
+        "aws": {
+          "bucket_name": "k8s-transcripts-x7q2"
+        },
+        "azure": {
+          "account_name": "k8stranscriptsx7q2",
+          "container_name": "data",
+          "replication": "LRS"
+        },
+        "gcp": {
+          "bucket_name": "k8s-transcripts-x7q2"
+        }
+      },
+      "position": {
+        "x": 1560,
+        "y": 480
+      },
+      "parent": "rg-k8s",
+      "manual": false
+    },
+    "sec-api-key": {
+      "id": "sec-api-key",
+      "name": "api key",
+      "resource_type": "secret",
+      "config": {},
+      "provider_config": {},
+      "position": {
+        "x": 120,
+        "y": 990
+      },
+      "parent": "kv-platform",
+      "manual": false
+    },
+    "log-cluster": {
+      "id": "log-cluster",
+      "name": "cluster logs",
+      "resource_type": "log_group",
+      "config": {
+        "retention_days": "30"
+      },
+      "provider_config": {},
+      "position": {
+        "x": 1560,
+        "y": 180
+      },
+      "parent": "rg-k8s",
+      "manual": false
+    }
+  },
+  "edges": [
+    {
+      "source": "nat-core",
+      "target": "subnet-edge-a",
+      "relation": "network_membership"
+    },
+    {
+      "source": "rt-public",
+      "target": "igw-core",
+      "relation": "attribute_reference"
+    },
+    {
+      "source": "rt-public",
+      "target": "subnet-edge-a",
+      "relation": "attachment"
+    },
+    {
+      "source": "rt-public",
+      "target": "subnet-edge-b",
+      "relation": "attachment"
+    },
+    {
+      "source": "rt-private",
+      "target": "nat-core",
+      "relation": "attribute_reference"
+    },
+    {
+      "source": "rt-private",
+      "target": "subnet-nodes-a",
+      "relation": "attachment"
+    },
+    {
+      "source": "rt-private",
+      "target": "subnet-nodes-b",
+      "relation": "attachment"
+    },
+    {
+      "source": "k8s-platform",
+      "target": "subnet-nodes-a",
+      "relation": "network_membership"
+    },
+    {
+      "source": "k8s-platform",
+      "target": "subnet-nodes-b",
+      "relation": "network_membership"
+    },
+    {
+      "source": "k8s-platform",
+      "target": "log-cluster",
+      "relation": "logs_to"
+    },
+    {
+      "source": "pool-gpu",
+      "target": "k8s-platform",
+      "relation": "attachment"
+    },
+    {
+      "source": "lb-edge",
+      "target": "subnet-edge-a",
+      "relation": "network_membership"
+    },
+    {
+      "source": "lb-edge",
+      "target": "subnet-edge-b",
+      "relation": "network_membership"
+    },
+    {
+      "source": "lb-edge",
+      "target": "k8s-platform",
+      "relation": "attachment"
+    },
+    {
+      "source": "wl-api",
+      "target": "k8s-platform",
+      "relation": "attachment"
+    },
+    {
+      "source": "wl-api",
+      "target": "role-api",
+      "relation": "iam_binding"
+    },
+    {
+      "source": "wl-api",
+      "target": "sec-api-key",
+      "relation": "reads"
+    },
+    {
+      "source": "wl-api",
+      "target": "q-jobs",
+      "relation": "sends_to"
+    },
+    {
+      "source": "wl-asr",
+      "target": "k8s-platform",
+      "relation": "attachment"
+    },
+    {
+      "source": "wl-asr",
+      "target": "role-asr",
+      "relation": "iam_binding"
+    },
+    {
+      "source": "wl-asr",
+      "target": "q-jobs",
+      "relation": "attribute_reference"
+    },
+    {
+      "source": "wl-asr",
+      "target": "obj-transcripts",
+      "relation": "attribute_reference"
+    }
+  ]
+}

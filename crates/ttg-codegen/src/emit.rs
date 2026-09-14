@@ -233,6 +233,7 @@ pub fn generate(p: &Project, cat: &Catalog, provider: &str, tool: Tool) -> Resul
         match em.status(&e) {
             Status::Emit(m) => {
                 let consumed = consumed_relations(m);
+                let documented = diagnostics::relations_with_manual_step(m);
                 let primary = primary_key(m);
                 let file = m.file.clone().unwrap_or(def.resource.category.clone());
                 for d in &m.data {
@@ -278,7 +279,7 @@ pub fn generate(p: &Project, cat: &Catalog, provider: &str, tool: Tool) -> Resul
                         };
                         let mut block = em.build_block("resource", &e, m, b, &local, item)?;
                         if b.key == primary && n == 0 {
-                            let deps = em.explicit_depends(&e, &consumed);
+                            let deps = em.explicit_depends(&e, &consumed, &documented);
                             if !deps.is_empty() {
                                 block = with_depends_on(block, deps);
                             }
@@ -645,7 +646,47 @@ fn apply_wrap(e: Expression, wrap: Option<Wrap>) -> Expression {
     match (wrap, e) {
         (Some(Wrap::List), Expression::Array(a)) => Expression::Array(a),
         (Some(Wrap::List), other) => Expression::Array(vec![other]),
+        (Some(Wrap::Map), Expression::Array(a)) => Expression::Object(key_value_object(a)),
+        // The validator only allows `map` on a string_list field, which is always an array.
+        (Some(Wrap::Map), other) => other,
         (None, other) => other,
+    }
+}
+
+/// `["team=asr", "gpu"]` -> `{ team = "asr", gpu = "" }`. Splitting on the first `=` keeps
+/// values that contain one (a label value may not, but a tag value may).
+fn key_value_object(entries: Vec<Expression>) -> Object<ObjectKey, Expression> {
+    let mut o = Object::new();
+    for entry in entries {
+        let Expression::String(s) = entry else { continue };
+        let (k, v) = s.split_once('=').unwrap_or((s.as_str(), ""));
+        o.insert(object_key(k.trim()), Expression::String(v.trim().to_string()));
+    }
+    o
+}
+
+/// The values of one sub-field across the rows of a `struct_list` value, as a list.
+/// `None` when the value is not a table or no row carries the sub-field.
+fn column_expr(v: &Value, column: &str) -> Option<Expression> {
+    let cells: Vec<Expression> = v
+        .as_records()?
+        .iter()
+        .filter_map(|r| r.get(column))
+        .map(value_expr)
+        .collect();
+    (!cells.is_empty()).then_some(Expression::Array(cells))
+}
+
+/// A field value shaped by the `column`, `transform` and `wrap` modifiers.
+fn shaped_field(
+    v: &Value,
+    column: Option<&str>,
+    t: Option<ttg_catalog::Transform>,
+    w: Option<Wrap>,
+) -> Option<Expression> {
+    match column {
+        Some(c) => column_expr(v, c),
+        None => Some(apply_wrap(value_expr(&transformed(v, t)), w)),
     }
 }
 
@@ -1053,21 +1094,24 @@ impl<'a> Emitter<'a> {
                 } else {
                     e.field(&f.field).cloned()
                 };
-                match v {
-                    Some(v) if !v.is_empty() => {
-                        Some(apply_wrap(value_expr(&transformed(&v, f.transform)), f.wrap))
-                    }
-                    _ => match &f.fallback {
+                match v
+                    .filter(|v| !v.is_empty())
+                    .and_then(|v| shaped_field(&v, f.column.as_deref(), f.transform, f.wrap))
+                {
+                    Some(x) => Some(x),
+                    None => match &f.fallback {
                         Some(fb) => self.resolve(e, m, fb, &format!("{at}.fallback"), item)?,
                         None => None,
                     },
                 }
             }
-            ArgSource::ProviderField(f) => match e.provider_field(self.provider, &f.provider_field) {
-                Some(v) if !v.is_empty() => {
-                    Some(apply_wrap(value_expr(&transformed(v, f.transform)), f.wrap))
-                }
-                _ => match &f.fallback {
+            ArgSource::ProviderField(f) => match e
+                .provider_field(self.provider, &f.provider_field)
+                .filter(|v| !v.is_empty())
+                .and_then(|v| shaped_field(v, f.column.as_deref(), f.transform, f.wrap))
+            {
+                Some(x) => Some(x),
+                None => match &f.fallback {
                     Some(fb) => self.resolve(e, m, fb, &format!("{at}.fallback"), item)?,
                     None => None,
                 },
@@ -1220,7 +1264,8 @@ impl<'a> Emitter<'a> {
                         Some(fb) => self.resolve(e, m, fb, &format!("{at}.fallback"), item)?,
                         None => None,
                     },
-                    (false, Some(Wrap::List)) => Some(Expression::Array(exprs)),
+                    // Only `list` is valid here; the validator rejects `map` on a relation.
+                    (false, Some(_)) => Some(Expression::Array(exprs)),
                     (false, None) => Some(exprs.remove(0)),
                 }
             }
@@ -1245,7 +1290,7 @@ impl<'a> Emitter<'a> {
                         .collect();
                     match (exprs.is_empty(), s.wrap, repeated(bdef)) {
                         (true, _, _) => None,
-                        (false, Some(Wrap::List), _) => Some(Expression::Array(exprs)),
+                        (false, Some(_), _) => Some(Expression::Array(exprs)),
                         (false, None, true) => Some(Expression::Array(exprs)),
                         (false, None, false) => Some(exprs.remove(0)),
                     }
@@ -1426,18 +1471,24 @@ impl<'a> Emitter<'a> {
     }
 
     /// `depends_on` targets for edges the mapping did not consume, plus `depends_on` edges.
-    fn explicit_depends(&mut self, e: &EntityRef<'a>, consumed: &[Consumed]) -> Vec<Expression> {
+    fn explicit_depends(
+        &mut self,
+        e: &EntityRef<'a>,
+        consumed: &[Consumed],
+        documented: &[Consumed],
+    ) -> Vec<Expression> {
         let mut out = Vec::new();
         let mut seen = HashSet::new();
         let edges: Vec<_> = self.p.edges_from(e.id).cloned().collect();
+        let covers = |set: &[Consumed], rel: &str, ty: &str| {
+            set.iter()
+                .any(|c| c.relation == rel && c.target_type.as_deref().is_none_or(|tt| tt == ty))
+        };
         for edge in edges {
             let Some(t) = self.p.entity(&edge.target) else {
                 continue;
             };
-            let is_consumed = consumed.iter().any(|c| {
-                c.relation == edge.relation.key()
-                    && c.target_type.as_deref().is_none_or(|tt| tt == t.resource_type)
-            });
+            let is_consumed = covers(consumed, edge.relation.key(), t.resource_type);
             if edge.relation != Relation::DependsOn && is_consumed {
                 continue;
             }
@@ -1468,7 +1519,9 @@ impl<'a> Emitter<'a> {
                     if seen.insert((bdef.resource.clone(), local.clone())) {
                         out.push(traversal(&bdef.resource, &local, ""));
                     }
-                    if edge.relation != Relation::DependsOn {
+                    if edge.relation != Relation::DependsOn
+                        && !covers(documented, edge.relation.key(), t.resource_type)
+                    {
                         self.manual.push(ManualEntry {
                             entity: Some(e.id.to_string()),
                             title: format!(

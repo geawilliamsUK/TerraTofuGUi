@@ -28,9 +28,9 @@ name = "trusted_service"
 label = "Assumable by"
 type = "enum"
 required = true
-options = ["compute", "serverless", "container"]
+options = ["compute", "serverless", "container", "kubernetes"]
 default = "compute"
-description = "Which kind of workload may assume this role: virtual machines, functions, or container apps (ECS tasks)."
+description = "Which kind of workload may assume this role: virtual machines, functions, container apps (ECS tasks), or pods in a Kubernetes cluster. Only AWS needs this: an Azure user-assigned identity and a GCP service account are assumable by anything that is given them."
 
 [[fields]]
 name = "permissions"
@@ -63,9 +63,11 @@ Version = { value = "2012-10-17" }
 
 [[providers.aws.blocks.args.assume_role_policy.args.object.Statement.list]]
 [providers.aws.blocks.args.assume_role_policy.args.object.Statement.list.object]
-Effect    = { value = "Allow" }
-Action    = { value = "sts:AssumeRole" }
-Principal = { object = { Service = { map = "trusted_service", table = { compute = "ec2.amazonaws.com", serverless = "lambda.amazonaws.com", container = "ecs-tasks.amazonaws.com" } } } }
+Effect = { value = "Allow" }
+# EKS Pod Identity tags the session with the pod's identity, so the trust policy has to
+# allow sts:TagSession as well as sts:AssumeRole.
+Action    = { if = { field = "trusted_service", equals = "kubernetes" }, then = { value = ["sts:AssumeRole", "sts:TagSession"] }, else = { value = "sts:AssumeRole" } }
+Principal = { object = { Service = { map = "trusted_service", table = { compute = "ec2.amazonaws.com", serverless = "lambda.amazonaws.com", container = "ecs-tasks.amazonaws.com", kubernetes = "pods.eks.amazonaws.com" } } } }
 
 # Instance profile: only needed when EC2 assumes the role.
 [[providers.aws.blocks]]
@@ -126,6 +128,7 @@ principal_id         = { self_block = "main", attr = "principal_id" }
 [providers.azure.outputs]
 id           = { attr = "id", description = "Managed identity id" }
 principal_id = { attr = "principal_id", description = "Service principal object id" }
+client_id    = { attr = "client_id", description = "Application (client) id — the value a Kubernetes ServiceAccount is annotated with" }
 
 [[providers.azure.manual_steps]]
 title = "Check the role assignment scope"

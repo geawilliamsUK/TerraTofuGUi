@@ -581,24 +581,82 @@ fn check_nested(ctx: &mut SourceCtx, n: &NestedBlockDef, errs: &mut Vec<String>)
     ctx.in_relation = outer_rel;
 }
 
+/// `column` and `wrap = "map"` both read a list field in a particular shape, so the field
+/// must be declared with the matching type for the shape to mean anything.
+fn check_shape(
+    ctx: &mut SourceCtx,
+    at: &str,
+    declared: Option<&FieldDef>,
+    column: Option<&str>,
+    wrap: Option<Wrap>,
+    transform: Option<Transform>,
+    errs: &mut Vec<String>,
+) {
+    let what = ctx.what.clone();
+    let e = |msg: String| format!("{what}{at}: {msg}");
+    if let Some(col) = column {
+        ctx.v2 = true;
+        if wrap.is_some() || transform.is_some() {
+            errs.push(e("column cannot be combined with wrap or transform".into()));
+        }
+        match declared {
+            Some(f) if f.field_type == FieldType::StructList => {
+                if !f.items.iter().any(|i| i.name == col) {
+                    errs.push(e(format!("column '{col}' is not an item of '{}'", f.name)));
+                }
+            }
+            Some(f) => errs.push(e(format!(
+                "column needs a struct_list field; '{}' is {:?}",
+                f.name, f.field_type
+            ))),
+            None => {}
+        }
+    }
+    if wrap == Some(Wrap::Map) {
+        ctx.v2 = true;
+        if let Some(f) = declared {
+            if f.field_type != FieldType::StringList {
+                errs.push(e(format!(
+                    "wrap = \"map\" needs a string_list of key=value entries; '{}' is {:?}",
+                    f.name, f.field_type
+                )));
+            }
+        }
+    }
+}
+
+/// `wrap = "map"` reads a `key=value` string list, which only a field can be.
+fn check_no_map_wrap(ctx: &SourceCtx, at: &str, wrap: Option<Wrap>, errs: &mut Vec<String>) {
+    if wrap == Some(Wrap::Map) {
+        errs.push(format!(
+            "{}{at}: wrap = \"map\" is only valid on a field or provider_field",
+            ctx.what
+        ));
+    }
+}
+
 fn check_source(ctx: &mut SourceCtx, at: &str, src: &ArgSource, errs: &mut Vec<String>) {
     let what = ctx.what.clone();
     let e = |msg: String| format!("{what}{at}: {msg}");
     match src {
         ArgSource::Literal(_) | ArgSource::Raw(_) => {}
         ArgSource::Field(f) => {
-            if f.field != "name" && !ctx.fields.iter().any(|x| x.name == f.field) {
+            let declared = ctx.fields.iter().find(|x| x.name == f.field);
+            if f.field != "name" && declared.is_none() {
                 errs.push(e(format!("undeclared field '{}'", f.field)));
             }
+            check_shape(ctx, at, declared, f.column.as_deref(), f.wrap, f.transform, errs);
             if let Some(fb) = &f.fallback {
                 ctx.v2 = true;
                 check_source(ctx, &format!("{at}.fallback"), fb, errs);
             }
         }
         ArgSource::ProviderField(f) => {
-            if !ctx.provider_fields.iter().any(|x| x.name == f.provider_field) {
+            let declared = ctx.provider_fields.iter().find(|x| x.name == f.provider_field);
+            if declared.is_none() {
                 errs.push(e(format!("undeclared provider field '{}'", f.provider_field)));
             }
+            check_shape(ctx, at, declared, f.column.as_deref(), f.wrap, f.transform, errs);
             if let Some(fb) = &f.fallback {
                 ctx.v2 = true;
                 check_source(ctx, &format!("{at}.fallback"), fb, errs);
@@ -613,7 +671,15 @@ fn check_source(ctx: &mut SourceCtx, at: &str, src: &ArgSource, errs: &mut Vec<S
             for ph in crate::fields::template_placeholders(&t.template) {
                 if let Some(item) = ph.strip_prefix("item.") {
                     ctx.v2 = true;
-                    check_item_ref(ctx, at, item, errs);
+                    // `{item.index}` is the row position rather than one of its fields.
+                    if item != "index" {
+                        check_item_ref(ctx, at, item, errs);
+                    } else if ctx.item_fields.is_none() {
+                        errs.push(e(
+                            "template placeholder '{item.index}' is only valid inside a for_each_field block"
+                                .into(),
+                        ));
+                    }
                     continue;
                 }
                 if ph.starts_with("target.") {
@@ -653,6 +719,7 @@ fn check_source(ctx: &mut SourceCtx, at: &str, src: &ArgSource, errs: &mut Vec<S
         }
         ArgSource::Relation(r) => {
             check_relation_ref(ctx, at, &r.relation, r.target_type.as_deref(), errs);
+            check_no_map_wrap(ctx, at, r.wrap, errs);
             if let Some(anc) = &r.ancestor {
                 ctx.v2 = true;
                 if !ctx.cat.is_container(anc) {
@@ -670,22 +737,26 @@ fn check_source(ctx: &mut SourceCtx, at: &str, src: &ArgSource, errs: &mut Vec<S
             }
         }
         ArgSource::SelfBlock(s) => {
+            check_no_map_wrap(ctx, at, s.wrap, errs);
             if !ctx.blocks.contains(&s.self_block.as_str()) {
                 errs.push(e(format!("self_block '{}' does not exist", s.self_block)));
             }
         }
         ArgSource::SelfData(s) => {
             ctx.v2 = true;
+            check_no_map_wrap(ctx, at, s.wrap, errs);
             if !ctx.data.contains(&s.self_data.as_str()) {
                 errs.push(e(format!("self_data '{}' does not exist", s.self_data)));
             }
         }
         ArgSource::Item(i) => {
             ctx.v2 = true;
+            check_no_map_wrap(ctx, at, i.wrap, errs);
             check_item_ref(ctx, at, &i.item, errs);
         }
         ArgSource::ItemRef(i) => {
             ctx.v2 = true;
+            check_no_map_wrap(ctx, at, i.wrap, errs);
             check_item_ref(ctx, at, &i.item_ref, errs);
         }
         ArgSource::EntityVar(v) => {
@@ -694,8 +765,9 @@ fn check_source(ctx: &mut SourceCtx, at: &str, src: &ArgSource, errs: &mut Vec<S
                 errs.push(e("entity_var name is empty".into()));
             }
         }
-        ArgSource::Target(_) => {
+        ArgSource::Target(t) => {
             ctx.v2 = true;
+            check_no_map_wrap(ctx, at, t.wrap, errs);
             if !ctx.in_relation {
                 errs.push(e("`target` is only valid inside a for_each_relation block".into()));
             }

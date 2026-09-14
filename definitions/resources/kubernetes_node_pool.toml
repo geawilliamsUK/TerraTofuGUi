@@ -1,0 +1,303 @@
+# Abstract type: Kubernetes Node Pool  (schema_version 2)
+#
+# An extra group of nodes attached to a Kubernetes Cluster. The cluster always carries one
+# default pool; every other pool — the spot pool, the GPU pool that scales to zero — is a
+# node pool node drawn next to it and linked with 'Runs on'.
+#
+#   AWS:   aws_eks_node_group, reusing the cluster's node IAM role (its `node_role` block).
+#   Azure: azurerm_kubernetes_cluster_node_pool on the linked cluster.
+#   GCP:   google_container_node_pool on the linked cluster.
+#
+# The pool's subnets default to the cluster's: a relation source cannot reach the target's
+# own relations, so the fallback reads the subnet ids straight off the emitted cluster
+# resource (`vpc_config.0.subnet_ids` / `default_node_pool.0.vnet_subnet_id`). Link
+# 'Subnets' explicitly only to pin the pool to a smaller set than the cluster's.
+
+schema_version = 2
+
+[resource]
+type = "kubernetes_node_pool"
+category = "container"
+display_name = "Kubernetes Node Pool"
+description = "An extra group of nodes on a Kubernetes cluster: its own size, scaling range, spot and GPU settings, labels and taints."
+kind = "node"
+allowed_parents = ["virtual_network", "resource_group"]
+icon = "POOL"
+
+[[fields]]
+name = "size"
+label = "Node size"
+type = "enum"
+required = true
+options = ["small", "medium", "large", "xlarge"]
+default = "medium"
+description = "Abstract size class, translated to a provider instance type. Override it per provider with 'Instance type' when you need a specific machine (a GPU pool always should)."
+
+[[fields]]
+name = "min_nodes"
+label = "Min nodes"
+type = "int"
+required = true
+default = 0
+description = "May be 0: an expensive pool then costs nothing while no pod requests it."
+
+[[fields]]
+name = "max_nodes"
+label = "Max nodes"
+type = "int"
+required = true
+default = 3
+
+[[fields]]
+name = "desired_nodes"
+label = "Desired nodes"
+type = "int"
+required = true
+default = 0
+
+[[fields]]
+name = "spot"
+label = "Spot / preemptible"
+type = "bool"
+default = false
+description = "Run on interruptible capacity. Cheap, but the provider may reclaim a node at any time; keep the workloads on it restartable."
+
+[[fields]]
+name = "gpu"
+label = "GPU nodes"
+type = "bool"
+default = false
+description = "Install the NVIDIA driver / GPU-capable image. The instance type must be a GPU machine as well."
+
+[[fields]]
+name = "labels"
+label = "Node labels"
+type = "string_list"
+description = "Kubernetes node labels as key=value, used by pod nodeSelectors (e.g. workload=asr)."
+
+[[fields]]
+name = "taints"
+label = "Taints"
+type = "struct_list"
+description = "Keep pods off this pool unless they tolerate the taint."
+
+[[fields.items]]
+name = "key"
+type = "string"
+required = true
+
+[[fields.items]]
+name = "value"
+type = "string"
+required = true
+description = "GKE requires a value; use a short marker such as \"true\" when the key alone is the signal."
+
+[[fields.items]]
+name = "effect"
+type = "enum"
+required = true
+options = ["NoSchedule", "PreferNoSchedule", "NoExecute"]
+default = "NoSchedule"
+
+[[relations]]
+kind = "attachment"
+label = "Runs on"
+targets = ["kubernetes_cluster"]
+cardinality = "one"
+
+[[relations]]
+kind = "network_membership"
+label = "Subnets (defaults to the cluster's)"
+providers = ["aws", "azure"]
+targets = ["subnet"]
+cardinality = "many"
+
+# ---------------------------------------------------------------- AWS
+[providers.aws]
+status = "partial"
+file = "container"
+
+[[providers.aws.fields]]
+name = "instance_type"
+label = "Instance type"
+type = "string"
+pattern = "^[a-z0-9]+[a-z0-9.-]*\\.[a-z0-9]+$"
+pattern_hint = "an EC2 instance type such as m5.xlarge or g5.2xlarge"
+description = "Overrides the size class. GPU pools need a GPU family (g5, g6, p4d, ...)."
+
+[[providers.aws.checks]]
+when = { all = [ { field = "gpu" }, { provider_field = "instance_type", absent = true } ] }
+message = "\"{name}\" asks for GPU nodes but no AWS instance type is set; the size class only picks CPU machines, so set 'Instance type' to a GPU family such as g5.xlarge"
+
+[[providers.aws.blocks]]
+key = "main"
+resource = "aws_eks_node_group"
+
+[providers.aws.blocks.args]
+cluster_name    = { relation = "attachment", target_type = "kubernetes_cluster", attr = "name" }
+node_group_name = { field = "name", transform = "kebab" }
+node_role_arn   = { relation = "attachment", target_type = "kubernetes_cluster", block = "node_role", attr = "arn" }
+subnet_ids      = { relation = "network_membership", attr = "id", wrap = "list", fallback = { relation = "attachment", target_type = "kubernetes_cluster", attr = "vpc_config.0.subnet_ids" } }
+instance_types  = { provider_field = "instance_type", wrap = "list", fallback = { map = "size", table = { small = ["t3.medium"], medium = ["t3.large"], large = ["m5.xlarge"], xlarge = ["m5.2xlarge"] } } }
+capacity_type   = { if = { field = "spot" }, then = { value = "SPOT" }, else = { value = "ON_DEMAND" } }
+ami_type        = { if = { field = "gpu" }, then = { value = "AL2023_x86_64_NVIDIA" }, else = { value = "AL2023_x86_64_STANDARD" } }
+labels          = { field = "labels", wrap = "map" }
+tags            = { object = { Name = { field = "name" } } }
+depends_on      = { list = [ { relation = "attachment", target_type = "kubernetes_cluster", block = "node_policy_worker", attr = "" }, { relation = "attachment", target_type = "kubernetes_cluster", block = "node_policy_cni", attr = "" }, { relation = "attachment", target_type = "kubernetes_cluster", block = "node_policy_ecr", attr = "" } ] }
+
+[[providers.aws.blocks.nested]]
+block = "scaling_config"
+
+[providers.aws.blocks.nested.args]
+desired_size = { field = "desired_nodes" }
+min_size     = { field = "min_nodes" }
+max_size     = { field = "max_nodes" }
+
+[[providers.aws.blocks.nested]]
+block = "taint"
+for_each_field = "taints"
+
+[providers.aws.blocks.nested.args]
+key    = { item = "key" }
+value  = { item = "value" }
+effect = { map = "effect", table = { NoSchedule = "NO_SCHEDULE", PreferNoSchedule = "PREFER_NO_SCHEDULE", NoExecute = "NO_EXECUTE" } }
+
+[providers.aws.outputs]
+arn = { attr = "arn", description = "Node group ARN" }
+
+[[providers.aws.manual_steps]]
+title = "Scaling a pool to zero needs the Cluster Autoscaler"
+when = { field = "min_nodes", equals = "0" }
+body = """
+EKS itself never changes the node count. A pool whose minimum is 0 stays at its desired
+size until the **Cluster Autoscaler** (or Karpenter) runs in the cluster and is allowed to
+discover this group — tag it `k8s.io/cluster-autoscaler/enabled` and
+`k8s.io/cluster-autoscaler/<cluster name>`, and give the autoscaler's service account
+`autoscaling:DescribeAutoScalingGroups` / `SetDesiredCapacity` on it.
+"""
+
+# ---------------------------------------------------------------- Azure
+[providers.azure]
+status = "full"
+file = "container"
+notes = "AKS node pool names are limited to 12 lowercase alphanumeric characters; set 'Pool name' when the display name is longer. A spot pool is tainted kubernetes.azure.com/scalesetpriority=spot:NoSchedule by AKS itself."
+
+[[providers.azure.fields]]
+name = "pool_name"
+label = "Pool name"
+type = "string"
+pattern = "^[a-z][a-z0-9]{0,11}$"
+pattern_hint = "1-12 lowercase letters and digits, starting with a letter"
+description = "Defaults to the display name with everything but letters and digits removed."
+
+[[providers.azure.fields]]
+name = "instance_type"
+label = "VM size"
+type = "string"
+description = "Overrides the size class, e.g. Standard_NC6s_v3 for a GPU pool."
+
+[[providers.azure.checks]]
+when = { all = [ { field = "gpu" }, { provider_field = "instance_type", absent = true } ] }
+message = "\"{name}\" asks for GPU nodes but no Azure VM size is set; set 'VM size' to an N-series size such as Standard_NC6s_v3"
+
+[[providers.azure.blocks]]
+key = "main"
+resource = "azurerm_kubernetes_cluster_node_pool"
+
+[providers.azure.blocks.args]
+name                  = { provider_field = "pool_name", fallback = { field = "name", transform = "alnum" } }
+kubernetes_cluster_id = { relation = "attachment", target_type = "kubernetes_cluster", attr = "id" }
+vm_size               = { provider_field = "instance_type", fallback = { map = "size", table = { small = "Standard_B2s", medium = "Standard_D2s_v3", large = "Standard_D4s_v3", xlarge = "Standard_D8s_v3" } } }
+node_count            = { field = "desired_nodes" }
+auto_scaling_enabled  = { value = true }
+min_count             = { field = "min_nodes" }
+max_count             = { field = "max_nodes" }
+vnet_subnet_id        = { relation = "network_membership", attr = "id", fallback = { relation = "attachment", target_type = "kubernetes_cluster", attr = "default_node_pool.0.vnet_subnet_id" } }
+node_labels           = { field = "labels", wrap = "map" }
+node_taints           = { if = { field = "taints" }, then = { func = "formatlist", args = [ { value = "%s=%s:%s" }, { field = "taints", column = "key" }, { field = "taints", column = "value" }, { field = "taints", column = "effect" } ] } }
+# `gpu_driver` installs the NVIDIA driver; `gpu_instance` is the MIG partition profile and
+# only applies to A100 / H100 sizes, so it stays out of the abstract model.
+gpu_driver            = { if = { field = "gpu" }, then = { value = "Install" } }
+priority              = { if = { field = "spot" }, then = { value = "Spot" }, else = { value = "Regular" } }
+eviction_policy       = { if = { field = "spot" }, then = { value = "Delete" } }
+spot_max_price        = { if = { field = "spot" }, then = { value = -1 } }
+
+[providers.azure.outputs]
+id = { attr = "id", description = "Node pool id" }
+
+# ---------------------------------------------------------------- GCP
+[providers.gcp]
+status = "full"
+file = "container"
+notes = "A node pool on the linked GKE cluster. It inherits the cluster's network and subnetwork, so 'Subnets' is not used here."
+
+[[providers.gcp.fields]]
+name = "instance_type"
+label = "Machine type"
+type = "string"
+description = "Overrides the size class, e.g. n1-standard-4 for a T4 GPU pool."
+
+[[providers.gcp.fields]]
+name = "accelerator_type"
+label = "GPU type"
+type = "string"
+default = "nvidia-tesla-t4"
+description = "Accelerator attached to each node when 'GPU nodes' is on."
+
+[[providers.gcp.fields]]
+name = "accelerator_count"
+label = "GPUs per node"
+type = "int"
+default = 1
+
+[[providers.gcp.blocks]]
+key = "main"
+resource = "google_container_node_pool"
+
+[providers.gcp.blocks.args]
+name               = { field = "name", transform = "kebab" }
+cluster            = { relation = "attachment", target_type = "kubernetes_cluster", attr = "id" }
+location           = { var = "region" }
+initial_node_count = { field = "desired_nodes" }
+
+[[providers.gcp.blocks.nested]]
+block = "autoscaling"
+
+[providers.gcp.blocks.nested.args]
+min_node_count = { field = "min_nodes" }
+max_node_count = { field = "max_nodes" }
+
+[[providers.gcp.blocks.nested]]
+block = "node_config"
+
+[providers.gcp.blocks.nested.args]
+machine_type = { provider_field = "instance_type", fallback = { map = "size", table = { small = "e2-medium", medium = "e2-standard-4", large = "e2-standard-8", xlarge = "e2-standard-16" } } }
+oauth_scopes = { value = ["https://www.googleapis.com/auth/cloud-platform"] }
+spot         = { field = "spot" }
+labels       = { field = "labels", wrap = "map" }
+
+[[providers.gcp.blocks.nested.nested]]
+block = "guest_accelerator"
+when = { field = "gpu" }
+
+[providers.gcp.blocks.nested.nested.args]
+type  = { provider_field = "accelerator_type", fallback = { value = "nvidia-tesla-t4" } }
+count = { provider_field = "accelerator_count", fallback = { value = 1 } }
+
+[[providers.gcp.blocks.nested.nested.nested]]
+block = "gpu_driver_installation_config"
+
+[providers.gcp.blocks.nested.nested.nested.args]
+gpu_driver_version = { value = "LATEST" }
+
+[[providers.gcp.blocks.nested.nested]]
+block = "taint"
+for_each_field = "taints"
+
+[providers.gcp.blocks.nested.nested.args]
+key    = { item = "key" }
+value  = { item = "value" }
+effect = { map = "effect", table = { NoSchedule = "NO_SCHEDULE", PreferNoSchedule = "PREFER_NO_SCHEDULE", NoExecute = "NO_EXECUTE" } }
+
+[providers.gcp.outputs]
+id = { attr = "id", description = "Node pool id" }

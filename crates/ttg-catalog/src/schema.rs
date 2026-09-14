@@ -475,6 +475,9 @@ impl Transform {
 #[serde(rename_all = "lowercase")]
 pub enum Wrap {
     List,
+    /// Read a `string_list` of `key=value` entries as an object (schema_version 2).
+    /// Only valid on `field` / `provider_field`; see `kubernetes_node_pool`'s labels.
+    Map,
 }
 
 /// Where an argument's value comes from. Serialized as small inline TOML tables whose
@@ -546,6 +549,10 @@ pub struct SrcField {
     /// Used when the field is unset (v2).
     #[serde(default)]
     pub fallback: Option<Box<ArgSource>>,
+    /// One sub-field of a `struct_list` field, as the list of its values across the rows
+    /// (v2). Mutually exclusive with `wrap` and `transform`.
+    #[serde(default)]
+    pub column: Option<String>,
 }
 #[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -560,6 +567,10 @@ pub struct SrcProviderField {
     /// Used when the field is unset (v2).
     #[serde(default)]
     pub fallback: Option<Box<ArgSource>>,
+    /// One sub-field of a `struct_list` provider field, as the list of its values across
+    /// the rows (v2). Mutually exclusive with `wrap` and `transform`.
+    #[serde(default)]
+    pub column: Option<String>,
 }
 #[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]

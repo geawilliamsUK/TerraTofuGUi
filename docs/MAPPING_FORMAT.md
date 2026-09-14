@@ -165,6 +165,9 @@ simply omitted from the block.
 Modifiers accepted by `field`, `provider_field`, `relation`, `self_block`:
 
 - `wrap = "list"` — wrap a scalar in a list (`address_prefixes = ["10.0.1.0/24"]`).
+- `wrap = "map"` (v2, `field` / `provider_field` only) — read a `string_list` of
+  `key=value` entries as an object: `labels = { workload = "asr" }`. Everything after the
+  first `=` is the value; an entry without one gets an empty value.
 - `optional = true` — never fail, just omit.
 - `transform = "slug" | "kebab" | "lower" | "alnum"` (`field`, `provider_field`,
   `template`) — normalise a string, e.g. display name `App Server` → `app-server` for
@@ -225,6 +228,12 @@ a single item `value`). Top-level repeated resources are named `<slug>_<key>_<n>
 | `when = { item = "direction", equals = "ingress" }` | row filter; `not_equals` and `equals_item = "other"` also work |
 
 A `self_block` reference to a repeated block yields the list of all instances.
+
+**One column of a table field.** `{ field = "taints", column = "key" }` (also on
+`provider_field`) is the list of that sub-field's values across the rows of a `struct_list`,
+for arguments that want parallel lists rather than repeated blocks:
+`node_taints = formatlist("%s=%s:%s", ["gpu"], ["present"], ["NoSchedule"])`. It cannot be
+combined with `wrap` or `transform`, and an empty table falls through to `fallback`.
 
 **One block per linked resource.** `for_each_relation = "attachment"` (optionally
 narrowed with `for_each_target_type = "subnet"`) emits one block per target of that
@@ -323,7 +332,11 @@ holds the id of another node (the inspector shows a dropdown). Inside the row,
 group.
 
 **Conditional manual steps.** `[[providers.<id>.manual_steps]]` may carry `when = <condition>`;
-a `partial` mapping only warns when at least one step applies.
+a `partial` mapping only warns when at least one step applies. When that condition names a
+relation the mapping cannot express (a Load Balancer forwarding to a Kubernetes Cluster on
+Azure), the step replaces the generic "Link X to Y by hand" entry that §3 step 4 would
+otherwise add — the `depends_on` for ordering and the "cannot express" diagnostic stay,
+because they are still true.
 
 **Design-time checks.** `[[providers.<id>.checks]]` with `when`, optional
 `for_each_field`, `severity = "warning" | "error"` and a `message` using `{name}` and
@@ -351,8 +364,8 @@ Cross-resource network rules (CIDR overlap, zone vs region, one route table per 
 egress routes) are built into the engine rather than declared per definition; see
 ARCHITECTURE.md §6.0.
 
-See `definitions/resources/function.toml`, `security_group.toml`, `relational_database.toml`
-and `secret.toml` for worked examples of every feature.
+See `definitions/resources/function.toml`, `security_group.toml`, `relational_database.toml`,
+`secret.toml` and `kubernetes_node_pool.toml` for worked examples of every feature.
 
 ---
 

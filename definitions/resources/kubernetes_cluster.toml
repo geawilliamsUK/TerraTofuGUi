@@ -1,9 +1,16 @@
 # Abstract type: Kubernetes Cluster
 #
 # AWS: EKS — cluster IAM role + policy, aws_eks_cluster, node IAM role + 3 policies,
-#      aws_eks_node_group. Link two subnets in different availability zones.
+#      aws_eks_node_group (the default pool) and one aws_eks_addon per add-on.
+#      Link two subnets in different availability zones.
 # Azure: AKS — azurerm_kubernetes_cluster with a system-assigned identity and an
 #      autoscaling default node pool in the first linked subnet (Azure CNI).
+# GCP: a regional GKE Standard cluster with one autoscaling node pool.
+#
+# Extra pools are Kubernetes Node Pool nodes linked with 'Runs on'; pods that need a cloud
+# identity are Kubernetes Workload nodes. Workload identity is switched on for all three
+# providers (EKS Pod Identity, AKS OIDC issuer, GKE workload pool) because the Workload
+# type has nothing to bind to otherwise.
 
 schema_version = 2
 
@@ -21,8 +28,9 @@ name = "node_size"
 label = "Node size"
 type = "enum"
 required = true
-options = ["small", "medium", "large"]
+options = ["small", "medium", "large", "xlarge"]
 default = "small"
+description = "Size of the default pool's nodes. Extra pools carry their own size."
 
 [[fields]]
 name = "node_count"
@@ -45,15 +53,54 @@ type = "int"
 required = true
 default = 3
 
+[[fields]]
+name = "private_endpoint"
+label = "Private API endpoint"
+type = "bool"
+default = false
+description = "Keep the Kubernetes API off the public internet. Reachable only from inside the network (or over a peering / VPN) afterwards."
+
+[[fields]]
+name = "public_access_cidrs"
+label = "Public API access from"
+type = "string_list"
+description = "CIDR ranges allowed to reach the public API endpoint. Empty means anywhere (the provider default)."
+
+[[fields]]
+name = "addons"
+label = "Add-ons"
+type = "string_list"
+description = "Cluster add-ons to install: ebs_csi, efs_csi, pod_identity_agent, metrics_server, coredns, kube_proxy, vpc_cni. Only AWS installs them as resources; the others say what applies in MANUAL_STEPS."
+
 [[relations]]
 kind = "network_membership"
 label = "Subnets"
 targets = ["subnet"]
 cardinality = "many"
 
+[[relations]]
+kind = "logs_to"
+label = "Logs to"
+targets = ["log_group"]
+cardinality = "optional"
+
 # ---------------------------------------------------------------- AWS
 [providers.aws]
-status = "full"
+status = "partial"
+
+[[providers.aws.fields]]
+name = "version"
+label = "Kubernetes version"
+type = "string"
+pattern = "^[0-9]+\\.[0-9]+$"
+pattern_hint = "major.minor, e.g. 1.33"
+description = "Leave empty to take the EKS default for the region. Pinning a version that the region has retired makes apply fail, which is why there is no default here."
+
+[[providers.aws.checks]]
+for_each_field = "addons"
+severity = "error"
+when = { all = [ { item = "value", not_equals = "ebs_csi" }, { item = "value", not_equals = "efs_csi" }, { item = "value", not_equals = "pod_identity_agent" }, { item = "value", not_equals = "metrics_server" }, { item = "value", not_equals = "coredns" }, { item = "value", not_equals = "kube_proxy" }, { item = "value", not_equals = "vpc_cni" } ] }
+message = "\"{name}\": unknown add-on '{item.value}'; use ebs_csi, efs_csi, pod_identity_agent, metrics_server, coredns, kube_proxy or vpc_cni"
 
 [[providers.aws.blocks]]
 key = "cluster_role"
@@ -88,13 +135,28 @@ resource = "aws_eks_cluster"
 [providers.aws.blocks.args]
 name       = { field = "name", transform = "kebab" }
 role_arn   = { self_block = "cluster_role", attr = "arn" }
+version    = { provider_field = "version", optional = true }
+# EKS writes control-plane logs to its own log group, so the linked Log Group only decides
+# which streams are switched on (see the manual step).
+enabled_cluster_log_types = { if = { relation = "logs_to" }, then = { value = ["api", "audit", "authenticator", "controllerManager", "scheduler"] } }
 depends_on = { list = [ { self_block = "cluster_policy", attr = "" } ] }
 
+# Access to the API server. These belong in the vpc_config block the mapping already writes.
 [[providers.aws.blocks.nested]]
 block = "vpc_config"
 
 [providers.aws.blocks.nested.args]
-subnet_ids = { relation = "network_membership", attr = "id", wrap = "list" }
+subnet_ids              = { relation = "network_membership", attr = "id", wrap = "list" }
+endpoint_private_access = { field = "private_endpoint" }
+endpoint_public_access  = { if = { field = "private_endpoint" }, then = { value = false }, else = { value = true } }
+public_access_cidrs     = { field = "public_access_cidrs", optional = true }
+
+# Pods assume IAM roles through EKS Pod Identity, which the Workload type relies on.
+[[providers.aws.blocks.nested]]
+block = "access_config"
+
+[providers.aws.blocks.nested.args]
+authentication_mode = { value = "API_AND_CONFIG_MAP" }
 
 [[providers.aws.blocks]]
 key = "node_role"
@@ -147,7 +209,7 @@ cluster_name    = { self_block = "main", attr = "name" }
 node_group_name = { value = "default" }
 node_role_arn   = { self_block = "node_role", attr = "arn" }
 subnet_ids      = { relation = "network_membership", attr = "id", wrap = "list" }
-instance_types  = { map = "node_size", table = { small = ["t3.medium"], medium = ["t3.large"], large = ["m5.xlarge"] } }
+instance_types  = { map = "node_size", table = { small = ["t3.medium"], medium = ["t3.large"], large = ["m5.xlarge"], xlarge = ["m5.2xlarge"] } }
 depends_on      = { list = [ { self_block = "node_policy_worker", attr = "" }, { self_block = "node_policy_cni", attr = "" }, { self_block = "node_policy_ecr", attr = "" } ] }
 
 [[providers.aws.blocks.nested]]
@@ -158,22 +220,66 @@ desired_size = { field = "node_count" }
 min_size     = { field = "min_nodes" }
 max_size     = { field = "max_nodes" }
 
+# One add-on resource per entry of the abstract list.
+[[providers.aws.blocks]]
+key = "addon"
+resource = "aws_eks_addon"
+for_each_field = "addons"
+
+[providers.aws.blocks.args]
+cluster_name  = { self_block = "main", attr = "name" }
+addon_name    = { map = "value", table = { ebs_csi = "aws-ebs-csi-driver", efs_csi = "aws-efs-csi-driver", pod_identity_agent = "eks-pod-identity-agent", metrics_server = "metrics-server", coredns = "coredns", kube_proxy = "kube-proxy", vpc_cni = "vpc-cni" } }
+depends_on    = { list = [ { self_block = "nodes", attr = "" } ] }
+
 [providers.aws.outputs]
 endpoint = { attr = "endpoint", description = "Kubernetes API endpoint" }
+name     = { attr = "name", description = "Cluster name (kubectl / aws eks update-kubeconfig)" }
+
+[[providers.aws.manual_steps]]
+title = "EKS names its own control-plane log group"
+when = { relation = "logs_to" }
+body = """
+Switching on `enabled_cluster_log_types` makes EKS write to **`/aws/eks/<cluster
+name>/cluster`**, a log group it creates itself — not the Log Group drawn in the diagram.
+Either rename that Log Group to `/aws/eks/<cluster name>/cluster` so Terraform owns it (and
+its retention), or keep it for application logs shipped by Fluent Bit and accept that the
+control-plane streams live next to it.
+"""
+
+[[providers.aws.manual_steps]]
+title = "Node counts need the Cluster Autoscaler"
+body = """
+EKS never changes a node group's size by itself: the min / max in the diagram are limits,
+not a policy. Install the **Cluster Autoscaler** (or Karpenter) in the cluster and let it
+discover the node groups; AKS and GKE have this built in, AWS does not.
+"""
 
 # ---------------------------------------------------------------- Azure
 [providers.azure]
-status = "full"
+status = "partial"
+
+[[providers.azure.fields]]
+name = "version"
+label = "Kubernetes version"
+type = "string"
+pattern = "^[0-9]+\\.[0-9]+(\\.[0-9]+)?$"
+pattern_hint = "major.minor or major.minor.patch, e.g. 1.33"
+description = "Leave empty to take the AKS default for the region."
 
 [[providers.azure.blocks]]
 key = "main"
 resource = "azurerm_kubernetes_cluster"
 
 [providers.azure.blocks.args]
-name                = { field = "name", transform = "kebab" }
-location            = { var = "location" }
-resource_group_name = { ancestor = "resource_group", attr = "name" }
-dns_prefix          = { field = "name", transform = "kebab" }
+name                      = { field = "name", transform = "kebab" }
+location                  = { var = "location" }
+resource_group_name       = { ancestor = "resource_group", attr = "name" }
+dns_prefix                = { field = "name", transform = "kebab" }
+kubernetes_version        = { provider_field = "version", optional = true }
+private_cluster_enabled   = { field = "private_endpoint" }
+# Workload identity: what a Kubernetes Workload's federated credential binds to.
+oidc_issuer_enabled       = { value = true }
+workload_identity_enabled = { value = true }
 
 [[providers.azure.blocks.nested]]
 block = "default_node_pool"
@@ -199,14 +305,64 @@ block = "network_profile"
 [providers.azure.blocks.nested.args]
 network_plugin = { value = "azure" }
 
+[[providers.azure.blocks.nested]]
+block = "api_server_access_profile"
+when = { field = "public_access_cidrs" }
+
+[providers.azure.blocks.nested.args]
+authorized_ip_ranges = { field = "public_access_cidrs" }
+
+# Control-plane logs to the linked Log Analytics workspace.
+[[providers.azure.blocks]]
+key = "diag"
+resource = "azurerm_monitor_diagnostic_setting"
+for_each_relation = "logs_to"
+
+[providers.azure.blocks.args]
+name                       = { template = "{name}-logs", transform = "kebab" }
+target_resource_id         = { self_block = "main", attr = "id" }
+log_analytics_workspace_id = { target = "id" }
+
+[[providers.azure.blocks.nested]]
+block = "enabled_log"
+
+[providers.azure.blocks.nested.args]
+category = { value = "kube-apiserver" }
+
+[[providers.azure.blocks.nested]]
+block = "enabled_log"
+
+[providers.azure.blocks.nested.args]
+category = { value = "kube-audit" }
+
 [providers.azure.outputs]
 fqdn        = { attr = "fqdn", description = "Kubernetes API host name" }
+oidc_issuer = { attr = "oidc_issuer_url", description = "OIDC issuer URL used by workload identity" }
 kube_config = { attr = "kube_config_raw", description = "Raw kubeconfig for the cluster", sensitive = true }
+
+[[providers.azure.manual_steps]]
+title = "Add-ons on AKS"
+when = { field = "addons" }
+body = """
+AKS has no per-add-on resource. `coredns`, `kube_proxy` and `metrics_server` are part of
+every cluster already; the CSI drivers are cluster arguments (`storage_profile` with
+`disk_driver_enabled` / `file_driver_enabled`) rather than separate resources, and
+`pod_identity_agent` / `vpc_cni` are AWS concepts with no AKS counterpart — workload
+identity (switched on here) and Azure CNI (the network profile) do the same jobs.
+"""
 
 # ---------------------------------------------------------------- GCP
 [providers.gcp]
-status = "full"
+status = "partial"
 notes = "A regional GKE Standard cluster with one autoscaling node pool on the linked subnet's network."
+
+[[providers.gcp.fields]]
+name = "version"
+label = "Kubernetes version"
+type = "string"
+pattern = "^[0-9]+\\.[0-9]+(\\.[0-9]+.*)?$"
+pattern_hint = "major.minor, e.g. 1.33"
+description = "Minimum master version. Leave empty to take the GKE default for the release channel."
 
 [[providers.gcp.blocks]]
 key = "main"
@@ -221,9 +377,44 @@ remove_default_node_pool = { value = true }
 initial_node_count       = { value = 1 }
 deletion_protection      = { value = false }
 networking_mode          = { value = "VPC_NATIVE" }
+min_master_version       = { provider_field = "version", optional = true }
 
 [[providers.gcp.blocks.nested]]
 block = "ip_allocation_policy"
+
+# Workload identity: what a Kubernetes Workload's IAM binding refers to.
+[[providers.gcp.blocks.nested]]
+block = "workload_identity_config"
+
+[providers.gcp.blocks.nested.args]
+workload_pool = { func = "format", args = [ { value = "%s.svc.id.goog" }, { var = "project" } ] }
+
+[[providers.gcp.blocks.nested]]
+block = "logging_config"
+when = { relation = "logs_to" }
+
+[providers.gcp.blocks.nested.args]
+enable_components = { value = ["SYSTEM_COMPONENTS", "WORKLOADS", "APISERVER"] }
+
+[[providers.gcp.blocks.nested]]
+block = "private_cluster_config"
+when = { field = "private_endpoint" }
+
+[providers.gcp.blocks.nested.args]
+enable_private_nodes    = { value = true }
+enable_private_endpoint = { value = true }
+
+[[providers.gcp.blocks.nested]]
+block = "master_authorized_networks_config"
+when = { field = "public_access_cidrs" }
+
+[[providers.gcp.blocks.nested.nested]]
+block = "cidr_blocks"
+for_each_field = "public_access_cidrs"
+
+[providers.gcp.blocks.nested.nested.args]
+cidr_block   = { item = "value" }
+display_name = { template = "allowed-{item.index}" }
 
 [[providers.gcp.blocks]]
 key = "nodes"
@@ -251,3 +442,24 @@ oauth_scopes = { value = ["https://www.googleapis.com/auth/cloud-platform"] }
 
 [providers.gcp.outputs]
 endpoint = { attr = "endpoint", description = "Cluster API endpoint" }
+name     = { attr = "name", description = "Cluster name (gcloud container clusters get-credentials)" }
+
+[[providers.gcp.manual_steps]]
+title = "Add-ons on GKE"
+when = { field = "addons" }
+body = """
+GKE has no per-add-on resource either. `coredns` (kube-dns), `kube_proxy` and
+`metrics_server` are part of every cluster; persistent-disk and Filestore CSI drivers are
+cluster arguments (`addons_config` with `gcp_filestore_csi_driver_config` /
+`gcs_fuse_csi_driver_config`); `pod_identity_agent` and `vpc_cni` are AWS concepts —
+workload identity (switched on here) and the VPC-native networking mode do the same jobs.
+"""
+
+[[providers.gcp.manual_steps]]
+title = "A private cluster needs a master range and Cloud NAT"
+when = { field = "private_endpoint" }
+body = """
+Private GKE nodes have no external address, so the cluster needs a **Cloud NAT** (a NAT
+Gateway in the diagram) to pull images, and the control plane needs a `/28`
+`master_ipv4_cidr_block` that does not overlap the VPC. Add both before applying.
+"""

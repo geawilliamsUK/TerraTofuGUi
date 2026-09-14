@@ -65,12 +65,12 @@ cardinality = "optional"
 [[relations]]
 kind = "attachment"
 label = "Forwards to"
-targets = ["compute_instance"]
+targets = ["compute_instance", "kubernetes_cluster"]
 cardinality = "many"
 
 # ---------------------------------------------------------------- AWS
 [providers.aws]
-status = "full"
+status = "partial"
 
 [[providers.aws.blocks]]
 key = "main"
@@ -93,7 +93,9 @@ name        = { template = "{name}-tg", transform = "kebab" }
 port        = { field = "target_port" }
 protocol    = { map = "protocol", table = { http = "HTTP", tcp = "TCP" } }
 vpc_id      = { relation = "network_membership", attr = "vpc_id" }
-target_type = { value = "instance" }
+# Pods are registered by their IP, not as EC2 instances, so a cluster target changes the
+# whole target group; the registration itself is the controller's job (manual step).
+target_type = { if = { relation = "attachment", target_type = "kubernetes_cluster" }, then = { value = "ip" }, else = { value = "instance" } }
 
 [[providers.aws.blocks]]
 key = "listener"
@@ -125,9 +127,31 @@ port             = { field = "target_port" }
 [providers.aws.outputs]
 dns_name = { attr = "dns_name", description = "Public DNS name of the load balancer" }
 
+[[providers.aws.manual_steps]]
+title = "Bind the target group to a Kubernetes Service"
+when = { relation = "attachment", target_type = "kubernetes_cluster" }
+body = """
+The target group is created with `target_type = "ip"` and no attachments: nothing in
+Terraform knows which pods should be in it. Install the **AWS Load Balancer Controller** in
+the cluster and apply a `TargetGroupBinding` that points at this target group's ARN and the
+Service in front of the pods:
+
+```yaml
+apiVersion: elbv2.k8s.aws/v1beta1
+kind: TargetGroupBinding
+metadata:
+  name: <service>
+spec:
+  serviceRef: { name: <service>, port: <target port> }
+  targetGroupARN: <the tg arn from the plan>
+```
+
+The controller then keeps the target group in step with the pod IPs.
+"""
+
 # ---------------------------------------------------------------- Azure
 [providers.azure]
-status = "full"
+status = "partial"
 
 [[providers.azure.blocks]]
 key = "pip"
@@ -215,6 +239,19 @@ backend_address_pool_id = { self_block = "pool", attr = "id" }
 [providers.azure.outputs]
 public_ip = { block = "pip", attr = "ip_address", description = "Public IPv4 address of the load balancer" }
 
+[[providers.azure.manual_steps]]
+title = "AKS traffic goes through an ingress, not this load balancer"
+when = { relation = "attachment", target_type = "kubernetes_cluster" }
+body = """
+An `azurerm_lb` backend pool takes network interfaces, and AKS pods have none of their own,
+so nothing is attached for the linked cluster. Publish the workload either with a
+Kubernetes `Service` of type `LoadBalancer` — AKS then manages its own Standard load
+balancer, and this one is redundant — or with an **Application Gateway** fronted by AGIC
+(`azurerm_application_gateway` plus the ingress controller add-on), which is the layer-7
+equivalent of what the diagram asks for. The load balancer here is still created for any
+instance targets.
+"""
+
 # ---------------------------------------------------------------- GCP
 [providers.gcp]
 status = "partial"
@@ -285,6 +322,17 @@ subnetwork            = { if = { field = "scheme", equals = "internal" }, then =
 
 [providers.gcp.outputs]
 address = { block = "rule", attr = "ip_address", description = "Frontend IP address" }
+
+[[providers.gcp.manual_steps]]
+title = "GKE pods join the backend service through a NEG"
+when = { relation = "attachment", target_type = "kubernetes_cluster" }
+body = """
+No backend is generated for the linked cluster: a GKE backend is a **network endpoint
+group**, which the cluster creates when a `Service` is annotated
+`cloud.google.com/neg: '{"exposed_ports": {"<port>":{}}}'`. Annotate the Service, then add
+a `backend { group = <the NEG self link> }` to this backend service (or let a GKE `Ingress`
+create its own load balancer instead of this one).
+"""
 
 [[providers.gcp.manual_steps]]
 title = "Health-check probes must be allowed by the firewall"

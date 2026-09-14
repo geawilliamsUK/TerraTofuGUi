@@ -80,6 +80,7 @@ const NETWORKED: &[&str] = &[
     "cache",
     "load_balancer",
     "kubernetes_cluster",
+    "kubernetes_workload",
     "autoscaling_group",
     "function",
     "container_app",
@@ -93,7 +94,12 @@ pub(crate) fn is_managed(t: &str) -> bool {
 pub fn initiates(t: &str) -> bool {
     matches!(
         t,
-        "function" | "compute_instance" | "autoscaling_group" | "kubernetes_cluster" | "container_app"
+        "function"
+            | "compute_instance"
+            | "autoscaling_group"
+            | "kubernetes_cluster"
+            | "kubernetes_workload"
+            | "container_app"
     )
 }
 fn is_networked(t: &str) -> bool {
@@ -146,6 +152,15 @@ fn cidr_covers(outer: &str, inner: &str) -> bool {
 }
 
 fn subnets_of(p: &Project, cat: &Catalog, e: &EntityRef) -> Vec<Id> {
+    // A workload has no network of its own: its pods sit in the nodes of its cluster.
+    if e.resource_type == "kubernetes_workload" {
+        return relation_targets(p, cat, e, Relation::Attachment)
+            .into_iter()
+            .filter_map(|t| p.entity(&t))
+            .filter(|c| c.resource_type == "kubernetes_cluster")
+            .flat_map(|c| subnets_of(p, cat, &c))
+            .collect();
+    }
     relation_targets(p, cat, e, Relation::NetworkMembership)
         .into_iter()
         .filter(|t| p.entity(t).is_some_and(|x| x.resource_type == "subnet"))
