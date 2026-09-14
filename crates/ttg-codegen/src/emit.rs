@@ -516,12 +516,16 @@ fn label_safe(s: &str) -> String {
     ttg_core::slugify(s).replace('_', "-")
 }
 
-fn tag_object(tags: &[(String, String)]) -> Expression {
+fn tag_entries(tags: &[(String, String)]) -> Object<ObjectKey, Expression> {
     let mut o = Object::new();
     for (k, v) in tags {
         o.insert(object_key(k), Expression::String(v.clone()));
     }
-    Expression::Object(o)
+    o
+}
+
+fn tag_object(tags: &[(String, String)]) -> Expression {
+    Expression::Object(tag_entries(tags))
 }
 
 /// Merge the project's default tags into one resource block's `tags` argument. Tags the
@@ -539,10 +543,7 @@ fn merge_tags(block: &Block, arg: &str, tags: &[(String, String)]) -> Block {
             if a.key() == arg {
                 present = true;
                 if let Expression::Object(existing) = a.expr() {
-                    let mut o = Object::new();
-                    for (k, v) in tags {
-                        o.insert(object_key(k), Expression::String(v.clone()));
-                    }
+                    let mut o = tag_entries(tags);
                     for (k, v) in existing.iter() {
                         o.insert(k.clone(), v.clone());
                     }
