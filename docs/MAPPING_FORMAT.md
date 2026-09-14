@@ -58,7 +58,7 @@ Which edges this type may be the *source* of. Direction is always
 [[relations]]
 kind = "network_membership"   # network_membership | attribute_reference | iam_binding |
                               # attachment | sends_to | reads | logs_to | encrypted_with |
-                              # depends_on
+                              # dead_letters_to | depends_on
 label = "Belongs to network"
 targets = ["virtual_network"]
 cardinality = "one"           # one (required, exactly one) | optional | many
@@ -205,6 +205,11 @@ title = "Check the role assignment scope"
 body  = """Markdown body…"""
 ```
 
+An output whose `block` is a repeated one (`for_each_field` / `for_each_relation`) has no
+single address, so its value is the **list** of every instance's attribute — the repository
+URLs of a Container Registry, the mount address of a File System in each subnet. An output
+whose block is not emitted at all is simply left out.
+
 ---
 
 ## 2.6 schema_version 2 features
@@ -308,7 +313,11 @@ mapping can create a helper resource only when no enclosing container provides i
 field matches, so a check can say "no linked subnet is delegated". Inside a
 `for_each_relation` block, `{ target_shares_ancestor = "virtual_network" }` holds when the
 current target sits in the same container of that type as the entity itself; a peering
-uses it to route each linked route table towards *the other* network.
+uses it to route each linked route table towards *the other* network. Add
+`relation = "dead_letters_to"` (optionally with `target_type`) to ask the same question of
+a relation's targets instead of the current row, which works outside a repeated block:
+an Event Queue only auto-forwards its dead letters when the queue it dead-letters to is in
+the same Service Bus namespace.
 
 **Referencing a target's container.** `{ relation = "sends_to", target_type = "event_queue",
 ancestor = "servicebus_namespace", attr = "default_primary_connection_string" }` resolves

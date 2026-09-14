@@ -1,0 +1,210 @@
+# Abstract type: File System  (schema_version 2)
+#
+# A shared network file system several machines mount at once, as opposed to a bucket
+# (Object Storage) or a disk attached to one instance.
+#
+# AWS:   aws_efs_file_system plus one aws_efs_mount_target per linked subnet — the mount
+#        target is the address clients actually use, so a file system with no subnets is
+#        unreachable.
+# Azure: a Premium FileStorage account with one NFS share. NFS shares are private by
+#        construction (Azure refuses public network access for them), which is why the
+#        network rules and the private endpoint are a manual step rather than a subnet link.
+# GCP:   google_filestore_instance, a zonal appliance peered into one network; it has no
+#        per-subnet presence at all.
+
+schema_version = 2
+
+[resource]
+type = "file_system"
+category = "storage"
+display_name = "File System"
+description = "A shared network file system (NFS) mounted by several machines. Link the subnets it should be reachable from."
+kind = "node"
+allowed_parents = ["resource_group", "virtual_network"]
+icon = "FS"
+
+[[fields]]
+name = "performance"
+label = "Performance"
+type = "enum"
+required = true
+options = ["general_purpose", "max_io"]
+default = "general_purpose"
+description = "General purpose keeps latency lowest; max I/O trades a little latency for more parallel throughput. On Google Cloud this is the difference between a BASIC_HDD and a BASIC_SSD tier; on Azure every file share of this kind is already premium SSD."
+
+[[fields]]
+name = "size_gb"
+label = "Size (GiB)"
+type = "int"
+required = true
+default = 1024
+description = "Provisioned capacity. EFS grows on its own and ignores this; Filestore needs at least 1024 (BASIC_HDD) or 2560 (BASIC_SSD), and an Azure premium share at least 100."
+
+# AWS puts one mount target in each subnet; Google Cloud only needs them to learn which
+# network to peer into. An Azure NFS share has no subnet of its own at all — it is reached
+# through a Private Endpoint — so the relation is not Azure's business.
+[[relations]]
+kind = "network_membership"
+label = "Mounted from subnets"
+providers = ["aws", "gcp"]
+targets = ["subnet"]
+cardinality = "many"
+
+[[relations]]
+kind = "attribute_reference"
+label = "Security group"
+providers = ["aws"]
+targets = ["security_group"]
+cardinality = "many"
+
+[[relations]]
+kind = "encrypted_with"
+label = "Encrypted with"
+providers = ["aws"]
+targets = ["encryption_key"]
+cardinality = "optional"
+
+# ---------------------------------------------------------------- AWS
+[providers.aws]
+status = "full"
+notes = "EFS is always encrypted; a linked Encryption Key replaces the AWS-managed one. Capacity is elastic, so 'Size' is only documentation here."
+
+[[providers.aws.checks]]
+when = { relation = "network_membership", absent = true }
+severity = "error"
+message = "\"{name}\" has no mount targets: link the subnets it should be mounted from, or draw it inside one"
+
+[[providers.aws.checks]]
+when = { relation = "attribute_reference", target_type = "security_group", absent = true }
+message = "\"{name}\" has no Security Group, so its mount targets get the VPC default group; NFS needs inbound TCP 2049 from the clients"
+
+[[providers.aws.blocks]]
+key = "main"
+resource = "aws_efs_file_system"
+
+[providers.aws.blocks.args]
+creation_token   = { field = "name", transform = "kebab" }
+performance_mode = { map = "performance", table = { general_purpose = "generalPurpose", max_io = "maxIO" } }
+throughput_mode  = { value = "elastic" }
+encrypted        = { value = true }
+kms_key_id       = { relation = "encrypted_with", attr = "arn", optional = true }
+tags             = { object = { Name = { field = "name" } } }
+
+# One mount target per subnet: that is how EFS gets an address in each availability zone.
+[[providers.aws.blocks]]
+key = "mount"
+resource = "aws_efs_mount_target"
+for_each_relation = "network_membership"
+
+[providers.aws.blocks.args]
+file_system_id  = { self_block = "main", attr = "id" }
+subnet_id       = { target = "id" }
+security_groups = { relation = "attribute_reference", target_type = "security_group", attr = "id", wrap = "list" }
+
+[providers.aws.outputs]
+id            = { attr = "id", description = "File system id" }
+dns_name      = { attr = "dns_name", description = "Mount address (<id>.efs.<region>.amazonaws.com)" }
+mount_targets = { block = "mount", attr = "dns_name", description = "Mount address in each subnet" }
+
+# ---------------------------------------------------------------- Azure
+[providers.azure]
+status = "partial"
+notes = "A Premium FileStorage account with one NFS 4.1 share. Azure Files NFS refuses plain HTTPS-only accounts and public network access, so the account is generated with secure transfer off (SMB encryption does not apply to NFS) and the network restriction is left to the operator."
+
+[[providers.azure.fields]]
+name = "account_name"
+label = "Storage account name"
+type = "string"
+required = true
+pattern = "^[a-z0-9]{3,24}$"
+pattern_hint = "3-24 lowercase letters and digits; globally unique"
+unique_scope = "storage_account"
+
+[[providers.azure.checks]]
+when = { relation = "encrypted_with" }
+message = "\"{name}\" is linked to an Encryption Key, which this mapping cannot use: a customer-managed key on a storage account needs a vault access policy for the account's own identity, so the share keeps Microsoft-managed keys"
+
+[[providers.azure.blocks]]
+key = "account"
+resource = "azurerm_storage_account"
+
+[providers.azure.blocks.args]
+name                            = { provider_field = "account_name" }
+resource_group_name             = { ancestor = "resource_group", attr = "name" }
+location                        = { var = "location" }
+account_tier                    = { value = "Premium" }
+account_kind                    = { value = "FileStorage" }
+account_replication_type        = { value = "LRS" }
+https_traffic_only_enabled      = { value = false }
+allow_nested_items_to_be_public = { value = false }
+tags                            = { object = { Name = { field = "name" } } }
+
+[[providers.azure.blocks]]
+key = "main"
+resource = "azurerm_storage_share"
+
+[providers.azure.blocks.args]
+name               = { field = "name", transform = "kebab" }
+storage_account_id = { self_block = "account", attr = "id" }
+enabled_protocol   = { value = "NFS" }
+quota              = { field = "size_gb" }
+
+[providers.azure.outputs]
+id  = { attr = "id", description = "File share id" }
+url = { attr = "url", description = "Share URL" }
+
+[[providers.azure.manual_steps]]
+title = "Reach the NFS share privately"
+body = """
+An NFS share is only reachable over a private route: Azure rejects mounts from the public
+endpoint. Restrict the storage account with a `network_rules` block (`default_action =
+"Deny"` plus the subnet ids of the clients, which needs the `Microsoft.Storage` service
+endpoint on those subnets), or give the account a **Private Endpoint** with the `file`
+sub-resource and point the clients at it. Then mount with
+`mount -t nfs <account>.file.core.windows.net:/<account>/<share> /mnt/... -o vers=4,minorversion=1,sec=sys`.
+"""
+
+# ---------------------------------------------------------------- GCP
+[providers.gcp]
+status = "partial"
+notes = "A zonal Filestore instance peered into the network the linked subnets belong to. Filestore has no per-subnet presence: every client in the network reaches the same IP, so there is nothing to create per subnet."
+
+[[providers.gcp.checks]]
+when = { all = [ { field = "performance", equals = "max_io" }, { field = "size_gb", equals = "1024" } ] }
+message = "\"{name}\" is a BASIC_SSD instance, which Filestore will not create below 2560 GiB; raise the size"
+
+[[providers.gcp.blocks]]
+key = "main"
+resource = "google_filestore_instance"
+
+[providers.gcp.blocks.args]
+name     = { field = "name", transform = "kebab" }
+location = { var = "zone" }
+tier     = { map = "performance", table = { general_purpose = "BASIC_HDD", max_io = "BASIC_SSD" } }
+
+[[providers.gcp.blocks.nested]]
+block = "file_shares"
+
+[providers.gcp.blocks.nested.args]
+# Filestore share names are limited to 16 characters, which a display name easily is not.
+name        = { value = "share" }
+capacity_gb = { field = "size_gb" }
+
+[[providers.gcp.blocks.nested]]
+block = "networks"
+
+[providers.gcp.blocks.nested.args]
+network = { relation = "network_membership", ancestor = "virtual_network", attr = "name", fallback = { ancestor = "virtual_network", attr = "name" } }
+modes   = { value = ["MODE_IPV4"] }
+
+[providers.gcp.outputs]
+id = { attr = "id", description = "Filestore instance id" }
+
+[[providers.gcp.manual_steps]]
+title = "Read the mount address from the instance"
+body = """
+Filestore hands out one IP per instance, in `networks[0].ip_addresses[0]`, and the share is
+called `share`, so clients mount `<ip>:/share`. The address is not known until the instance
+exists: read it after the first `apply` (`gcloud filestore instances describe`) rather than
+baking it into a machine image.
+"""

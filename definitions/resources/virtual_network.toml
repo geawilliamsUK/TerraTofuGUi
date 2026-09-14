@@ -22,9 +22,29 @@ required = true
 default = "10.0.0.0/16"
 description = "Primary IPv4 address range of the network."
 
+[[fields]]
+name = "flow_logs"
+label = "Flow logs"
+type = "bool"
+default = false
+description = "Record which addresses talked to which, for forensics and for working out why a connection was refused. AWS captures them for the whole VPC into a linked Log Group; Google Cloud captures them per subnet; Azure needs a Network Watcher and a storage account of its own."
+
+[[relations]]
+kind = "logs_to"
+label = "Flow logs to"
+providers = ["aws"]
+targets = ["log_group"]
+cardinality = "optional"
+
 # ---------------------------------------------------------------- AWS
 [providers.aws]
 status = "full"
+notes = "Flow logs go to a linked Log Group through a role of their own; VPC flow logs are written by the service, not by anything in the network."
+
+[[providers.aws.checks]]
+when = { all = [ { field = "flow_logs" }, { relation = "logs_to", absent = true } ] }
+severity = "error"
+message = "\"{name}\" has flow logs on but nothing to write them to: link a Log Group with 'Flow logs to'"
 
 [[providers.aws.fields]]
 name = "enable_dns_hostnames"
@@ -42,12 +62,71 @@ enable_dns_support   = { value = true }
 enable_dns_hostnames = { provider_field = "enable_dns_hostnames", optional = true }
 tags                 = { object = { Name = { field = "name" } } }
 
+# The flow-log service assumes this role to write into the log group.
+[[providers.aws.blocks]]
+key = "flow_role"
+resource = "aws_iam_role"
+when = { all = [ { field = "flow_logs" }, { relation = "logs_to" } ] }
+
+[providers.aws.blocks.args]
+name = { template = "{name}-flow-logs", transform = "kebab" }
+tags = { object = { Name = { template = "{name} flow logs" } } }
+
+[providers.aws.blocks.args.assume_role_policy]
+func = "jsonencode"
+
+[[providers.aws.blocks.args.assume_role_policy.args]]
+[providers.aws.blocks.args.assume_role_policy.args.object]
+Version = { value = "2012-10-17" }
+
+[[providers.aws.blocks.args.assume_role_policy.args.object.Statement.list]]
+[providers.aws.blocks.args.assume_role_policy.args.object.Statement.list.object]
+Effect    = { value = "Allow" }
+Action    = { value = "sts:AssumeRole" }
+Principal = { object = { Service = { value = "vpc-flow-logs.amazonaws.com" } } }
+
+[[providers.aws.blocks]]
+key = "flow_policy"
+resource = "aws_iam_role_policy"
+when = { all = [ { field = "flow_logs" }, { relation = "logs_to" } ] }
+
+[providers.aws.blocks.args]
+name = { value = "flow-logs" }
+role = { self_block = "flow_role", attr = "id" }
+
+[providers.aws.blocks.args.policy]
+func = "jsonencode"
+
+[[providers.aws.blocks.args.policy.args]]
+[providers.aws.blocks.args.policy.args.object]
+Version = { value = "2012-10-17" }
+
+[[providers.aws.blocks.args.policy.args.object.Statement.list]]
+[providers.aws.blocks.args.policy.args.object.Statement.list.object]
+Effect   = { value = "Allow" }
+Action   = { value = ["logs:CreateLogGroup", "logs:CreateLogStream", "logs:PutLogEvents", "logs:DescribeLogGroups", "logs:DescribeLogStreams"] }
+Resource = { list = [ { relation = "logs_to", attr = "arn" }, { func = "format", args = [ { value = "%s:*" }, { relation = "logs_to", attr = "arn" } ] } ] }
+
+[[providers.aws.blocks]]
+key = "flow"
+resource = "aws_flow_log"
+when = { all = [ { field = "flow_logs" }, { relation = "logs_to" } ] }
+
+[providers.aws.blocks.args]
+vpc_id               = { self_block = "main", attr = "id" }
+traffic_type         = { value = "ALL" }
+log_destination_type = { value = "cloud-watch-logs" }
+log_destination      = { relation = "logs_to", attr = "arn" }
+iam_role_arn         = { self_block = "flow_role", attr = "arn" }
+tags                 = { object = { Name = { template = "{name} flow logs" } } }
+
 [providers.aws.outputs]
 id = { attr = "id", description = "VPC id" }
 
 # ---------------------------------------------------------------- Azure
 [providers.azure]
-status = "full"
+status = "partial"
+notes = "Azure flow logs are not a property of the network: they belong to a regional Network Watcher and land in a storage account, so they are a manual step rather than something this mapping can create honestly."
 
 [[providers.azure.blocks]]
 key = "main"
@@ -62,10 +141,22 @@ address_space       = { field = "cidr_block", wrap = "list" }
 [providers.azure.outputs]
 id = { attr = "id", description = "Virtual network id" }
 
+[[providers.azure.manual_steps]]
+title = "Turn on VNet flow logs through a Network Watcher"
+when = { field = "flow_logs" }
+body = """
+Azure records flow logs with `azurerm_network_watcher_flow_log`, which needs three things
+this network does not have: the subscription's regional **Network Watcher**
+(`NetworkWatcherRG` / `NetworkWatcher_<region>`, created once per region by the platform),
+a **storage account** to write into, and a retention policy. Add them once for the
+subscription and point a flow log at this virtual network's id, optionally with Traffic
+Analytics into a Log Analytics workspace.
+"""
+
 # ---------------------------------------------------------------- GCP
 [providers.gcp]
 status = "full"
-notes = "A custom-mode VPC network. GCP networks have no address range of their own: the CIDR lives on each subnet."
+notes = "A custom-mode VPC network. GCP networks have no address range of their own: the CIDR lives on each subnet, and so do flow logs — turning them on here turns on `log_config` for every subnet of this network."
 
 [[providers.gcp.blocks]]
 key = "main"

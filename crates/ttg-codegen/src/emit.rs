@@ -302,12 +302,24 @@ pub fn generate(p: &Project, cat: &Catalog, provider: &str, tool: Tool) -> Resul
                         continue;
                     }
                     let bdef = m.blocks.iter().find(|b| b.key == key).unwrap();
-                    let Some(local) = em.instances[&(id.clone(), key.clone())].first().cloned() else {
+                    let locals = em.instances[&(id.clone(), key.clone())].clone();
+                    if locals.is_empty() {
                         continue;
+                    }
+                    // A repeated block has no single address, so its output is the list.
+                    let value = if repeated(bdef) {
+                        Expression::Array(
+                            locals
+                                .iter()
+                                .map(|l| traversal(&bdef.resource, l, &o.attr))
+                                .collect(),
+                        )
+                    } else {
+                        traversal(&bdef.resource, &locals[0], &o.attr)
                     };
                     outputs.push(OutputSpec {
                         name: format!("{}_{}", p.hcl_name(id), suffix),
-                        value: traversal(&bdef.resource, &local, &o.attr),
+                        value,
                         description: if o.description.is_empty() {
                             format!("{} of {} \"{}\"", o.attr, def.resource.display_name, e.name)
                         } else {

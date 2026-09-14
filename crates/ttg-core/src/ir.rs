@@ -200,11 +200,13 @@ pub enum Relation {
     LogsTo,
     /// Source is encrypted at rest with target's key (bucket -> encryption key).
     EncryptedWith,
+    /// Messages the source could not deliver go to target (queue -> dead-letter queue).
+    DeadLettersTo,
     DependsOn,
 }
 
 impl Relation {
-    pub const ALL: [Relation; 9] = [
+    pub const ALL: [Relation; 10] = [
         Relation::NetworkMembership,
         Relation::AttributeReference,
         Relation::IamBinding,
@@ -213,6 +215,7 @@ impl Relation {
         Relation::Reads,
         Relation::LogsTo,
         Relation::EncryptedWith,
+        Relation::DeadLettersTo,
         Relation::DependsOn,
     ];
     /// The identifier used in definition files.
@@ -226,6 +229,7 @@ impl Relation {
             Relation::Reads => "reads",
             Relation::LogsTo => "logs_to",
             Relation::EncryptedWith => "encrypted_with",
+            Relation::DeadLettersTo => "dead_letters_to",
             Relation::DependsOn => "depends_on",
         }
     }
@@ -239,6 +243,7 @@ impl Relation {
             Relation::Reads => "Reads",
             Relation::LogsTo => "Logs to",
             Relation::EncryptedWith => "Encrypted with",
+            Relation::DeadLettersTo => "Dead-letters to",
             Relation::DependsOn => "Depends on (ordering only)",
         }
     }

@@ -413,6 +413,52 @@ trusted by Kubernetes, and only Functions turned their links into a policy.
   scales to zero, two workloads sharing a queue, a load balancer in front of the cluster
   and control-plane logs.
 
+## Operational rest (gap report 2.3, 2.9–2.13, 2.16, 2.17)
+
+The same design had a working queue and a dead-letter queue drawn as two unrelated nodes
+with a `$raw` redrive policy between them, alarms whose metric name was typed by hand for
+each cloud, seven registry nodes for seven repositories, and a file system, a budget and
+five VPC endpoints as native resources. All of that is curated now:
+
+- **Dead-letter queues**: the new **`dead_letters_to`** relation on Event Queue plus a
+  *Deliveries before dead-lettering* field. AWS builds the `redrive_policy` with
+  `jsonencode` rather than `$raw`; Azure sets `dead_lettering_on_message_expiration` /
+  `max_delivery_count` and forwards the dead letters when both queues are in one Service
+  Bus namespace (a check explains when they are not); Google Cloud writes a
+  `dead_letter_policy` and the publisher / subscriber bindings its service agent needs.
+- **`file_system`**: `aws_efs_file_system` with one mount target per linked subnet, a
+  Premium FileStorage account with an NFS share on Azure (private access is a manual
+  step), a `google_filestore_instance` peered into the subnets' network.
+- **`budget`**: `aws_budgets_budget`, `azurerm_consumption_budget_resource_group` (the
+  start month is a field, because the honest default is computed from apply time),
+  `google_billing_budget` with an email notification channel.
+- **Private endpoints without a target on AWS**: the *Connects to* link is optional there
+  (Azure keeps it with an error check), an interface endpoint takes one subnet per zone,
+  and an S3 / DynamoDB gateway endpoint takes route tables instead.
+- **Repositories on a registry**: a `repositories` list becomes one `aws_ecr_repository`
+  (and lifecycle policy) each, with the registry node itself as the single repository when
+  the list is empty. Azure and Google Cloud create repositories on first push and say so.
+- **Alarm presets**: a portable `metric` field (cpu, queue depth, dead letters, 5xx, free
+  storage, bucket size, …) that fills in the metric name, namespace, dimensions,
+  statistic and Cloud Monitoring filter per provider *and* per watched type, over an
+  extended *Watches* list (Kubernetes Cluster, Object Storage, Topic, Cache, File System).
+  A preset the watched type has no metric for is an error, not a guess; `custom` is the
+  default and keeps the free-text provider fields a project may already carry.
+- **Topic subscriptions**: a table of protocol / endpoint rows becomes one
+  `aws_sns_topic_subscription` each; Google Cloud pushes to `https` endpoints and says
+  what it cannot do with the rest; Azure points at an Alarm's action group.
+- **Flow logs**: a `flow_logs` field on Virtual Network plus a `logs_to` link to a Log
+  Group. AWS generates `aws_flow_log` with the role and policy it needs; Google Cloud puts
+  `log_config` on each subnet of that network; Azure explains the Network Watcher and
+  storage account it would take.
+- **`audit_trail`**: `aws_cloudtrail` into a linked bucket, whose own policy grows the two
+  statements CloudTrail checks before it will be created; `google_project_iam_audit_config`
+  for every service; logical on Azure, where the Activity Log is always on.
+
+Two mechanisms carry this: `target_shares_ancestor` may name a **relation** instead of
+reading the current `for_each_relation` row, and an output whose block is repeated is the
+**list** of its instances. `examples/operations.ttg.json` exercises the lot.
+
 ## Explicitly still out of scope
 
 Running `plan`/`apply`, live-account access, multi-user collaboration, cost estimation,

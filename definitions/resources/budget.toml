@@ -1,0 +1,203 @@
+# Abstract type: Budget  (schema_version 2)
+#
+# A monthly cost budget that mails somebody when spend passes a percentage of it. Not a
+# limit: no cloud stops working when a budget is exceeded, it only tells you.
+#
+# AWS:   aws_budgets_budget, account-wide, with one notification block.
+# Azure: azurerm_consumption_budget_resource_group, scoped to the enclosing resource group.
+# GCP:   google_billing_budget, which hangs off a *billing account* rather than a project,
+#        so the billing account id has to be supplied.
+
+schema_version = 2
+
+[resource]
+type = "budget"
+category = "monitoring"
+display_name = "Budget"
+description = "A monthly cost budget with a threshold alert. Set the limit, the percentage to warn at, and who to tell."
+kind = "node"
+allowed_parents = ["resource_group"]
+network_agnostic = true
+icon = "BGT"
+
+[[fields]]
+name = "monthly_limit"
+label = "Monthly limit"
+type = "int"
+required = true
+default = 1000
+description = "Budgeted spend per calendar month, in the account's own currency."
+
+[[fields]]
+name = "alert_at_percent"
+label = "Alert at (% of limit)"
+type = "enum"
+required = true
+options = ["50", "75", "80", "90", "100"]
+default = "80"
+description = "Percentage of the limit that triggers the notification. A fixed set of steps, because Google Cloud wants the same number as a fraction and a lookup keeps the three providers in agreement."
+
+[[fields]]
+name = "notify_email"
+label = "Notify email"
+type = "string"
+required = true
+pattern = "^[^@\\s]+@[^@\\s]+\\.[^@\\s]+$"
+pattern_hint = "an email address"
+description = "Where the threshold notification goes."
+
+# ---------------------------------------------------------------- AWS
+[providers.aws]
+status = "full"
+notes = "An account-wide cost budget. `limit_unit` is USD because AWS budgets are denominated in the account's billing currency and USD is what an unconverted account reports in; change it with an extra argument if yours differs."
+
+[[providers.aws.blocks]]
+key = "main"
+resource = "aws_budgets_budget"
+
+[providers.aws.blocks.args]
+name         = { field = "name", transform = "kebab" }
+budget_type  = { value = "COST" }
+time_unit    = { value = "MONTHLY" }
+limit_amount = { func = "tostring", args = [ { field = "monthly_limit" } ] }
+limit_unit   = { value = "USD" }
+
+[[providers.aws.blocks.nested]]
+block = "notification"
+
+[providers.aws.blocks.nested.args]
+comparison_operator        = { value = "GREATER_THAN" }
+threshold                  = { map = "alert_at_percent", table = { "50" = 50, "75" = 75, "80" = 80, "90" = 90, "100" = 100 } }
+threshold_type             = { value = "PERCENTAGE" }
+notification_type          = { value = "ACTUAL" }
+subscriber_email_addresses = { field = "notify_email", wrap = "list" }
+
+[providers.aws.outputs]
+id = { attr = "id", description = "Budget id" }
+
+# ---------------------------------------------------------------- Azure
+[providers.azure]
+status = "partial"
+notes = "A consumption budget on the enclosing resource group. Azure demands a start date on the first of a month; the default is computed from apply time, which is honest but re-computes on every plan, so set the Start month field for a stable configuration."
+
+[[providers.azure.fields]]
+name = "start_month"
+label = "Start month (YYYY-MM)"
+type = "string"
+pattern = "^[0-9]{4}-(0[1-9]|1[0-2])$"
+pattern_hint = "a year and month, e.g. 2026-04"
+description = "First month the budget covers. Leave empty to start from the month the configuration is applied, which makes `plan` show a change every month."
+
+[[providers.azure.blocks]]
+key = "main"
+resource = "azurerm_consumption_budget_resource_group"
+
+[providers.azure.blocks.args]
+name              = { field = "name", transform = "kebab" }
+resource_group_id = { ancestor = "resource_group", attr = "id" }
+amount            = { field = "monthly_limit" }
+time_grain        = { value = "Monthly" }
+
+[[providers.azure.blocks.nested]]
+block = "time_period"
+
+[providers.azure.blocks.nested.args]
+start_date = { if = { provider_field = "start_month" }, then = { template = "{provider.start_month}-01T00:00:00Z" }, else = { func = "formatdate", args = [ { value = "YYYY-MM-01'T'00:00:00Z" }, { func = "timestamp" } ] } }
+
+[[providers.azure.blocks.nested]]
+block = "notification"
+
+[providers.azure.blocks.nested.args]
+enabled        = { value = true }
+operator       = { value = "GreaterThan" }
+threshold      = { map = "alert_at_percent", table = { "50" = 50, "75" = 75, "80" = 80, "90" = 90, "100" = 100 } }
+threshold_type = { value = "Actual" }
+contact_emails = { field = "notify_email", wrap = "list" }
+
+[providers.azure.outputs]
+id = { attr = "id", description = "Budget id" }
+
+[[providers.azure.manual_steps]]
+title = "Pin the budget's start month"
+when = { provider_field = "start_month", absent = true }
+body = """
+With no start month the configuration uses `formatdate("YYYY-MM-01'T'00:00:00Z",
+timestamp())`, which is a different value in every month: `plan` will show the budget as
+changed even when nothing has. Set the Azure **Start month** field once the budget is
+created, to the month it actually started.
+"""
+
+# ---------------------------------------------------------------- GCP
+[providers.gcp]
+status = "partial"
+notes = "Billing budgets belong to a billing account, not to a project, so the billing account id is a provider field rather than something the diagram knows. The threshold notification goes to an email notification channel generated alongside."
+
+[[providers.gcp.fields]]
+name = "billing_account"
+label = "Billing account id"
+type = "string"
+required = true
+pattern = "^[A-Z0-9]{6}-[A-Z0-9]{6}-[A-Z0-9]{6}$"
+pattern_hint = "a billing account id, e.g. 012345-6789AB-CDEF01"
+description = "The billing account the budget watches. Budgets are not project resources: one billing account usually pays for several projects."
+
+[[providers.gcp.blocks]]
+key = "channel"
+resource = "google_monitoring_notification_channel"
+
+[providers.gcp.blocks.args]
+display_name = { template = "{name} budget alerts" }
+type         = { value = "email" }
+labels       = { object = { email_address = { field = "notify_email" } } }
+
+[[providers.gcp.blocks]]
+key = "main"
+resource = "google_billing_budget"
+
+[providers.gcp.blocks.args]
+billing_account = { provider_field = "billing_account" }
+display_name    = { field = "name" }
+
+[[providers.gcp.blocks.nested]]
+block = "budget_filter"
+
+[providers.gcp.blocks.nested.args]
+projects        = { list = [ { func = "format", args = [ { value = "projects/%s" }, { var = "project" } ] } ] }
+calendar_period = { value = "MONTH" }
+
+[[providers.gcp.blocks.nested]]
+block = "amount"
+
+[[providers.gcp.blocks.nested.nested]]
+block = "specified_amount"
+
+[providers.gcp.blocks.nested.nested.args]
+currency_code = { value = "USD" }
+units         = { func = "tostring", args = [ { field = "monthly_limit" } ] }
+
+[[providers.gcp.blocks.nested]]
+block = "threshold_rules"
+
+[providers.gcp.blocks.nested.args]
+threshold_percent = { map = "alert_at_percent", table = { "50" = 0.5, "75" = 0.75, "80" = 0.8, "90" = 0.9, "100" = 1.0 } }
+
+[[providers.gcp.blocks.nested]]
+block = "all_updates_rule"
+
+[providers.gcp.blocks.nested.args]
+schema_version                   = { value = "1.0" }
+monitoring_notification_channels = { self_block = "channel", attr = "id", wrap = "list" }
+
+[providers.gcp.outputs]
+id = { attr = "id", description = "Budget id" }
+
+[[providers.gcp.manual_steps]]
+title = "The budget filter names this project by id, not by number"
+body = """
+`budget_filter.projects` must hold `projects/<project number>` for the API to accept it in
+every case; the generated value uses the project *id* from the `project` variable, which
+the API resolves for most accounts but not all. If `apply` reports an invalid filter,
+replace it with the numeric form (`gcloud projects describe <id> --format='value(projectNumber)'`).
+Budgets also need the Cloud Billing Budget API enabled and the credentials to hold
+`roles/billing.admin` on the billing account.
+"""

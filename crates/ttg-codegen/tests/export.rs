@@ -268,6 +268,56 @@ labels = {arg}
     }
 }
 
+/// `target_shares_ancestor` needs subjects: either a `relation` naming them, or an
+/// enclosing `for_each_relation` block whose current target is the subject.
+#[test]
+fn target_shares_ancestor_needs_a_relation_or_a_repeated_block() {
+    let head = r#"
+schema_version = 2
+[resource]
+type = "thing"
+category = "network"
+display_name = "Thing"
+[[relations]]
+kind = "sends_to"
+targets = ["resource_group"]
+cardinality = "optional"
+[providers.aws]
+[[providers.aws.blocks]]
+key = "main"
+resource = "aws_thing"
+"#;
+    let aws = include_str!("../../../definitions/providers/aws.toml");
+    let rg = r#"
+schema_version = 2
+[resource]
+type = "resource_group"
+category = "organization"
+display_name = "Group"
+kind = "container"
+[providers.aws]
+status = "logical"
+"#;
+    let load = |cond: &str| {
+        let def = format!("{head}when = {cond}\n");
+        Catalog::from_sources(
+            [("thing.toml", def.as_str()), ("resource_group.toml", rg)].into_iter(),
+            [("aws.toml", aws)].into_iter(),
+        )
+        .map(|_| ())
+    };
+
+    let err = load(r#"{ target_shares_ancestor = "resource_group" }"#).expect_err("no subject");
+    assert!(err.to_string().contains("needs a relation"), "{err}");
+
+    let err = load(r#"{ target_shares_ancestor = "resource_group", relation = "reads" }"#)
+        .expect_err("undeclared relation");
+    assert!(err.to_string().contains("undeclared relation 'reads'"), "{err}");
+
+    load(r#"{ target_shares_ancestor = "resource_group", relation = "sends_to" }"#)
+        .expect("a declared relation names its own subjects");
+}
+
 #[test]
 fn step4_network_database_load_balancer() {
     let cat = Catalog::builtin();
@@ -1724,4 +1774,482 @@ fn https_without_a_certificate_is_an_error() {
     }
     // Azure never terminates TLS on a load balancer, so it has nothing to complain about.
     generate(&p, &cat, "azure", Tool::OpenTofu).unwrap();
+}
+
+// ---------------------------------------------------------------------------
+// Operational rest: dead-letter queues, file systems, budgets, targetless
+// endpoints, repositories, alarm presets, topic subscriptions, flow logs,
+// audit trails. All against examples/operations.ttg.json.
+// ---------------------------------------------------------------------------
+
+fn squash(s: &str) -> String {
+    s.split_whitespace().collect::<Vec<_>>().join(" ")
+}
+
+#[test]
+fn dead_letter_queues_on_every_provider() {
+    let cat = Catalog::builtin();
+    let p = example("operations.ttg.json");
+
+    let aws = generate(&p, &cat, "aws", Tool::OpenTofu).unwrap();
+    assert!(
+        squash(&aws.files["serverless.tf"]).contains(
+            "redrive_policy = jsonencode({ deadLetterTargetArn = aws_sqs_queue.transcode_dead_letters.arn, maxReceiveCount = 5 })"
+        ),
+        "{}",
+        aws.files["serverless.tf"]
+    );
+
+    // Both queues sit in one Service Bus Namespace, so the dead letters are forwarded.
+    let az = generate(&p, &cat, "azure", Tool::OpenTofu).unwrap();
+    let sb = squash(&az.files["serverless.tf"]);
+    assert!(sb.contains("dead_lettering_on_message_expiration = true"), "{sb}");
+    assert!(sb.contains("max_delivery_count = 5"), "{sb}");
+    assert!(
+        sb.contains(
+            "forward_dead_lettered_messages_to = azurerm_servicebus_queue.transcode_dead_letters.name"
+        ),
+        "{sb}"
+    );
+
+    let gcp = generate(&p, &cat, "gcp", Tool::OpenTofu).unwrap();
+    let sl = squash(&gcp.files["serverless.tf"]);
+    assert!(
+        sl.contains(
+            "dead_letter_policy { dead_letter_topic = google_pubsub_topic.transcode_dead_letters.id \
+             max_delivery_attempts = 5 }"
+        ),
+        "{sl}"
+    );
+    assert!(sl.contains("resource \"google_pubsub_topic_iam_member\""), "{sl}");
+    assert!(
+        sl.contains("resource \"google_pubsub_subscription_iam_member\""),
+        "{sl}"
+    );
+    assert!(
+        sl.contains("data \"google_project\""),
+        "the service agent is named after the project number: {sl}"
+    );
+}
+
+/// A dead-letter queue in a namespace of its own cannot be forwarded into.
+#[test]
+fn dead_letters_across_namespaces_are_reported() {
+    let cat = Catalog::builtin();
+    let mut p = example("operations.ttg.json");
+    let q = p.nodes.get_mut("q-dead").unwrap();
+    q.parent = Some("rg-ops".into());
+    q.provider_config.entry("azure".into()).or_default().insert(
+        "namespace_name".into(),
+        ttg_core::Value::Str("ttg-operations-dlq".into()),
+    );
+    let az = generate(&p, &cat, "azure", Tool::OpenTofu).unwrap();
+    assert!(
+        !az.files["serverless.tf"].contains("forward_dead_lettered_messages_to"),
+        "{}",
+        az.files["serverless.tf"]
+    );
+    assert!(
+        az.diagnostics.iter().any(|d| d
+            .message
+            .contains("only auto-forwards dead letters inside one namespace")),
+        "{:?}",
+        az.diagnostics
+    );
+}
+
+#[test]
+fn file_system_gets_a_mount_target_per_subnet() {
+    let cat = Catalog::builtin();
+    let p = example("operations.ttg.json");
+
+    let aws = generate(&p, &cat, "aws", Tool::OpenTofu).unwrap();
+    let st = &aws.files["storage.tf"];
+    assert!(
+        st.contains("resource \"aws_efs_file_system\" \"shared_media\""),
+        "{st}"
+    );
+    assert_eq!(
+        st.matches("resource \"aws_efs_mount_target\"").count(),
+        2,
+        "one per subnet: {st}"
+    );
+    assert!(
+        squash(st).contains("security_groups = [ aws_security_group.nfs_clients.id ]"),
+        "{st}"
+    );
+    assert!(aws.files["outputs.tf"].contains("shared_media_mount_targets"));
+
+    let az = generate(&p, &cat, "azure", Tool::OpenTofu).unwrap();
+    let st = squash(&az.files["storage.tf"]);
+    assert!(st.contains("account_kind = \"FileStorage\""), "{st}");
+    assert!(st.contains("enabled_protocol = \"NFS\""), "{st}");
+
+    let gcp = generate(&p, &cat, "gcp", Tool::OpenTofu).unwrap();
+    let st = squash(&gcp.files["storage.tf"]);
+    assert!(st.contains("resource \"google_filestore_instance\""), "{st}");
+    assert!(st.contains("tier = \"BASIC_HDD\""), "{st}");
+    assert!(st.contains("network = google_compute_network.core.name"), "{st}");
+}
+
+#[test]
+fn budget_notifies_at_a_percentage_of_the_limit() {
+    let cat = Catalog::builtin();
+    let p = example("operations.ttg.json");
+
+    let aws = squash(&generate(&p, &cat, "aws", Tool::OpenTofu).unwrap().files["monitoring.tf"]);
+    assert!(aws.contains("budget_type = \"COST\""), "{aws}");
+    assert!(aws.contains("time_unit = \"MONTHLY\""), "{aws}");
+    assert!(
+        aws.contains("threshold = 80 threshold_type = \"PERCENTAGE\""),
+        "{aws}"
+    );
+
+    // A pinned start month avoids the timestamp()-derived default.
+    let az = squash(&generate(&p, &cat, "azure", Tool::OpenTofu).unwrap().files["monitoring.tf"]);
+    assert!(
+        az.contains("time_period { start_date = \"2026-01-01T00:00:00Z\" }"),
+        "{az}"
+    );
+
+    let gcp = squash(&generate(&p, &cat, "gcp", Tool::OpenTofu).unwrap().files["monitoring.tf"]);
+    assert!(
+        gcp.contains("billing_account = \"012345-6789AB-CDEF01\""),
+        "{gcp}"
+    );
+    assert!(
+        gcp.contains("threshold_rules { threshold_percent = 0.8 }"),
+        "{gcp}"
+    );
+}
+
+#[test]
+fn budget_without_a_start_month_computes_one() {
+    let cat = Catalog::builtin();
+    let mut p = example("operations.ttg.json");
+    p.nodes
+        .get_mut("bud-monthly")
+        .unwrap()
+        .provider_config
+        .get_mut("azure")
+        .unwrap()
+        .remove("start_month");
+    let az = generate(&p, &cat, "azure", Tool::OpenTofu).unwrap();
+    assert!(
+        squash(&az.files["monitoring.tf"])
+            .contains("start_date = formatdate(\"YYYY-MM-01'T'00:00:00Z\", timestamp())"),
+        "{}",
+        az.files["monitoring.tf"]
+    );
+    assert!(az
+        .manual_steps
+        .iter()
+        .any(|s| s.title.contains("Pin the budget's start month")));
+}
+
+#[test]
+fn aws_endpoints_need_no_target_and_gateways_take_route_tables() {
+    let cat = Catalog::builtin();
+    let p = example("operations.ttg.json");
+    let aws = generate(&p, &cat, "aws", Tool::OpenTofu).unwrap();
+    let net = squash(&aws.files["network.tf"]);
+    assert!(
+        net.contains("vpc_endpoint_type = \"Gateway\" route_table_ids = [ aws_route_table.app_routes.id ]"),
+        "{net}"
+    );
+    assert!(
+        !net.contains("subnet_ids = [ ]"),
+        "a gateway endpoint has no subnets: {net}"
+    );
+    assert!(
+        net.contains(
+            "service_name = \"com.amazonaws.eu-west-2.logs\" vpc_endpoint_type = \"Interface\" \
+             subnet_ids = [ aws_subnet.apps_a.id, aws_subnet.apps_b.id ]"
+        ),
+        "one interface per zone, and no 'Connects to' link at all: {net}"
+    );
+}
+
+/// Azure still insists on the link AWS can do without.
+#[test]
+fn azure_private_endpoint_still_needs_its_target() {
+    let cat = Catalog::builtin();
+    let mut p = example("hub-spoke.ttg.json");
+    p.edges
+        .retain(|e| !(e.source == "pe-reports" && e.relation == ttg_core::Relation::AttributeReference));
+    let err = generate(&p, &cat, "azure", Tool::OpenTofu).unwrap_err();
+    let msg = format!("{err:?}");
+    assert!(msg.contains("needs a 'Connects to' link"), "{msg}");
+    // AWS is happy: the service name is enough.
+    generate(&p, &cat, "aws", Tool::OpenTofu).unwrap();
+}
+
+#[test]
+fn a_registry_can_hold_several_repositories() {
+    let cat = Catalog::builtin();
+    let p = example("operations.ttg.json");
+    let aws = generate(&p, &cat, "aws", Tool::OpenTofu).unwrap();
+    let c = &aws.files["container.tf"];
+    assert_eq!(c.matches("resource \"aws_ecr_repository\"").count(), 3, "{c}");
+    assert!(c.contains("name                 = \"worker\""), "{c}");
+    assert_eq!(
+        c.matches("resource \"aws_ecr_lifecycle_policy\"").count(),
+        3,
+        "{c}"
+    );
+    assert!(
+        squash(c).contains("image_tag_mutability = \"IMMUTABLE\""),
+        "the posture applies to each: {c}"
+    );
+    assert!(
+        squash(&aws.files["outputs.tf"]).contains(
+            "value = [ aws_ecr_repository.service_images_repo_0.repository_url, \
+             aws_ecr_repository.service_images_repo_1.repository_url, \
+             aws_ecr_repository.service_images_repo_2.repository_url ]"
+        ),
+        "{}",
+        aws.files["outputs.tf"]
+    );
+
+    // With no list the registry node is itself the one repository.
+    let mut p2 = p.clone();
+    p2.nodes
+        .get_mut("reg-images")
+        .unwrap()
+        .config
+        .remove("repositories");
+    let aws2 = generate(&p2, &cat, "aws", Tool::OpenTofu).unwrap();
+    let c2 = &aws2.files["container.tf"];
+    assert_eq!(c2.matches("resource \"aws_ecr_repository\"").count(), 1, "{c2}");
+    assert!(c2.contains("\"aws_ecr_repository\" \"service_images\""), "{c2}");
+}
+
+#[test]
+fn alarm_presets_fill_in_the_provider_metric() {
+    let cat = Catalog::builtin();
+    let p = example("operations.ttg.json");
+
+    let aws = squash(&generate(&p, &cat, "aws", Tool::OpenTofu).unwrap().files["monitoring.tf"]);
+    assert!(
+        aws.contains("metric_name = \"ApproximateNumberOfMessagesVisible\""),
+        "{aws}"
+    );
+    assert!(aws.contains("statistic = \"Maximum\""), "{aws}");
+    assert!(aws.contains("namespace = \"AWS/SQS\""), "{aws}");
+    assert!(
+        aws.contains("dimensions = { QueueName = aws_sqs_queue.transcode_dead_letters.name }"),
+        "{aws}"
+    );
+
+    let az = squash(&generate(&p, &cat, "azure", Tool::OpenTofu).unwrap().files["monitoring.tf"]);
+    assert!(
+        az.contains("metric_namespace = \"Microsoft.ServiceBus/namespaces\""),
+        "{az}"
+    );
+    assert!(az.contains("metric_name = \"DeadletteredMessages\""), "{az}");
+
+    let gcp = squash(&generate(&p, &cat, "gcp", Tool::OpenTofu).unwrap().files["monitoring.tf"]);
+    assert!(
+        gcp.contains("pubsub.googleapis.com/subscription/num_undelivered_messages"),
+        "{gcp}"
+    );
+}
+
+/// A preset the watched type does not have is refused rather than guessed at.
+#[test]
+fn an_alarm_on_a_metric_the_target_lacks_is_an_error() {
+    let cat = Catalog::builtin();
+    let mut p = example("operations.ttg.json");
+    let set = |p: &mut ttg_core::Project, v: &str| {
+        p.nodes
+            .get_mut("alm-dlq")
+            .unwrap()
+            .config
+            .insert("metric".into(), ttg_core::Value::Str(v.into()));
+    };
+    set(&mut p, "lb_5xx");
+    let err = generate(&p, &cat, "aws", Tool::OpenTofu).unwrap_err();
+    assert!(
+        format!("{err:?}").contains("CloudWatch does not publish that metric"),
+        "{err:?}"
+    );
+
+    // 'custom' hands back the free-text fields, whose declared defaults still apply.
+    set(&mut p, "custom");
+    let aws = generate(&p, &cat, "aws", Tool::OpenTofu).unwrap();
+    assert!(aws.files["monitoring.tf"].contains("metric_name = \"CPUUtilization\""));
+    p.nodes
+        .get_mut("alm-dlq")
+        .unwrap()
+        .provider_config
+        .entry("aws".into())
+        .or_default()
+        .insert(
+            "metric_name".into(),
+            ttg_core::Value::Str("MessagesSpilled".into()),
+        );
+    let aws = generate(&p, &cat, "aws", Tool::OpenTofu).unwrap();
+    assert!(aws.files["monitoring.tf"].contains("metric_name = \"MessagesSpilled\""));
+}
+
+#[test]
+fn topic_subscriptions_reach_people_where_they_can() {
+    let cat = Catalog::builtin();
+    let p = example("operations.ttg.json");
+
+    let aws = squash(&generate(&p, &cat, "aws", Tool::OpenTofu).unwrap().files["serverless.tf"]);
+    assert!(
+        aws.contains("resource \"aws_sns_topic_subscription\" \"ops_alerts_sub_endpoint_0\""),
+        "{aws}"
+    );
+    assert!(
+        aws.contains("protocol = \"email\" endpoint = \"ops@example.com\""),
+        "{aws}"
+    );
+
+    for provider in ["azure", "gcp"] {
+        let g = generate(&p, &cat, provider, Tool::OpenTofu).unwrap();
+        assert!(
+            g.diagnostics.iter().any(|d| {
+                d.message.contains("ops@example.com") || d.message.contains("endpoint subscriptions")
+            }),
+            "{provider} should say it cannot mail anyone: {:?}",
+            g.diagnostics
+        );
+    }
+
+    // https is the one protocol Pub/Sub can push to.
+    let mut p2 = p.clone();
+    let mut row = ttg_core::Record::new();
+    row.insert("protocol".into(), ttg_core::Value::Str("https".into()));
+    row.insert(
+        "endpoint".into(),
+        ttg_core::Value::Str("https://ops.example.com/hook".into()),
+    );
+    p2.nodes
+        .get_mut("tp-alerts")
+        .unwrap()
+        .config
+        .insert("subscriptions".into(), ttg_core::Value::Records(vec![row]));
+    let gcp = squash(&generate(&p2, &cat, "gcp", Tool::OpenTofu).unwrap().files["serverless.tf"]);
+    assert!(
+        gcp.contains("push_config { push_endpoint = \"https://ops.example.com/hook\" }"),
+        "{gcp}"
+    );
+}
+
+#[test]
+fn flow_logs_take_the_shape_each_provider_gives_them() {
+    let cat = Catalog::builtin();
+    let p = example("operations.ttg.json");
+
+    let aws = squash(&generate(&p, &cat, "aws", Tool::OpenTofu).unwrap().files["network.tf"]);
+    assert!(aws.contains("resource \"aws_flow_log\" \"core_flow\""), "{aws}");
+    assert!(aws.contains("traffic_type = \"ALL\""), "{aws}");
+    assert!(aws.contains("Service = \"vpc-flow-logs.amazonaws.com\""), "{aws}");
+    assert!(
+        aws.contains("iam_role_arn = aws_iam_role.core_flow_role.arn"),
+        "{aws}"
+    );
+
+    // Google Cloud logs flows per subnet, from the network's own setting.
+    let gcp = squash(&generate(&p, &cat, "gcp", Tool::OpenTofu).unwrap().files["network.tf"]);
+    assert_eq!(gcp.matches("enable_flow_logs = true").count(), 2, "{gcp}");
+    assert_eq!(
+        gcp.matches("aggregation_interval = \"INTERVAL_5_SEC\"").count(),
+        2
+    );
+
+    // Azure needs a Network Watcher and a storage account, so it says so.
+    let az = generate(&p, &cat, "azure", Tool::OpenTofu).unwrap();
+    assert!(az
+        .manual_steps
+        .iter()
+        .any(|s| s.title.contains("Network Watcher")));
+
+    // With flow logs off the whole apparatus disappears.
+    let mut p2 = p.clone();
+    p2.containers
+        .get_mut("vnet-ops")
+        .unwrap()
+        .config
+        .insert("flow_logs".into(), ttg_core::Value::Bool(false));
+    let aws2 = generate(&p2, &cat, "aws", Tool::OpenTofu).unwrap();
+    assert!(!aws2.files["network.tf"].contains("aws_flow_log"));
+    let gcp2 = generate(&p2, &cat, "gcp", Tool::OpenTofu).unwrap();
+    assert!(!gcp2.files["network.tf"].contains("log_config"));
+}
+
+#[test]
+fn an_audit_trail_brings_its_bucket_policy_with_it() {
+    let cat = Catalog::builtin();
+    let p = example("operations.ttg.json");
+
+    let aws = generate(&p, &cat, "aws", Tool::OpenTofu).unwrap();
+    let mon = squash(&aws.files["monitoring.tf"]);
+    assert!(
+        mon.contains("resource \"aws_cloudtrail\" \"account_activity\""),
+        "{mon}"
+    );
+    assert!(
+        mon.contains("s3_bucket_name = aws_s3_bucket.audit_archive.id"),
+        "{mon}"
+    );
+    assert!(
+        mon.contains("depends_on = [ aws_s3_bucket_policy.audit_archive_policy ]"),
+        "CloudTrail is created only once the bucket policy lets it write: {mon}"
+    );
+    let st = squash(&aws.files["storage.tf"]);
+    assert!(st.contains("Sid = \"AWSCloudTrailAclCheck\""), "{st}");
+    assert!(st.contains("Sid = \"AWSCloudTrailWrite\""), "{st}");
+
+    // Azure records the Activity Log without being asked; Google Cloud configures audit logs.
+    let az = generate(&p, &cat, "azure", Tool::OpenTofu).unwrap();
+    assert!(
+        !az.files
+            .values()
+            .any(|f| f.contains("cloudtrail") || f.contains("audit_log")),
+        "nothing is emitted on Azure"
+    );
+    let gcp = squash(&generate(&p, &cat, "gcp", Tool::OpenTofu).unwrap().files["monitoring.tf"]);
+    assert!(gcp.contains("service = \"allServices\""), "{gcp}");
+    assert!(
+        gcp.contains("audit_log_config { log_type = \"ADMIN_READ\" }"),
+        "{gcp}"
+    );
+    assert!(
+        !gcp.contains("DATA_READ"),
+        "data access logging is off by default: {gcp}"
+    );
+
+    let mut p2 = p.clone();
+    p2.nodes
+        .get_mut("trail-account")
+        .unwrap()
+        .config
+        .insert("data_events".into(), ttg_core::Value::Bool(true));
+    let gcp2 = squash(&generate(&p2, &cat, "gcp", Tool::OpenTofu).unwrap().files["monitoring.tf"]);
+    assert!(gcp2.contains("log_type = \"DATA_READ\""), "{gcp2}");
+    assert!(gcp2.contains("log_type = \"DATA_WRITE\""), "{gcp2}");
+    let aws2 = squash(&generate(&p2, &cat, "aws", Tool::OpenTofu).unwrap().files["monitoring.tf"]);
+    assert!(
+        aws2.contains("event_selector { read_write_type = \"All\" include_management_events = true }"),
+        "{aws2}"
+    );
+}
+
+/// A trail with nowhere to write is refused rather than exported half-done.
+#[test]
+fn an_audit_trail_without_a_bucket_is_an_error() {
+    let cat = Catalog::builtin();
+    let mut p = example("operations.ttg.json");
+    p.edges.retain(|e| e.source != "trail-account");
+    let err = generate(&p, &cat, "aws", Tool::OpenTofu).unwrap_err();
+    assert!(
+        format!("{err:?}").contains("CloudTrail delivers into one"),
+        "{err:?}"
+    );
+    // Azure and Google Cloud need no bucket at all.
+    generate(&p, &cat, "azure", Tool::OpenTofu).unwrap();
+    generate(&p, &cat, "gcp", Tool::OpenTofu).unwrap();
 }

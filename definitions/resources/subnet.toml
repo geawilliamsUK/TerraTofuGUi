@@ -104,6 +104,7 @@ id = { attr = "id", description = "Subnet id" }
 # ---------------------------------------------------------------- GCP
 [providers.gcp]
 status = "full"
+notes = "Flow logs are a subnet setting on Google Cloud, so a subnet turns them on when the network it belongs to has 'Flow logs' set."
 
 [[providers.gcp.blocks]]
 key = "main"
@@ -115,6 +116,16 @@ ip_cidr_range            = { field = "cidr_block" }
 region                   = { var = "region" }
 network                  = { relation = "network_membership", attr = "id" }
 private_ip_google_access = { value = true }
+enable_flow_logs         = { if = { relation = "network_membership", target_field = "flow_logs" }, then = { value = true } }
+
+[[providers.gcp.blocks.nested]]
+block = "log_config"
+when = { relation = "network_membership", target_field = "flow_logs" }
+
+[providers.gcp.blocks.nested.args]
+aggregation_interval = { value = "INTERVAL_5_SEC" }
+flow_sampling        = { value = 0.5 }
+metadata             = { value = "INCLUDE_ALL_METADATA" }
 
 [providers.gcp.outputs]
 id = { attr = "id", description = "Subnetwork id" }

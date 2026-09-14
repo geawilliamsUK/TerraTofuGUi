@@ -139,7 +139,7 @@ restrict_public_buckets = { value = true }
 [[providers.aws.blocks]]
 key = "policy"
 resource = "aws_s3_bucket_policy"
-when = { any = [ { field = "tls_only" }, { relation = "logs_to", incoming = true } ] }
+when = { any = [ { field = "tls_only" }, { relation = "logs_to", incoming = true }, { relation = "attachment", incoming = true, target_type = "audit_trail" } ] }
 
 [providers.aws.blocks.args]
 bucket     = { self_block = "main", attr = "id" }
@@ -159,6 +159,17 @@ then = { object = { Sid = { value = "DenyInsecureTransport" }, Effect = { value 
 [[providers.aws.blocks.args.policy.args.object.Statement.list]]
 if = { relation = "logs_to", incoming = true }
 then = { object = { Sid = { value = "AllowServerAccessLogDelivery" }, Effect = { value = "Allow" }, Principal = { object = { Service = { value = "logging.s3.amazonaws.com" } } }, Action = { value = "s3:PutObject" }, Resource = { func = "format", args = [ { value = "%s/*" }, { self_block = "main", attr = "arn" } ] } } }
+
+# CloudTrail reads the bucket's ACL before its first delivery and refuses to create a
+# trail until both statements are here, which is why they live on the bucket rather than
+# on the Audit Trail node.
+[[providers.aws.blocks.args.policy.args.object.Statement.list]]
+if = { relation = "attachment", incoming = true, target_type = "audit_trail" }
+then = { object = { Sid = { value = "AWSCloudTrailAclCheck" }, Effect = { value = "Allow" }, Principal = { object = { Service = { value = "cloudtrail.amazonaws.com" } } }, Action = { value = "s3:GetBucketAcl" }, Resource = { self_block = "main", attr = "arn" } } }
+
+[[providers.aws.blocks.args.policy.args.object.Statement.list]]
+if = { relation = "attachment", incoming = true, target_type = "audit_trail" }
+then = { object = { Sid = { value = "AWSCloudTrailWrite" }, Effect = { value = "Allow" }, Principal = { object = { Service = { value = "cloudtrail.amazonaws.com" } } }, Action = { value = "s3:PutObject" }, Resource = { func = "format", args = [ { value = "%s/*" }, { self_block = "main", attr = "arn" } ] }, Condition = { object = { StringEquals = { object = { "s3:x-amz-acl" = { value = "bucket-owner-full-control" } } } } } } }
 
 # A linked key switches the bucket to SSE-KMS — unless it is a log target, which S3 only
 # writes into when it is encrypted with SSE-S3.

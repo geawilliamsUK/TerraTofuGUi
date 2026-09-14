@@ -454,11 +454,18 @@ fn check_condition(ctx: &mut SourceCtx, c: &Condition, errs: &mut Vec<String>) {
         }
         Condition::Target(t) => {
             ctx.v2 = true;
-            if !ctx.in_relation {
-                errs.push(format!(
-                    "{}when target_shares_ancestor is only valid inside a for_each_relation block",
+            match &t.relation {
+                // `relation` names the subjects itself, so no enclosing repeated block is needed.
+                Some(rel) => check_relation_ref(ctx, "when", rel, t.target_type.as_deref(), errs),
+                None if t.target_type.is_some() => errs.push(format!(
+                    "{}when target_shares_ancestor: target_type only applies together with relation",
                     ctx.what
-                ));
+                )),
+                None if !ctx.in_relation => errs.push(format!(
+                    "{}when target_shares_ancestor needs a relation, or a for_each_relation block",
+                    ctx.what
+                )),
+                None => {}
             }
             if !ctx.cat.is_container(&t.target_shares_ancestor) {
                 errs.push(format!(
@@ -708,14 +715,16 @@ fn check_source(ctx: &mut SourceCtx, at: &str, src: &ArgSource, errs: &mut Vec<S
             for ph in crate::fields::template_placeholders(&t.template) {
                 if let Some(item) = ph.strip_prefix("item.") {
                     ctx.v2 = true;
-                    // `{item.index}` is the row position rather than one of its fields.
-                    if item != "index" {
+                    // `{item.index}` is the row position, not one of the row's fields.
+                    if item == "index" {
+                        if ctx.item_fields.is_none() {
+                            errs.push(e(
+                                "template placeholder '{item.index}' is only valid inside a for_each_field block"
+                                    .into(),
+                            ));
+                        }
+                    } else {
                         check_item_ref(ctx, at, item, errs);
-                    } else if ctx.item_fields.is_none() {
-                        errs.push(e(
-                            "template placeholder '{item.index}' is only valid inside a for_each_field block"
-                                .into(),
-                        ));
                     }
                     continue;
                 }

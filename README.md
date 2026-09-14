@@ -13,22 +13,32 @@ provider — never a single "portable" HCL file, because no such thing can exist
 
 ![TerraTofu GUI with the three-tier example open](docs/screenshot.png)
 
-Status: **Phase 3** — 38 curated abstract types mapped for AWS, Azure and Google Cloud,
+Status: **Phase 3** — 41 curated abstract types mapped for AWS, Azure and Google Cloud,
 plus every native provider resource through the bundled schema index (see "Beyond the
 curated catalog"). Curated: networking (Virtual Network, Subnet, Internet Gateway, NAT
 Gateway, Route Table, Security Group, Private Endpoint, Network Peering), the internet-facing
 edge (Load Balancer with HTTPS, TLS Certificate, Web Application Firewall, CDN), compute
 (Compute Instance, Autoscaling Group), data (Relational Database, NoSQL Table, Cache, Object
-Storage), serverless (Function, Event Queue, Topic, the Azure-only Storage Queue and
+Storage, File System), serverless (Function, Event Queue, Topic, the Azure-only Storage Queue and
 Service Bus Namespace), containers (Container App, Container Registry, Kubernetes Cluster,
 Kubernetes Node Pool, Kubernetes Workload), DNS (Zone, Record), secrets (Key Vault,
-Secret, Encryption Key), monitoring (Log Group, Alarm), IAM Role, User Identity and the Resource Group container. A
+Secret, Encryption Key), monitoring (Log Group, Alarm, Budget, Audit Trail), IAM Role, User Identity and the Resource Group container. A
 Kubernetes Workload turns its links into EKS Pod Identity, an AKS federated credential or
 a GKE workload-identity binding plus a least-privilege policy, the way a Function does.
 Gaps a provider cannot
 express (an Azure database's network access, for example) are reported as manual steps,
 never papered over. Every example passes `tofu validate` for all three providers and
 both tools in CI.
+
+Day-two operations are part of the vocabulary too: a queue can **dead-letter** into
+another one (an SQS redrive policy, Service Bus forwarding inside a namespace, a Pub/Sub
+dead-letter policy with the IAM the service agent needs); an **Alarm** picks its metric
+from a portable preset (queue depth, dead letters, 5xx, free storage, …) and refuses a
+preset the watched resource has no metric for rather than guessing; a **Virtual Network**
+can turn on flow logs; a **Container Registry** can hold several repositories; a **Topic**
+can subscribe a mailbox or a webhook; and **Budget** and **Audit Trail** put the monthly
+spend alert and the account's activity record on the canvas. See
+`examples/operations.ttg.json`.
 
 Security posture is part of the curated vocabulary rather than something to bolt on
 afterwards: buckets block public access and refuse plain HTTP by default, expire objects

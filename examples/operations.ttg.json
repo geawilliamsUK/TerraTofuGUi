@@ -1,0 +1,510 @@
+{
+  "schema_version": 1,
+  "name": "operations",
+  "settings": {
+    "tool": "opentofu",
+    "target_provider": "aws",
+    "provider_settings": {
+      "aws": {
+        "region": "eu-west-2"
+      },
+      "azure": {
+        "location": "uksouth"
+      },
+      "gcp": {
+        "project": "ttg-operations",
+        "region": "europe-west2",
+        "zone": "europe-west2-a"
+      }
+    },
+    "backend": null,
+    "state_encryption": false,
+    "tags": {
+      "Project": "operations"
+    }
+  },
+  "containers": {
+    "rg-ops": {
+      "id": "rg-ops",
+      "name": "operations",
+      "container_type": "resource_group",
+      "config": {},
+      "provider_config": {},
+      "position": {
+        "x": 40,
+        "y": 40
+      },
+      "size": {
+        "w": 1560,
+        "h": 900
+      },
+      "parent": null,
+      "manual": false
+    },
+    "vnet-ops": {
+      "id": "vnet-ops",
+      "name": "core",
+      "container_type": "virtual_network",
+      "config": {
+        "cidr_block": "10.30.0.0/16",
+        "flow_logs": true
+      },
+      "provider_config": {},
+      "position": {
+        "x": 80,
+        "y": 120
+      },
+      "size": {
+        "w": 880,
+        "h": 600
+      },
+      "parent": "rg-ops",
+      "manual": false
+    },
+    "sb-ops": {
+      "id": "sb-ops",
+      "name": "work bus",
+      "container_type": "servicebus_namespace",
+      "config": {
+        "sku": "Standard"
+      },
+      "provider_config": {
+        "azure": {
+          "namespace_name": "ttg-operations-bus"
+        }
+      },
+      "position": {
+        "x": 1010,
+        "y": 120
+      },
+      "size": {
+        "w": 540,
+        "h": 300
+      },
+      "parent": "rg-ops",
+      "manual": false
+    }
+  },
+  "nodes": {
+    "sub-a": {
+      "id": "sub-a",
+      "name": "apps a",
+      "resource_type": "subnet",
+      "config": {
+        "cidr_block": "10.30.0.0/24"
+      },
+      "provider_config": {
+        "aws": {
+          "availability_zone": "eu-west-2a"
+        }
+      },
+      "position": {
+        "x": 120,
+        "y": 190
+      },
+      "parent": "vnet-ops",
+      "manual": false
+    },
+    "sub-b": {
+      "id": "sub-b",
+      "name": "apps b",
+      "resource_type": "subnet",
+      "config": {
+        "cidr_block": "10.30.1.0/24"
+      },
+      "provider_config": {
+        "aws": {
+          "availability_zone": "eu-west-2b"
+        }
+      },
+      "position": {
+        "x": 360,
+        "y": 190
+      },
+      "parent": "vnet-ops",
+      "manual": false
+    },
+    "rt-ops": {
+      "id": "rt-ops",
+      "name": "app routes",
+      "resource_type": "route_table",
+      "config": {},
+      "provider_config": {},
+      "position": {
+        "x": 600,
+        "y": 190
+      },
+      "parent": "vnet-ops",
+      "manual": false
+    },
+    "sg-nfs": {
+      "id": "sg-nfs",
+      "name": "nfs clients",
+      "resource_type": "security_group",
+      "config": {
+        "rules": [
+          {
+            "name": "nfs",
+            "direction": "ingress",
+            "protocol": "tcp",
+            "from_port": 2049,
+            "to_port": 2049,
+            "cidr": "10.30.0.0/16"
+          }
+        ]
+      },
+      "provider_config": {},
+      "position": {
+        "x": 120,
+        "y": 300
+      },
+      "parent": "vnet-ops",
+      "manual": false
+    },
+    "sg-endpoints": {
+      "id": "sg-endpoints",
+      "name": "endpoint https",
+      "resource_type": "security_group",
+      "config": {
+        "rules": [
+          {
+            "name": "https",
+            "direction": "ingress",
+            "protocol": "tcp",
+            "from_port": 443,
+            "to_port": 443,
+            "cidr": "10.30.0.0/16"
+          }
+        ]
+      },
+      "provider_config": {},
+      "position": {
+        "x": 360,
+        "y": 300
+      },
+      "parent": "vnet-ops",
+      "manual": false
+    },
+    "fs-shared": {
+      "id": "fs-shared",
+      "name": "shared media",
+      "resource_type": "file_system",
+      "config": {
+        "performance": "general_purpose",
+        "size_gb": 1024
+      },
+      "provider_config": {
+        "azure": {
+          "account_name": "ttgopsshared01"
+        }
+      },
+      "position": {
+        "x": 600,
+        "y": 300
+      },
+      "parent": "vnet-ops",
+      "manual": false
+    },
+    "pe-s3": {
+      "id": "pe-s3",
+      "name": "s3 gateway",
+      "resource_type": "private_endpoint",
+      "config": {
+        "subresource": "blob"
+      },
+      "provider_config": {
+        "aws": {
+          "service": "s3"
+        }
+      },
+      "providers": [
+        "aws"
+      ],
+      "position": {
+        "x": 120,
+        "y": 420
+      },
+      "parent": "vnet-ops",
+      "manual": false
+    },
+    "pe-logs": {
+      "id": "pe-logs",
+      "name": "logs endpoint",
+      "resource_type": "private_endpoint",
+      "config": {
+        "subresource": "blob"
+      },
+      "provider_config": {
+        "aws": {
+          "service": "logs"
+        }
+      },
+      "providers": [
+        "aws"
+      ],
+      "position": {
+        "x": 360,
+        "y": 420
+      },
+      "parent": "vnet-ops",
+      "manual": false
+    },
+    "log-flow": {
+      "id": "log-flow",
+      "name": "network flows",
+      "resource_type": "log_group",
+      "config": {
+        "retention_days": "90"
+      },
+      "provider_config": {},
+      "position": {
+        "x": 620,
+        "y": 760
+      },
+      "parent": "rg-ops",
+      "manual": false
+    },
+    "q-work": {
+      "id": "q-work",
+      "name": "transcode work",
+      "resource_type": "event_queue",
+      "config": {
+        "visibility_timeout_seconds": 60,
+        "max_receives": 5
+      },
+      "provider_config": {},
+      "position": {
+        "x": 1050,
+        "y": 190
+      },
+      "parent": "sb-ops",
+      "manual": false
+    },
+    "q-dead": {
+      "id": "q-dead",
+      "name": "transcode dead letters",
+      "resource_type": "event_queue",
+      "config": {
+        "visibility_timeout_seconds": 60,
+        "message_retention_seconds": 1209600
+      },
+      "provider_config": {},
+      "position": {
+        "x": 1300,
+        "y": 190
+      },
+      "parent": "sb-ops",
+      "manual": false
+    },
+    "tp-alerts": {
+      "id": "tp-alerts",
+      "name": "ops alerts",
+      "resource_type": "topic",
+      "config": {
+        "subscriptions": [
+          {
+            "protocol": "email",
+            "endpoint": "ops@example.com"
+          }
+        ]
+      },
+      "provider_config": {},
+      "position": {
+        "x": 1050,
+        "y": 300
+      },
+      "parent": "sb-ops",
+      "manual": false
+    },
+    "alm-dlq": {
+      "id": "alm-dlq",
+      "name": "dead letters piling up",
+      "resource_type": "alarm",
+      "config": {
+        "metric": "dlq_depth",
+        "threshold": 1,
+        "comparison": "greater_than",
+        "period_seconds": "300",
+        "evaluation_periods": 1
+      },
+      "provider_config": {
+        "azure": {
+          "notify_email": "ops@example.com"
+        },
+        "gcp": {
+          "notify_email": "ops@example.com"
+        }
+      },
+      "position": {
+        "x": 1010,
+        "y": 460
+      },
+      "parent": "rg-ops",
+      "manual": false
+    },
+    "reg-images": {
+      "id": "reg-images",
+      "name": "service images",
+      "resource_type": "container_registry",
+      "config": {
+        "repositories": [
+          "api",
+          "worker",
+          "migrations"
+        ],
+        "immutable_tags": true,
+        "scan_on_push": true,
+        "keep_last_images": 20
+      },
+      "provider_config": {
+        "azure": {
+          "registry_name": "ttgopsimages01"
+        }
+      },
+      "position": {
+        "x": 1010,
+        "y": 560
+      },
+      "parent": "rg-ops",
+      "manual": false
+    },
+    "obj-audit": {
+      "id": "obj-audit",
+      "name": "audit archive",
+      "resource_type": "object_storage",
+      "config": {
+        "versioning": true,
+        "block_public_access": true,
+        "tls_only": true,
+        "expire_days": 365
+      },
+      "provider_config": {
+        "aws": {
+          "bucket_name": "ttg-operations-audit-01"
+        },
+        "azure": {
+          "account_name": "ttgopsaudit01",
+          "container_name": "audit",
+          "replication": "LRS"
+        },
+        "gcp": {
+          "bucket_name": "ttg-operations-audit-01"
+        }
+      },
+      "position": {
+        "x": 1010,
+        "y": 660
+      },
+      "parent": "rg-ops",
+      "manual": false
+    },
+    "trail-account": {
+      "id": "trail-account",
+      "name": "account activity",
+      "resource_type": "audit_trail",
+      "config": {
+        "multi_region": true,
+        "data_events": false
+      },
+      "provider_config": {},
+      "position": {
+        "x": 1300,
+        "y": 660
+      },
+      "parent": "rg-ops",
+      "manual": false
+    },
+    "bud-monthly": {
+      "id": "bud-monthly",
+      "name": "monthly spend",
+      "resource_type": "budget",
+      "config": {
+        "monthly_limit": 2500,
+        "alert_at_percent": "80",
+        "notify_email": "finance@example.com"
+      },
+      "provider_config": {
+        "azure": {
+          "start_month": "2026-01"
+        },
+        "gcp": {
+          "billing_account": "012345-6789AB-CDEF01"
+        }
+      },
+      "position": {
+        "x": 1300,
+        "y": 560
+      },
+      "parent": "rg-ops",
+      "manual": false
+    }
+  },
+  "edges": [
+    {
+      "source": "rt-ops",
+      "relation": "attachment",
+      "target": "sub-a"
+    },
+    {
+      "source": "rt-ops",
+      "relation": "attachment",
+      "target": "sub-b"
+    },
+    {
+      "source": "vnet-ops",
+      "relation": "logs_to",
+      "target": "log-flow"
+    },
+    {
+      "source": "fs-shared",
+      "relation": "network_membership",
+      "target": "sub-a"
+    },
+    {
+      "source": "fs-shared",
+      "relation": "network_membership",
+      "target": "sub-b"
+    },
+    {
+      "source": "fs-shared",
+      "relation": "attribute_reference",
+      "target": "sg-nfs"
+    },
+    {
+      "source": "pe-s3",
+      "relation": "attachment",
+      "target": "rt-ops"
+    },
+    {
+      "source": "pe-logs",
+      "relation": "network_membership",
+      "target": "sub-a"
+    },
+    {
+      "source": "pe-logs",
+      "relation": "network_membership",
+      "target": "sub-b"
+    },
+    {
+      "source": "pe-logs",
+      "relation": "attachment",
+      "target": "sg-endpoints"
+    },
+    {
+      "source": "q-work",
+      "relation": "dead_letters_to",
+      "target": "q-dead"
+    },
+    {
+      "source": "alm-dlq",
+      "relation": "attribute_reference",
+      "target": "q-dead"
+    },
+    {
+      "source": "trail-account",
+      "relation": "attachment",
+      "target": "obj-audit"
+    }
+  ],
+  "views": []
+}

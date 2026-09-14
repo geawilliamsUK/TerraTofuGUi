@@ -3,10 +3,17 @@
 # A metric alarm on one linked resource: fires when a metric crosses a threshold for
 # a number of periods, optionally notifying a Topic.
 #   AWS:   aws_cloudwatch_metric_alarm (namespace / metric name / dimension follow the
-#          linked resource type).
-#   Azure: azurerm_monitor_metric_alert scoped to the linked resource.
-# Metric names differ per provider, so each provider mapping carries its own metric field
-# with a sensible default (CPU); the threshold and timing are abstract.
+#          watched resource type).
+#   Azure: azurerm_monitor_metric_alert scoped to the watched resource.
+#   GCP:   google_monitoring_alert_policy with a threshold condition.
+#
+# The **Metric** field is a preset: it names the thing being watched ("queue depth")
+# rather than a provider's spelling of it, and each provider mapping turns it into its own
+# metric name, namespace and aggregation for the type of resource the alarm watches. Not
+# every cloud publishes every metric for every type, so each mapping also carries one
+# design-time check that refuses a combination it cannot express, and `custom` always
+# falls back to the free-text provider fields. Those fields, when set, win over the
+# preset, so a project that was drawn before presets existed keeps the metric it chose.
 
 schema_version = 2
 
@@ -14,11 +21,19 @@ schema_version = 2
 type = "alarm"
 category = "monitoring"
 display_name = "Alarm"
-description = "A metric alarm on a linked resource (CPU by default). Link the resource it watches and, optionally, a Topic to notify."
+description = "A metric alarm on a linked resource. Pick what it watches and which metric; the provider names are filled in."
 kind = "node"
 allowed_parents = ["resource_group", "virtual_network"]
 network_agnostic = true
 icon = "ALM"
+
+[[fields]]
+name = "metric"
+label = "Metric"
+type = "enum"
+options = ["cpu", "memory", "disk", "queue_depth", "dlq_depth", "queue_oldest_message_age", "db_storage", "db_connections", "lb_5xx", "lb_latency", "function_errors", "node_count", "bucket_size", "custom"]
+default = "custom"
+description = "What to watch, in portable terms. Each provider maps it to its own metric for the watched resource type; 'custom' uses the provider's metric fields instead. 'dlq_depth' follows each cloud's shape of a dead-letter queue: on AWS and Google Cloud it is a queue of its own, so link the alarm to it; on Azure dead letters are a sub-queue, so link the alarm to the working queue."
 
 [[fields]]
 name = "threshold"
@@ -53,7 +68,7 @@ default = 2
 [[relations]]
 kind = "attribute_reference"
 label = "Watches"
-targets = ["compute_instance", "relational_database", "function", "event_queue", "load_balancer", "container_app"]
+targets = ["compute_instance", "relational_database", "function", "event_queue", "load_balancer", "container_app", "kubernetes_cluster", "object_storage", "topic", "cache", "file_system"]
 cardinality = "one"
 
 [[relations]]
@@ -68,20 +83,44 @@ cardinality = "optional"
 status = "full"
 
 [[providers.aws.fields]]
+name = "metric_namespace"
+label = "CloudWatch namespace"
+type = "string"
+description = "Overrides the namespace the watched resource type implies (AWS/EC2, AWS/RDS, AWS/SQS, ...). Needed for 'custom' metrics outside those namespaces."
+
+[[providers.aws.fields]]
 name = "metric_name"
 label = "CloudWatch metric"
 type = "string"
-required = true
 default = "CPUUtilization"
-description = "Metric name in the resource's namespace, e.g. CPUUtilization (EC2, RDS), Errors / Duration (Lambda), ApproximateNumberOfMessagesVisible (SQS), TargetResponseTime (ALB)."
+description = "Metric name, used when Metric is 'custom' (every other preset names its own metric): e.g. CPUUtilization, Errors (Lambda), ApproximateNumberOfMessagesVisible (SQS), or a metric your own code publishes."
 
 [[providers.aws.fields]]
 name = "statistic"
 label = "Statistic"
 type = "enum"
-required = true
 options = ["Average", "Sum", "Maximum", "Minimum"]
 default = "Average"
+description = "Statistic for the custom metric: Sum for counts, Maximum for queue depth, Average for utilisation. A preset picks its own."
+
+# Combinations CloudWatch does not publish for the watched type. One clause per type: the
+# alarm watches a T, and the preset is none of the ones T has.
+[[providers.aws.checks]]
+severity = "error"
+when = { any = [ { all = [ { relation = "attribute_reference", target_type = "compute_instance" }, { field = "metric", not_equals = "custom" }, { field = "metric", not_equals = "cpu" }, { field = "metric", not_equals = "disk" } ] }, { all = [ { relation = "attribute_reference", target_type = "relational_database" }, { field = "metric", not_equals = "custom" }, { field = "metric", not_equals = "cpu" }, { field = "metric", not_equals = "db_storage" }, { field = "metric", not_equals = "db_connections" } ] }, { all = [ { relation = "attribute_reference", target_type = "function" }, { field = "metric", not_equals = "custom" }, { field = "metric", not_equals = "function_errors" } ] }, { all = [ { relation = "attribute_reference", target_type = "event_queue" }, { field = "metric", not_equals = "custom" }, { field = "metric", not_equals = "queue_depth" }, { field = "metric", not_equals = "dlq_depth" }, { field = "metric", not_equals = "queue_oldest_message_age" } ] }, { all = [ { relation = "attribute_reference", target_type = "load_balancer" }, { field = "metric", not_equals = "custom" }, { field = "metric", not_equals = "lb_5xx" }, { field = "metric", not_equals = "lb_latency" } ] }, { all = [ { relation = "attribute_reference", target_type = "container_app" }, { field = "metric", not_equals = "custom" }, { field = "metric", not_equals = "cpu" }, { field = "metric", not_equals = "memory" } ] }, { all = [ { relation = "attribute_reference", target_type = "kubernetes_cluster" }, { field = "metric", not_equals = "custom" }, { field = "metric", not_equals = "node_count" } ] }, { all = [ { relation = "attribute_reference", target_type = "object_storage" }, { field = "metric", not_equals = "custom" }, { field = "metric", not_equals = "bucket_size" } ] }, { all = [ { relation = "attribute_reference", target_type = "topic" }, { field = "metric", not_equals = "custom" } ] }, { all = [ { relation = "attribute_reference", target_type = "cache" }, { field = "metric", not_equals = "custom" }, { field = "metric", not_equals = "cpu" }, { field = "metric", not_equals = "memory" } ] }, { all = [ { relation = "attribute_reference", target_type = "file_system" }, { field = "metric", not_equals = "custom" } ] } ] }
+message = "\"{name}\": CloudWatch does not publish that metric for the resource this alarm watches. Pick a metric the resource has, or choose 'custom' and name the CloudWatch metric yourself (SNS: NumberOfNotificationsFailed; EFS: PercentIOLimit, BurstCreditBalance)"
+
+[[providers.aws.checks]]
+when = { field = "metric", equals = "disk" }
+message = "\"{name}\" watches disk usage, which EC2 does not publish on its own: the CloudWatch agent must be running on the instance and writing `disk_used_percent` into the CWAgent namespace, with the same dimensions the alarm uses"
+
+[[providers.aws.checks]]
+when = { field = "metric", equals = "bucket_size" }
+message = "\"{name}\" watches bucket size, which S3 reports once a day: use a period of 900 seconds or more and expect the alarm to sit in INSUFFICIENT_DATA between daily reports"
+
+[[providers.aws.checks]]
+when = { field = "metric", equals = "node_count" }
+message = "\"{name}\" watches the cluster's node count, which only exists once CloudWatch Container Insights is enabled on the EKS cluster"
 
 [[providers.aws.blocks]]
 key = "main"
@@ -91,24 +130,32 @@ resource = "aws_cloudwatch_metric_alarm"
 alarm_name          = { field = "name", transform = "kebab" }
 comparison_operator = { map = "comparison", table = { greater_than = "GreaterThanThreshold", less_than = "LessThanThreshold" } }
 evaluation_periods  = { field = "evaluation_periods" }
-metric_name         = { provider_field = "metric_name" }
-statistic           = { provider_field = "statistic" }
 period              = { map = "period_seconds", table = { "60" = 60, "300" = 300, "900" = 900 } }
 threshold           = { field = "threshold" }
 alarm_description   = { template = "{name}" }
 alarm_actions       = { relation = "sends_to", target_type = "topic", attr = "arn", wrap = "list" }
 tags                = { object = { Name = { field = "name" } } }
 
-# Namespace and dimension follow the type of the watched resource.
+# The preset names the metric; only `memory` is spelled differently per type.
+[providers.aws.blocks.args.metric_name]
+if = { field = "metric", equals = "custom" }
+then = { provider_field = "metric_name", fallback = { value = "CPUUtilization" } }
+else = { if = { field = "metric", equals = "memory" }, then = { if = { relation = "attribute_reference", target_type = "cache" }, then = { value = "DatabaseMemoryUsagePercentage" }, else = { value = "MemoryUtilization" } }, else = { map = "metric", optional = true, table = { cpu = "CPUUtilization", disk = "disk_used_percent", queue_depth = "ApproximateNumberOfMessagesVisible", dlq_depth = "ApproximateNumberOfMessagesVisible", queue_oldest_message_age = "ApproximateAgeOfOldestMessage", db_storage = "FreeStorageSpace", db_connections = "DatabaseConnections", lb_5xx = "HTTPCode_Target_5XX_Count", lb_latency = "TargetResponseTime", function_errors = "Errors", node_count = "cluster_node_count", bucket_size = "BucketSizeBytes" } } }
+
+[providers.aws.blocks.args.statistic]
+if = { field = "metric", equals = "custom" }
+then = { provider_field = "statistic", fallback = { value = "Average" } }
+else = { map = "metric", table = { cpu = "Average", memory = "Average", disk = "Average", queue_depth = "Maximum", dlq_depth = "Maximum", queue_oldest_message_age = "Maximum", db_storage = "Minimum", db_connections = "Maximum", lb_5xx = "Sum", lb_latency = "Average", function_errors = "Sum", node_count = "Average", bucket_size = "Average", custom = "Average" } }
+
+# Namespace follows the watched type; the CloudWatch agent's metrics are the exception.
 [providers.aws.blocks.args.namespace]
-if = { relation = "attribute_reference", target_type = "compute_instance" }
-then = { value = "AWS/EC2" }
-else = { if = { relation = "attribute_reference", target_type = "relational_database" }, then = { value = "AWS/RDS" }, else = { if = { relation = "attribute_reference", target_type = "function" }, then = { value = "AWS/Lambda" }, else = { if = { relation = "attribute_reference", target_type = "event_queue" }, then = { value = "AWS/SQS" }, else = { if = { relation = "attribute_reference", target_type = "container_app" }, then = { value = "AWS/ECS" }, else = { value = "AWS/ApplicationELB" } } } } }
+provider_field = "metric_namespace"
+fallback = { if = { field = "metric", equals = "disk" }, then = { value = "CWAgent" }, else = { if = { relation = "attribute_reference", target_type = "compute_instance" }, then = { value = "AWS/EC2" }, else = { if = { relation = "attribute_reference", target_type = "relational_database" }, then = { value = "AWS/RDS" }, else = { if = { relation = "attribute_reference", target_type = "function" }, then = { value = "AWS/Lambda" }, else = { if = { relation = "attribute_reference", target_type = "event_queue" }, then = { value = "AWS/SQS" }, else = { if = { relation = "attribute_reference", target_type = "container_app" }, then = { value = "AWS/ECS" }, else = { if = { relation = "attribute_reference", target_type = "kubernetes_cluster" }, then = { value = "ContainerInsights" }, else = { if = { relation = "attribute_reference", target_type = "object_storage" }, then = { value = "AWS/S3" }, else = { if = { relation = "attribute_reference", target_type = "topic" }, then = { value = "AWS/SNS" }, else = { if = { relation = "attribute_reference", target_type = "cache" }, then = { value = "AWS/ElastiCache" }, else = { if = { relation = "attribute_reference", target_type = "file_system" }, then = { value = "AWS/EFS" }, else = { value = "AWS/ApplicationELB" } } } } } } } } } } } }
 
 [providers.aws.blocks.args.dimensions]
 if = { relation = "attribute_reference", target_type = "compute_instance" }
 then = { object = { InstanceId = { relation = "attribute_reference", target_type = "compute_instance", attr = "id" } } }
-else = { if = { relation = "attribute_reference", target_type = "relational_database" }, then = { object = { DBInstanceIdentifier = { relation = "attribute_reference", target_type = "relational_database", attr = "identifier" } } }, else = { if = { relation = "attribute_reference", target_type = "function" }, then = { object = { FunctionName = { relation = "attribute_reference", target_type = "function", attr = "function_name" } } }, else = { if = { relation = "attribute_reference", target_type = "event_queue" }, then = { object = { QueueName = { relation = "attribute_reference", target_type = "event_queue", attr = "name" } } }, else = { if = { relation = "attribute_reference", target_type = "container_app" }, then = { object = { ClusterName = { relation = "attribute_reference", target_type = "container_app", block = "cluster", attr = "name" }, ServiceName = { relation = "attribute_reference", target_type = "container_app", attr = "name" } } }, else = { object = { LoadBalancer = { relation = "attribute_reference", target_type = "load_balancer", attr = "arn_suffix" } } } } } } }
+else = { if = { relation = "attribute_reference", target_type = "relational_database" }, then = { object = { DBInstanceIdentifier = { relation = "attribute_reference", target_type = "relational_database", attr = "identifier" } } }, else = { if = { relation = "attribute_reference", target_type = "function" }, then = { object = { FunctionName = { relation = "attribute_reference", target_type = "function", attr = "function_name" } } }, else = { if = { relation = "attribute_reference", target_type = "event_queue" }, then = { object = { QueueName = { relation = "attribute_reference", target_type = "event_queue", attr = "name" } } }, else = { if = { relation = "attribute_reference", target_type = "container_app" }, then = { object = { ClusterName = { relation = "attribute_reference", target_type = "container_app", block = "cluster", attr = "name" }, ServiceName = { relation = "attribute_reference", target_type = "container_app", attr = "name" } } }, else = { if = { relation = "attribute_reference", target_type = "kubernetes_cluster" }, then = { object = { ClusterName = { relation = "attribute_reference", target_type = "kubernetes_cluster", attr = "name" } } }, else = { if = { relation = "attribute_reference", target_type = "object_storage" }, then = { object = { BucketName = { relation = "attribute_reference", target_type = "object_storage", attr = "id" }, StorageType = { value = "StandardStorage" } } }, else = { if = { relation = "attribute_reference", target_type = "topic" }, then = { object = { TopicName = { relation = "attribute_reference", target_type = "topic", attr = "name" } } }, else = { if = { relation = "attribute_reference", target_type = "cache" }, then = { object = { CacheClusterId = { relation = "attribute_reference", target_type = "cache", attr = "cluster_id" } } }, else = { if = { relation = "attribute_reference", target_type = "file_system" }, then = { object = { FileSystemId = { relation = "attribute_reference", target_type = "file_system", attr = "id" } } }, else = { object = { LoadBalancer = { relation = "attribute_reference", target_type = "load_balancer", attr = "arn_suffix" } } } } } } } } } } } }
 
 [providers.aws.outputs]
 arn = { attr = "arn", description = "Alarm ARN" }
@@ -121,25 +168,23 @@ status = "partial"
 name = "metric_namespace"
 label = "Metric namespace"
 type = "string"
-required = true
 default = "Microsoft.Compute/virtualMachines"
-description = "e.g. Microsoft.Compute/virtualMachines, Microsoft.DBforPostgreSQL/flexibleServers, Microsoft.Web/sites, Microsoft.ServiceBus/namespaces, Microsoft.App/containerApps."
+description = "Namespace for the custom metric, e.g. Microsoft.Compute/virtualMachines, Microsoft.DBforPostgreSQL/flexibleServers, Microsoft.Web/sites, Microsoft.ServiceBus/namespaces. A preset uses the namespace of the watched type itself."
 
 [[providers.azure.fields]]
 name = "metric_name"
 label = "Metric name"
 type = "string"
-required = true
 default = "Percentage CPU"
-description = "e.g. Percentage CPU, cpu_percent (PostgreSQL), FunctionExecutionCount, ActiveMessages, Replicas."
+description = "Metric name for the custom metric, e.g. Percentage CPU, cpu_percent (PostgreSQL), ActiveMessages (Service Bus)."
 
 [[providers.azure.fields]]
 name = "aggregation"
 label = "Aggregation"
 type = "enum"
-required = true
 options = ["Average", "Total", "Maximum", "Minimum", "Count"]
 default = "Average"
+description = "Aggregation for the custom metric. A preset picks its own."
 
 [[providers.azure.fields]]
 name = "notify_email"
@@ -148,6 +193,23 @@ type = "string"
 pattern = "^[^@\\s]+@[^@\\s]+\\.[^@\\s]+$"
 pattern_hint = "an email address"
 description = "Azure notifies through an action group rather than a topic: when set, an action group with this email receiver is generated and attached to the alert."
+
+[[providers.azure.checks]]
+severity = "error"
+when = { any = [ { all = [ { relation = "attribute_reference", target_type = "compute_instance" }, { field = "metric", not_equals = "custom" }, { field = "metric", not_equals = "cpu" } ] }, { all = [ { relation = "attribute_reference", target_type = "relational_database" }, { field = "metric", not_equals = "custom" }, { field = "metric", not_equals = "cpu" }, { field = "metric", not_equals = "db_storage" }, { field = "metric", not_equals = "db_connections" } ] }, { all = [ { relation = "attribute_reference", target_type = "function" }, { field = "metric", not_equals = "custom" }, { field = "metric", not_equals = "function_errors" } ] }, { all = [ { relation = "attribute_reference", target_type = "event_queue" }, { field = "metric", not_equals = "custom" }, { field = "metric", not_equals = "queue_depth" }, { field = "metric", not_equals = "dlq_depth" } ] }, { all = [ { relation = "attribute_reference", target_type = "load_balancer" }, { field = "metric", not_equals = "custom" } ] }, { all = [ { relation = "attribute_reference", target_type = "container_app" }, { field = "metric", not_equals = "custom" }, { field = "metric", not_equals = "cpu" }, { field = "metric", not_equals = "memory" } ] }, { all = [ { relation = "attribute_reference", target_type = "kubernetes_cluster" }, { field = "metric", not_equals = "custom" }, { field = "metric", not_equals = "cpu" }, { field = "metric", not_equals = "memory" } ] }, { all = [ { relation = "attribute_reference", target_type = "object_storage" }, { field = "metric", not_equals = "custom" }, { field = "metric", not_equals = "bucket_size" } ] }, { all = [ { relation = "attribute_reference", target_type = "topic" }, { field = "metric", not_equals = "custom" } ] }, { all = [ { relation = "attribute_reference", target_type = "cache" }, { field = "metric", not_equals = "custom" }, { field = "metric", not_equals = "cpu" }, { field = "metric", not_equals = "memory" } ] }, { all = [ { relation = "attribute_reference", target_type = "file_system" }, { field = "metric", not_equals = "custom" } ] } ] }
+message = "\"{name}\": Azure Monitor has no platform metric of that kind for the resource this alarm watches. Notable gaps: a VM's disk usage is a guest metric published by the diagnostics extension, an Azure Load Balancer is layer 4 and counts no HTTP status codes, Service Bus reports no message age, and AKS reports node utilisation rather than a node count. Choose 'custom' and name the metric (and its namespace) yourself"
+
+[[providers.azure.checks]]
+when = { field = "metric", equals = "dlq_depth" }
+message = "\"{name}\" watches dead letters, which Service Bus keeps in a sub-queue of the queue itself rather than in a separate queue. The alert is scoped to the whole namespace, so it counts dead letters of every queue and topic in it"
+
+[[providers.azure.checks]]
+when = { field = "metric", equals = "function_errors" }
+message = "\"{name}\" watches function errors as `Http5xx` on the function app, which only sees HTTP-triggered failures; queue- and timer-triggered failures are visible in Application Insights, not in platform metrics"
+
+[[providers.azure.checks]]
+when = { field = "evaluation_periods", not_equals = "1" }
+message = "\"{name}\": Azure metric alerts evaluate a single window, so 'Consecutive periods' is approximated by the window size (use a dynamic-threshold alert for N-of-M behaviour)"
 
 # Action group with an email receiver, when an address is given.
 [[providers.azure.blocks]]
@@ -180,13 +242,13 @@ window_size         = { map = "period_seconds", table = { "60" = "PT1M", "300" =
 severity            = { value = 2 }
 tags                = { object = { Name = { field = "name" } } }
 
-# Scope: the watched resource's primary block; databases and queues have several.
+# Scope: the watched resource's primary block; databases, queues and shares have several.
 [providers.azure.blocks.args.scopes]
 relation = "attribute_reference"
 target_type = "compute_instance"
 attr = "id"
 wrap = "list"
-fallback = { relation = "attribute_reference", target_type = "relational_database", block = "pg", attr = "id", wrap = "list", fallback = { relation = "attribute_reference", target_type = "relational_database", block = "my", attr = "id", wrap = "list", fallback = { relation = "attribute_reference", target_type = "function", attr = "id", wrap = "list", fallback = { relation = "attribute_reference", target_type = "event_queue", block = "ns", attr = "id", wrap = "list", fallback = { relation = "attribute_reference", target_type = "event_queue", ancestor = "servicebus_namespace", attr = "id", wrap = "list", fallback = { relation = "attribute_reference", target_type = "container_app", attr = "id", wrap = "list", fallback = { relation = "attribute_reference", target_type = "load_balancer", attr = "id", wrap = "list" } } } } } } }
+fallback = { relation = "attribute_reference", target_type = "relational_database", block = "pg", attr = "id", wrap = "list", fallback = { relation = "attribute_reference", target_type = "relational_database", block = "my", attr = "id", wrap = "list", fallback = { relation = "attribute_reference", target_type = "function", attr = "id", wrap = "list", fallback = { relation = "attribute_reference", target_type = "event_queue", block = "ns", attr = "id", wrap = "list", fallback = { relation = "attribute_reference", target_type = "event_queue", ancestor = "servicebus_namespace", attr = "id", wrap = "list", fallback = { relation = "attribute_reference", target_type = "topic", block = "ns", attr = "id", wrap = "list", fallback = { relation = "attribute_reference", target_type = "topic", ancestor = "servicebus_namespace", attr = "id", wrap = "list", fallback = { relation = "attribute_reference", target_type = "container_app", attr = "id", wrap = "list", fallback = { relation = "attribute_reference", target_type = "kubernetes_cluster", attr = "id", wrap = "list", fallback = { relation = "attribute_reference", target_type = "object_storage", attr = "id", wrap = "list", fallback = { relation = "attribute_reference", target_type = "cache", attr = "id", wrap = "list", fallback = { relation = "attribute_reference", target_type = "file_system", block = "account", attr = "id", wrap = "list", fallback = { relation = "attribute_reference", target_type = "load_balancer", attr = "id", wrap = "list" } } } } } } } } } } } } }
 
 [[providers.azure.blocks.nested]]
 block = "action"
@@ -199,18 +261,26 @@ action_group_id = { self_block = "ag", attr = "id" }
 block = "criteria"
 
 [providers.azure.blocks.nested.args]
-metric_namespace = { provider_field = "metric_namespace" }
-metric_name      = { provider_field = "metric_name" }
-aggregation      = { provider_field = "aggregation" }
-operator         = { map = "comparison", table = { greater_than = "GreaterThan", less_than = "LessThan" } }
-threshold        = { field = "threshold" }
+operator  = { map = "comparison", table = { greater_than = "GreaterThan", less_than = "LessThan" } }
+threshold = { field = "threshold" }
+
+[providers.azure.blocks.nested.args.metric_namespace]
+if = { field = "metric", equals = "custom" }
+then = { provider_field = "metric_namespace", fallback = { value = "Microsoft.Compute/virtualMachines" } }
+else = { if = { relation = "attribute_reference", target_type = "compute_instance" }, then = { value = "Microsoft.Compute/virtualMachines" }, else = { if = { relation = "attribute_reference", target_type = "relational_database", target_field = "engine", equals = "mysql" }, then = { value = "Microsoft.DBforMySQL/flexibleServers" }, else = { if = { relation = "attribute_reference", target_type = "relational_database" }, then = { value = "Microsoft.DBforPostgreSQL/flexibleServers" }, else = { if = { relation = "attribute_reference", target_type = "function" }, then = { value = "Microsoft.Web/sites" }, else = { if = { relation = "attribute_reference", target_type = "event_queue" }, then = { value = "Microsoft.ServiceBus/namespaces" }, else = { if = { relation = "attribute_reference", target_type = "topic" }, then = { value = "Microsoft.ServiceBus/namespaces" }, else = { if = { relation = "attribute_reference", target_type = "container_app" }, then = { value = "Microsoft.App/containerApps" }, else = { if = { relation = "attribute_reference", target_type = "kubernetes_cluster" }, then = { value = "Microsoft.ContainerService/managedClusters" }, else = { if = { relation = "attribute_reference", target_type = "object_storage" }, then = { value = "Microsoft.Storage/storageAccounts" }, else = { if = { relation = "attribute_reference", target_type = "file_system" }, then = { value = "Microsoft.Storage/storageAccounts" }, else = { if = { relation = "attribute_reference", target_type = "cache" }, then = { value = "Microsoft.Cache/Redis" }, else = { value = "Microsoft.Network/loadBalancers" } } } } } } } } } } } }
+
+[providers.azure.blocks.nested.args.metric_name]
+if = { field = "metric", equals = "custom" }
+then = { provider_field = "metric_name", fallback = { value = "Percentage CPU" } }
+else = { if = { field = "metric", equals = "cpu" }, then = { if = { relation = "attribute_reference", target_type = "compute_instance" }, then = { value = "Percentage CPU" }, else = { if = { relation = "attribute_reference", target_type = "relational_database" }, then = { value = "cpu_percent" }, else = { if = { relation = "attribute_reference", target_type = "container_app" }, then = { value = "UsageNanoCores" }, else = { if = { relation = "attribute_reference", target_type = "kubernetes_cluster" }, then = { value = "node_cpu_usage_percentage" }, else = { value = "percentProcessorTime" } } } } }, else = { if = { field = "metric", equals = "memory" }, then = { if = { relation = "attribute_reference", target_type = "container_app" }, then = { value = "WorkingSetBytes" }, else = { if = { relation = "attribute_reference", target_type = "kubernetes_cluster" }, then = { value = "node_memory_working_set_percentage" }, else = { value = "usedmemorypercentage" } } }, else = { map = "metric", optional = true, table = { queue_depth = "ActiveMessages", dlq_depth = "DeadletteredMessages", db_storage = "storage_percent", db_connections = "active_connections", function_errors = "Http5xx", bucket_size = "UsedCapacity" } } } }
+
+[providers.azure.blocks.nested.args.aggregation]
+if = { field = "metric", equals = "custom" }
+then = { provider_field = "aggregation", fallback = { value = "Average" } }
+else = { map = "metric", table = { cpu = "Average", memory = "Average", disk = "Average", queue_depth = "Maximum", dlq_depth = "Maximum", queue_oldest_message_age = "Maximum", db_storage = "Average", db_connections = "Average", lb_5xx = "Total", lb_latency = "Average", function_errors = "Total", node_count = "Average", bucket_size = "Average", custom = "Average" } }
 
 [providers.azure.outputs]
 id = { attr = "id", description = "Metric alert id" }
-
-[[providers.azure.checks]]
-when = { field = "evaluation_periods", not_equals = "1" }
-message = "\"{name}\": Azure metric alerts evaluate a single window, so 'Consecutive periods' is approximated by the window size (use a dynamic-threshold alert for N-of-M behaviour)"
 
 [[providers.azure.manual_steps]]
 title = "Notifications need an action group"
@@ -222,16 +292,25 @@ Azure Monitor notifies through an *action group*, not a Service Bus topic. Set t
 and add an `action { action_group_id = … }` block to the alert.
 """
 
+[[providers.azure.manual_steps]]
+title = "Check the metric against the resource it is scoped to"
+body = """
+A metric alert is rejected at apply time when its metric does not exist in the scoped
+resource's namespace. The mapping picks the platform metric that matches the preset for
+the watched type; if you overrode the metric fields, confirm the pair with
+`az monitor metrics list-definitions --resource <id>`.
+"""
+
 # ---------------------------------------------------------------- GCP
 [providers.gcp]
 status = "partial"
-notes = "A Cloud Monitoring alert policy with a threshold condition. The metric filter is a provider field (CPU utilisation of the watched instance by default); an email notification channel is generated when an address is given."
+notes = "A Cloud Monitoring alert policy with a threshold condition. The filter follows the metric preset and the watched resource; an email notification channel is generated when an address is given."
 
 [[providers.gcp.fields]]
 name = "metric_filter"
 label = "Metric filter"
 type = "string"
-description = "Overrides the per-type default (CPU utilisation for instances and databases, execution count for functions, undelivered messages for queues, CPU for container apps, latency for load balancers). Cloud Monitoring filter, e.g. metric.type=\"cloudsql.googleapis.com/database/cpu/utilization\" AND resource.type=\"cloudsql_database\", or metric.type=\"cloudfunctions.googleapis.com/function/execution_count\" AND resource.type=\"cloud_function\". CPU utilisation metrics are fractions (0..1), so a threshold of 80 needs 0.8."
+description = "Overrides the filter the preset implies. Cloud Monitoring filter, e.g. metric.type=\"cloudsql.googleapis.com/database/cpu/utilization\" AND resource.type=\"cloudsql_database\". Required when Metric is 'custom'. Utilisation metrics are fractions (0..1), so a threshold of 80 needs 0.8."
 
 [[providers.gcp.fields]]
 name = "notify_email"
@@ -240,6 +319,19 @@ type = "string"
 pattern = "^[^@\\s]+@[^@\\s]+\\.[^@\\s]+$"
 pattern_hint = "an email address"
 description = "When set, an email notification channel is generated and attached to the policy."
+
+[[providers.gcp.checks]]
+when = { all = [ { field = "metric", equals = "custom" }, { provider_field = "metric_filter", absent = true } ] }
+message = "\"{name}\" uses a custom metric but names no filter, so the alert watches the usual metric of the type it is linked to; write a Cloud Monitoring metric filter to watch anything else"
+
+[[providers.gcp.checks]]
+severity = "error"
+when = { any = [ { all = [ { relation = "attribute_reference", target_type = "compute_instance" }, { field = "metric", not_equals = "custom" }, { field = "metric", not_equals = "cpu" }, { field = "metric", not_equals = "disk" } ] }, { all = [ { relation = "attribute_reference", target_type = "relational_database" }, { field = "metric", not_equals = "custom" }, { field = "metric", not_equals = "cpu" }, { field = "metric", not_equals = "db_storage" }, { field = "metric", not_equals = "db_connections" } ] }, { all = [ { relation = "attribute_reference", target_type = "function" }, { field = "metric", not_equals = "custom" }, { field = "metric", not_equals = "function_errors" } ] }, { all = [ { relation = "attribute_reference", target_type = "event_queue" }, { field = "metric", not_equals = "custom" }, { field = "metric", not_equals = "queue_depth" }, { field = "metric", not_equals = "dlq_depth" }, { field = "metric", not_equals = "queue_oldest_message_age" } ] }, { all = [ { relation = "attribute_reference", target_type = "load_balancer" }, { field = "metric", not_equals = "custom" }, { field = "metric", not_equals = "lb_latency" } ] }, { all = [ { relation = "attribute_reference", target_type = "container_app" }, { field = "metric", not_equals = "custom" }, { field = "metric", not_equals = "cpu" }, { field = "metric", not_equals = "memory" } ] }, { all = [ { relation = "attribute_reference", target_type = "kubernetes_cluster" }, { field = "metric", not_equals = "custom" }, { field = "metric", not_equals = "cpu" }, { field = "metric", not_equals = "memory" } ] }, { all = [ { relation = "attribute_reference", target_type = "object_storage" }, { field = "metric", not_equals = "custom" }, { field = "metric", not_equals = "bucket_size" } ] }, { all = [ { relation = "attribute_reference", target_type = "topic" }, { field = "metric", not_equals = "custom" } ] }, { all = [ { relation = "attribute_reference", target_type = "cache" }, { field = "metric", not_equals = "custom" }, { field = "metric", not_equals = "cpu" }, { field = "metric", not_equals = "memory" } ] }, { all = [ { relation = "attribute_reference", target_type = "file_system" }, { field = "metric", not_equals = "custom" } ] } ] }
+message = "\"{name}\": Cloud Monitoring has no metric of that kind for the resource this alarm watches. Notable gaps: the generated load balancer is a layer-3 passthrough and counts no HTTP status codes, a Pub/Sub topic is measured through its subscriptions, and Filestore metrics are per instance. Choose 'custom' and write the metric filter yourself"
+
+[[providers.gcp.checks]]
+when = { field = "metric", equals = "disk" }
+message = "\"{name}\" watches disk usage through `agent.googleapis.com/disk/percent_used`, which only exists while the Ops Agent is installed on the instance"
 
 [[providers.gcp.blocks]]
 key = "channel"
@@ -274,11 +366,10 @@ comparison      = { map = "comparison", table = { greater_than = "COMPARISON_GT"
 threshold_value = { field = "threshold" }
 duration        = { map = "period_seconds", table = { "60" = "60s", "300" = "300s", "900" = "900s" } }
 
-# The filter follows the watched resource: the provider field when set, else a
-# per-type default scoped to that resource.
+# The filter follows the watched resource first, then the preset within it.
 [providers.gcp.blocks.nested.nested.args.filter]
 provider_field = "metric_filter"
-fallback = { if = { relation = "attribute_reference", target_type = "compute_instance" }, then = { func = "format", args = [ { value = "metric.type=\"compute.googleapis.com/instance/cpu/utilization\" AND resource.type=\"gce_instance\" AND resource.labels.instance_id=\"%s\"" }, { relation = "attribute_reference", target_type = "compute_instance", attr = "instance_id" } ] }, else = { if = { relation = "attribute_reference", target_type = "relational_database" }, then = { func = "format", args = [ { value = "metric.type=\"cloudsql.googleapis.com/database/cpu/utilization\" AND resource.type=\"cloudsql_database\" AND resource.labels.database_id=\"%s:%s\"" }, { var = "project" }, { relation = "attribute_reference", target_type = "relational_database", attr = "name" } ] }, else = { if = { relation = "attribute_reference", target_type = "function" }, then = { func = "format", args = [ { value = "metric.type=\"cloudfunctions.googleapis.com/function/execution_count\" AND resource.type=\"cloud_function\" AND resource.labels.function_name=\"%s\"" }, { relation = "attribute_reference", target_type = "function", attr = "name" } ] }, else = { if = { relation = "attribute_reference", target_type = "event_queue" }, then = { func = "format", args = [ { value = "metric.type=\"pubsub.googleapis.com/subscription/num_undelivered_messages\" AND resource.type=\"pubsub_subscription\" AND resource.labels.subscription_id=\"%s\"" }, { relation = "attribute_reference", target_type = "event_queue", block = "sub", attr = "name" } ] }, else = { if = { relation = "attribute_reference", target_type = "container_app" }, then = { func = "format", args = [ { value = "metric.type=\"run.googleapis.com/container/cpu/utilizations\" AND resource.type=\"cloud_run_revision\" AND resource.labels.service_name=\"%s\"" }, { relation = "attribute_reference", target_type = "container_app", attr = "name" } ] }, else = { func = "format", args = [ { value = "metric.type=\"loadbalancing.googleapis.com/l3/external/rtt_latencies\" AND resource.type=\"loadbalancing.googleapis.com/ExternalNetworkLoadBalancerRule\" AND resource.labels.forwarding_rule_name=\"%s\"" }, { relation = "attribute_reference", target_type = "load_balancer", block = "rule", attr = "name" } ] } } } } } }
+fallback = { if = { relation = "attribute_reference", target_type = "compute_instance" }, then = { if = { field = "metric", equals = "disk" }, then = { func = "format", args = [ { value = "metric.type=\"agent.googleapis.com/disk/percent_used\" AND resource.type=\"gce_instance\" AND resource.labels.instance_id=\"%s\"" }, { relation = "attribute_reference", target_type = "compute_instance", attr = "instance_id" } ] }, else = { func = "format", args = [ { value = "metric.type=\"compute.googleapis.com/instance/cpu/utilization\" AND resource.type=\"gce_instance\" AND resource.labels.instance_id=\"%s\"" }, { relation = "attribute_reference", target_type = "compute_instance", attr = "instance_id" } ] } }, else = { if = { relation = "attribute_reference", target_type = "relational_database" }, then = { func = "format", args = [ { map = "metric", table = { custom = "metric.type=\"cloudsql.googleapis.com/database/cpu/utilization\" AND resource.type=\"cloudsql_database\" AND resource.labels.database_id=\"%s:%s\"", cpu = "metric.type=\"cloudsql.googleapis.com/database/cpu/utilization\" AND resource.type=\"cloudsql_database\" AND resource.labels.database_id=\"%s:%s\"", db_storage = "metric.type=\"cloudsql.googleapis.com/database/disk/utilization\" AND resource.type=\"cloudsql_database\" AND resource.labels.database_id=\"%s:%s\"", db_connections = "metric.type=\"cloudsql.googleapis.com/database/network/connections\" AND resource.type=\"cloudsql_database\" AND resource.labels.database_id=\"%s:%s\"" }, optional = true }, { var = "project" }, { relation = "attribute_reference", target_type = "relational_database", attr = "name" } ] }, else = { if = { relation = "attribute_reference", target_type = "function" }, then = { func = "format", args = [ { value = "metric.type=\"cloudfunctions.googleapis.com/function/execution_count\" AND resource.type=\"cloud_function\" AND resource.labels.function_name=\"%s\"" }, { relation = "attribute_reference", target_type = "function", attr = "name" } ] }, else = { if = { relation = "attribute_reference", target_type = "event_queue" }, then = { func = "format", args = [ { map = "metric", table = { custom = "metric.type=\"pubsub.googleapis.com/subscription/num_undelivered_messages\" AND resource.type=\"pubsub_subscription\" AND resource.labels.subscription_id=\"%s\"", queue_depth = "metric.type=\"pubsub.googleapis.com/subscription/num_undelivered_messages\" AND resource.type=\"pubsub_subscription\" AND resource.labels.subscription_id=\"%s\"", queue_oldest_message_age = "metric.type=\"pubsub.googleapis.com/subscription/oldest_unacked_message_age\" AND resource.type=\"pubsub_subscription\" AND resource.labels.subscription_id=\"%s\"", dlq_depth = "metric.type=\"pubsub.googleapis.com/subscription/num_undelivered_messages\" AND resource.type=\"pubsub_subscription\" AND resource.labels.subscription_id=\"%s\"" }, optional = true }, { relation = "attribute_reference", target_type = "event_queue", block = "sub", attr = "name" } ] }, else = { if = { relation = "attribute_reference", target_type = "container_app" }, then = { func = "format", args = [ { map = "metric", table = { custom = "metric.type=\"run.googleapis.com/container/cpu/utilizations\" AND resource.type=\"cloud_run_revision\" AND resource.labels.service_name=\"%s\"", cpu = "metric.type=\"run.googleapis.com/container/cpu/utilizations\" AND resource.type=\"cloud_run_revision\" AND resource.labels.service_name=\"%s\"", memory = "metric.type=\"run.googleapis.com/container/memory/utilizations\" AND resource.type=\"cloud_run_revision\" AND resource.labels.service_name=\"%s\"" }, optional = true }, { relation = "attribute_reference", target_type = "container_app", attr = "name" } ] }, else = { if = { relation = "attribute_reference", target_type = "kubernetes_cluster" }, then = { func = "format", args = [ { map = "metric", table = { custom = "metric.type=\"kubernetes.io/node/cpu/allocatable_utilization\" AND resource.type=\"k8s_node\" AND resource.labels.cluster_name=\"%s\"", cpu = "metric.type=\"kubernetes.io/node/cpu/allocatable_utilization\" AND resource.type=\"k8s_node\" AND resource.labels.cluster_name=\"%s\"", memory = "metric.type=\"kubernetes.io/node/memory/allocatable_utilization\" AND resource.type=\"k8s_node\" AND resource.labels.cluster_name=\"%s\"" }, optional = true }, { relation = "attribute_reference", target_type = "kubernetes_cluster", attr = "name" } ] }, else = { if = { relation = "attribute_reference", target_type = "object_storage" }, then = { func = "format", args = [ { value = "metric.type=\"storage.googleapis.com/storage/total_bytes\" AND resource.type=\"gcs_bucket\" AND resource.labels.bucket_name=\"%s\"" }, { relation = "attribute_reference", target_type = "object_storage", attr = "name" } ] }, else = { if = { relation = "attribute_reference", target_type = "cache" }, then = { func = "format", args = [ { map = "metric", table = { custom = "metric.type=\"redis.googleapis.com/stats/cpu_utilization\" AND resource.type=\"redis_instance\" AND resource.labels.instance_id=\"%s\"", cpu = "metric.type=\"redis.googleapis.com/stats/cpu_utilization\" AND resource.type=\"redis_instance\" AND resource.labels.instance_id=\"%s\"", memory = "metric.type=\"redis.googleapis.com/stats/memory/usage_ratio\" AND resource.type=\"redis_instance\" AND resource.labels.instance_id=\"%s\"" }, optional = true }, { relation = "attribute_reference", target_type = "cache", attr = "id" } ] }, else = { func = "format", args = [ { value = "metric.type=\"loadbalancing.googleapis.com/l3/external/rtt_latencies\" AND resource.type=\"loadbalancing.googleapis.com/ExternalNetworkLoadBalancerRule\" AND resource.labels.forwarding_rule_name=\"%s\"" }, { relation = "attribute_reference", target_type = "load_balancer", block = "rule", attr = "name" } ] } } } } } } } } }
 
 [[providers.gcp.blocks.nested.nested.nested]]
 block = "aggregations"
@@ -299,7 +390,7 @@ id = { attr = "id", description = "Alert policy id" }
 [[providers.gcp.manual_steps]]
 title = "Threshold units follow the metric"
 body = """
-Cloud Monitoring compares the raw metric value: CPU utilisation is a fraction (0.8, not
-80), request counts are absolute. Check the threshold against the metric named in the
-filter. 'Consecutive periods' is approximated by the duration.
+Cloud Monitoring compares the raw metric value: utilisation metrics are fractions (0.8,
+not 80), message counts and byte counts are absolute. Check the threshold against the
+metric named in the filter. 'Consecutive periods' is approximated by the duration.
 """

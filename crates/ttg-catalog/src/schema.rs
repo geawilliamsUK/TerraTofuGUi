@@ -339,7 +339,8 @@ pub enum Condition {
     Ancestor(CondAncestor),
     /// `{ target_shares_ancestor = "virtual_network" }` — inside a `for_each_relation`
     /// block: the current target sits in the same container of that type as the entity
-    /// itself (`absent = true` inverts) (v2).
+    /// itself (`absent = true` inverts) (v2). With `relation = "…"` the subject is every
+    /// target of that relation instead of the current row's.
     Target(CondTarget),
 }
 
@@ -347,6 +348,13 @@ pub enum Condition {
 #[serde(deny_unknown_fields)]
 pub struct CondTarget {
     pub target_shares_ancestor: String,
+    /// Ask the question of this relation's targets rather than the current
+    /// `for_each_relation` row, so it can be used outside a repeated block (v2).
+    #[serde(default)]
+    pub relation: Option<String>,
+    /// Only consider targets of this abstract type (with `relation`).
+    #[serde(default)]
+    pub target_type: Option<String>,
     #[serde(default)]
     pub absent: bool,
 }

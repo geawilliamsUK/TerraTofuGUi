@@ -161,6 +161,18 @@ const BUILTIN_RESOURCES: &[(&str, &str)] = &[
         "resources/network_peering.toml",
         include_str!("../../../definitions/resources/network_peering.toml"),
     ),
+    (
+        "resources/file_system.toml",
+        include_str!("../../../definitions/resources/file_system.toml"),
+    ),
+    (
+        "resources/budget.toml",
+        include_str!("../../../definitions/resources/budget.toml"),
+    ),
+    (
+        "resources/audit_trail.toml",
+        include_str!("../../../definitions/resources/audit_trail.toml"),
+    ),
 ];
 
 const BUILTIN_PROVIDERS: &[(&str, &str)] = &[

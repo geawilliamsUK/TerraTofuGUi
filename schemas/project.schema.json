@@ -438,6 +438,11 @@
           "description": "Source is encrypted at rest with target's key (bucket -> encryption key).",
           "type": "string",
           "const": "encrypted_with"
+        },
+        {
+          "description": "Messages the source could not deliver go to target (queue -> dead-letter queue).",
+          "type": "string",
+          "const": "dead_letters_to"
         }
       ]
     },

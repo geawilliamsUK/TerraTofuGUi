@@ -803,14 +803,26 @@ pub fn condition_holds_for(
             present != r.absent
         }
         Condition::Target(t) => {
-            let Some(tid) = target else { return false };
+            // Without `relation` the subject is the current for_each_relation row; with
+            // it, every target of that relation ("is my dead-letter queue in my namespace?").
+            let subjects: Vec<Id> = match &t.relation {
+                Some(rel) => Relation::from_key(rel)
+                    .map(|k| relation_targets_of_type(p, cat, e, k, t.target_type.as_deref()))
+                    .unwrap_or_default(),
+                None => match target {
+                    Some(tid) => vec![tid.to_string()],
+                    None => return false,
+                },
+            };
             let mine = p
                 .ancestor_of_type(e.id, &t.target_shares_ancestor)
                 .map(|c| c.id.as_str());
-            let theirs = p
-                .ancestor_of_type(tid, &t.target_shares_ancestor)
-                .map(|c| c.id.as_str());
-            let same = mine.is_some() && mine == theirs;
+            let same = mine.is_some()
+                && subjects.iter().any(|tid| {
+                    p.ancestor_of_type(tid, &t.target_shares_ancestor)
+                        .map(|c| c.id.as_str())
+                        == mine
+                });
             same != t.absent
         }
         Condition::Field(f) => {

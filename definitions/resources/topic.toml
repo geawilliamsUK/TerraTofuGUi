@@ -22,6 +22,26 @@ allowed_parents = ["resource_group", "virtual_network", "servicebus_namespace"]
 network_agnostic = true
 icon = "TP"
 
+[[fields]]
+name = "subscriptions"
+label = "Endpoint subscriptions"
+type = "struct_list"
+description = "Subscribers that are not resources in the diagram: an operator's mailbox, a webhook, a phone. Resources subscribe through the 'Delivers to' links instead."
+
+[[fields.items]]
+name = "protocol"
+label = "Protocol"
+type = "enum"
+options = ["email", "https", "sms"]
+default = "email"
+
+[[fields.items]]
+name = "endpoint"
+label = "Endpoint"
+type = "string"
+required = true
+description = "An address, an https:// URL, or a phone number in E.164 form."
+
 [[relations]]
 kind = "sends_to"
 label = "Delivers to (queues, functions)"
@@ -112,6 +132,17 @@ function_name = { target = "function_name" }
 principal     = { value = "sns.amazonaws.com" }
 source_arn    = { self_block = "main", attr = "arn" }
 
+# Endpoint subscribers: one subscription per row of the table.
+[[providers.aws.blocks]]
+key = "sub_endpoint"
+resource = "aws_sns_topic_subscription"
+for_each_field = "subscriptions"
+
+[providers.aws.blocks.args]
+topic_arn = { self_block = "main", attr = "arn" }
+protocol  = { item = "protocol" }
+endpoint  = { item = "endpoint" }
+
 [providers.aws.outputs]
 arn = { attr = "arn", description = "Topic ARN (publish here)" }
 
@@ -139,6 +170,10 @@ description = "Name of the Standard-tier namespace created for this topic. Not n
 when = { all = [ { ancestor = "servicebus_namespace", absent = true }, { provider_field = "namespace_name", absent = true } ] }
 severity = "error"
 message = "\"{name}\" needs a Service Bus namespace: set its namespace name, or place it inside a Service Bus Namespace container"
+
+[[providers.azure.checks]]
+when = { field = "subscriptions" }
+message = "\"{name}\" lists endpoint subscriptions, which Service Bus has no equivalent for: a topic delivers to subscriptions that clients read, never to a mailbox, webhook or phone. Notify people from an Alarm instead (its 'Notify email' generates an action group), or add an Event Grid subscription by hand"
 
 [[providers.azure.blocks]]
 key = "ns"
@@ -256,6 +291,28 @@ for_each_target_type = "function"
 [providers.gcp.blocks.args]
 name  = { template = "{name}-to-{target.slug}", transform = "kebab" }
 topic = { self_block = "main", attr = "id" }
+
+# Pub/Sub pushes to an https endpoint; e-mail and SMS have no counterpart at all.
+[[providers.gcp.blocks]]
+key = "sub_push"
+resource = "google_pubsub_subscription"
+for_each_field = "subscriptions"
+when = { item = "protocol", equals = "https" }
+
+[providers.gcp.blocks.args]
+name  = { template = "{name}-push-{item.index}", transform = "kebab" }
+topic = { self_block = "main", attr = "id" }
+
+[[providers.gcp.blocks.nested]]
+block = "push_config"
+
+[providers.gcp.blocks.nested.args]
+push_endpoint = { item = "endpoint" }
+
+[[providers.gcp.checks]]
+for_each_field = "subscriptions"
+when = { item = "protocol", not_equals = "https" }
+message = "\"{name}\" subscribes {item.endpoint} over {item.protocol}, which Pub/Sub cannot do: only https push subscriptions exist. Notify people from an Alarm instead (its 'Notify email' generates a notification channel)"
 
 [providers.gcp.outputs]
 id = { attr = "id", description = "Topic id (publish here)" }

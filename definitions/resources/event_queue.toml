@@ -39,11 +39,24 @@ type = "int"
 default = 20
 description = "How long a receive call waits for a message before returning empty. 20 seconds is long polling, which costs far fewer empty receives than 0."
 
+[[fields]]
+name = "max_receives"
+label = "Deliveries before dead-lettering"
+type = "int"
+default = 5
+description = "How often one message may be received and not deleted before it is moved to the dead-letter queue. Only used when a 'Dead-letters to' link exists; Pub/Sub requires at least 5."
+
 [[relations]]
 kind = "encrypted_with"
 label = "Encrypted with"
 providers = ["aws", "gcp"]
 targets = ["encryption_key"]
+cardinality = "optional"
+
+[[relations]]
+kind = "dead_letters_to"
+label = "Dead-letters to"
+targets = ["event_queue"]
 cardinality = "optional"
 
 # ---------------------------------------------------------------- AWS
@@ -69,6 +82,7 @@ visibility_timeout_seconds  = { field = "visibility_timeout_seconds" }
 message_retention_seconds   = { field = "message_retention_seconds", fallback = { value = 345600 } }
 receive_wait_time_seconds   = { field = "receive_wait_time_seconds", fallback = { value = 20 } }
 kms_master_key_id           = { relation = "encrypted_with", attr = "arn", optional = true }
+redrive_policy              = { if = { relation = "dead_letters_to" }, then = { func = "jsonencode", args = [ { object = { deadLetterTargetArn = { relation = "dead_letters_to", attr = "arn" }, maxReceiveCount = { field = "max_receives", fallback = { value = 5 } } } } ] } }
 tags                        = { object = { Name = { field = "name" } } }
 
 [providers.aws.outputs]
@@ -100,6 +114,10 @@ when = { all = [ { ancestor = "servicebus_namespace", absent = true }, { provide
 severity = "error"
 message = "\"{name}\" needs a Service Bus namespace: set its namespace name, or place it inside a Service Bus Namespace container"
 
+[[providers.azure.checks]]
+when = { all = [ { relation = "dead_letters_to" }, { target_shares_ancestor = "servicebus_namespace", relation = "dead_letters_to", absent = true } ] }
+message = "\"{name}\" dead-letters to a queue in another namespace: Service Bus only auto-forwards dead letters inside one namespace, so messages stay in this queue's own dead-letter sub-queue (draw both queues inside one Service Bus Namespace container to have them forwarded)"
+
 [[providers.azure.fields]]
 name = "sku"
 label = "Namespace SKU"
@@ -128,6 +146,11 @@ name                = { field = "name", transform = "kebab" }
 namespace_id        = { if = { ancestor = "servicebus_namespace" }, then = { ancestor = "servicebus_namespace", attr = "id", optional = true }, else = { self_block = "ns", attr = "id" } }
 lock_duration       = { template = "PT{visibility_timeout_seconds}S" }
 default_message_ttl = { func = "format", args = [ { value = "PT%dS" }, { field = "message_retention_seconds", fallback = { value = 345600 } } ] }
+# Dead-lettering: the delivery count is always honoured; auto-forwarding the dead letters
+# on to another queue only works inside one namespace, which is what the check is about.
+dead_lettering_on_message_expiration = { if = { relation = "dead_letters_to" }, then = { value = true } }
+max_delivery_count  = { if = { relation = "dead_letters_to" }, then = { field = "max_receives", fallback = { value = 5 } } }
+forward_dead_lettered_messages_to = { if = { target_shares_ancestor = "servicebus_namespace", relation = "dead_letters_to" }, then = { relation = "dead_letters_to", attr = "name" } }
 
 [providers.azure.outputs]
 id   = { attr = "id", description = "Queue id" }
@@ -146,6 +169,31 @@ A topic with `kms_key_name` can only be created once the Pub/Sub service agent
 (`service-<project number>@gcp-sa-pubsub.iam.gserviceaccount.com`) holds
 `roles/cloudkms.cryptoKeyEncrypterDecrypter` on that key. Grant it before the first `apply`.
 """
+
+[[providers.gcp.manual_steps]]
+title = "A dead-letter queue shared by several queues is bound more than once"
+when = { relation = "dead_letters_to" }
+body = """
+Each queue that dead-letters into another one generates its own
+`google_pubsub_topic_iam_member` granting the Pub/Sub service agent `roles/pubsub.publisher`
+on the target topic. The bindings are additive and identical, so if more than one queue
+shares a dead-letter queue, delete all but one of them (or move the grant out of the
+diagram) before applying.
+"""
+
+[[providers.gcp.checks]]
+when = { all = [ { relation = "dead_letters_to" }, { field = "max_receives", equals = "1" } ] }
+message = "\"{name}\": Pub/Sub needs at least 5 delivery attempts before dead-lettering; raise 'Deliveries before dead-lettering'"
+
+# The project number is needed to name the Pub/Sub service agent the dead-letter policy
+# requires; only looked up when there is a dead-letter link.
+[[providers.gcp.data]]
+key = "project"
+resource = "google_project"
+when = { relation = "dead_letters_to" }
+
+[providers.gcp.data.args]
+project_id = { var = "project" }
 
 [[providers.gcp.blocks]]
 key = "main"
@@ -166,6 +214,36 @@ name                       = { template = "{name}-sub", transform = "kebab" }
 topic                      = { self_block = "main", attr = "id" }
 ack_deadline_seconds       = { field = "visibility_timeout_seconds" }
 message_retention_duration = { func = "format", args = [ { value = "%ds" }, { field = "message_retention_seconds", fallback = { value = 345600 } } ] }
+
+[[providers.gcp.blocks.nested]]
+block = "dead_letter_policy"
+when = { relation = "dead_letters_to" }
+
+[providers.gcp.blocks.nested.args]
+dead_letter_topic     = { relation = "dead_letters_to", attr = "id" }
+max_delivery_attempts = { field = "max_receives", fallback = { value = 5 } }
+
+# Pub/Sub moves a message itself, as its own service agent: it publishes to the
+# dead-letter topic and acknowledges on this subscription, so it needs both roles.
+[[providers.gcp.blocks]]
+key = "dlq_publisher"
+resource = "google_pubsub_topic_iam_member"
+when = { relation = "dead_letters_to" }
+
+[providers.gcp.blocks.args]
+topic  = { relation = "dead_letters_to", attr = "id" }
+role   = { value = "roles/pubsub.publisher" }
+member = { func = "format", args = [ { value = "serviceAccount:service-%s@gcp-sa-pubsub.iam.gserviceaccount.com" }, { self_data = "project", attr = "number" } ] }
+
+[[providers.gcp.blocks]]
+key = "dlq_subscriber"
+resource = "google_pubsub_subscription_iam_member"
+when = { relation = "dead_letters_to" }
+
+[providers.gcp.blocks.args]
+subscription = { self_block = "sub", attr = "name" }
+role         = { value = "roles/pubsub.subscriber" }
+member       = { func = "format", args = [ { value = "serviceAccount:service-%s@gcp-sa-pubsub.iam.gserviceaccount.com" }, { self_data = "project", attr = "number" } ] }
 
 [providers.gcp.outputs]
 topic        = { attr = "id", description = "Topic id (publish here)" }

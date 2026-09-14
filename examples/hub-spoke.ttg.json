@@ -690,6 +690,11 @@
       "source": "pe-reports",
       "relation": "attribute_reference",
       "target": "obj-hub"
+    },
+    {
+      "source": "pe-reports",
+      "relation": "attachment",
+      "target": "rt-spoke"
     }
   ],
   "views": []

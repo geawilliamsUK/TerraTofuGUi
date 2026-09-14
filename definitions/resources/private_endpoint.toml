@@ -30,69 +30,80 @@ options = ["blob", "file", "queue", "table", "postgresqlServer", "mysqlServer", 
 default = "blob"
 description = "Which endpoint of the service to expose privately: blob/file/queue/table for storage, postgresqlServer / mysqlServer for databases, vault for Key Vault, namespace for Service Bus, Sql for Cosmos DB."
 
+# Azure puts the endpoint in exactly one subnet; an AWS interface endpoint takes one
+# subnet per availability zone, so the relation is 'many' and each provider checks what
+# it actually needs.
 [[relations]]
 kind = "network_membership"
-label = "Subnet"
+label = "Subnets"
 providers = ["aws", "azure"]
 targets = ["subnet"]
-cardinality = "one"
+cardinality = "many"
 
+# Optional: an AWS endpoint is defined by its service name alone, and a gateway endpoint
+# fronts S3 or DynamoDB rather than one resource in the diagram.
 [[relations]]
 kind = "attribute_reference"
 label = "Connects to"
 providers = ["aws", "azure"]
 targets = ["object_storage", "relational_database", "key_vault", "event_queue", "servicebus_namespace", "nosql_table"]
-cardinality = "one"
+cardinality = "optional"
 
+# One kind, two meanings: a security group guards an interface endpoint, route tables
+# carry the routes a gateway endpoint installs.
 [[relations]]
 kind = "attachment"
-label = "Security group (AWS)"
+label = "Security group / route tables (AWS)"
 providers = ["aws"]
-targets = ["security_group"]
-cardinality = "optional"
+targets = ["security_group", "route_table"]
+cardinality = "many"
 
 # ---------------------------------------------------------------- AWS
 [providers.aws]
 status = "partial"
-notes = "Interface endpoint in the subnet's VPC. The service is chosen by the AWS service name field, not by the linked resource."
+notes = "The service is chosen by the AWS service name field, not by the linked resource: an AWS endpoint fronts a whole service, so 'Connects to' is optional here and only tags the endpoint. An Interface endpoint gets a network interface in each linked subnet; a Gateway endpoint (s3, dynamodb) has no interface at all — it installs a route, so it takes the linked route tables and its subnet links only say which subnets are meant to use it."
 
 [[providers.aws.fields]]
 name = "service"
 label = "AWS service"
 type = "enum"
 required = true
-options = ["secretsmanager", "sqs", "sns", "dynamodb", "rds", "kms", "logs", "ecr.api", "ecr.dkr", "s3"]
+options = ["secretsmanager", "sqs", "sns", "sts", "dynamodb", "rds", "kms", "logs", "monitoring", "ecr.api", "ecr.dkr", "s3"]
 default = "secretsmanager"
-description = "Service name suffix of com.amazonaws.<region>.<service>. s3 and dynamodb are Gateway endpoints and attach to the subnet's route table instead."
+description = "Service name suffix of com.amazonaws.<region>.<service>. s3 and dynamodb are Gateway endpoints and take route tables instead of subnets; the rest are Interface endpoints and take one subnet per availability zone."
+
+# An interface endpoint lives in subnets, a gateway endpoint in route tables; neither
+# needs the 'Connects to' link, which AWS has no use for beyond a tag.
+[[providers.aws.checks]]
+when = { all = [ { provider_field = "service", not_equals = "s3" }, { provider_field = "service", not_equals = "dynamodb" }, { relation = "network_membership", absent = true } ] }
+severity = "error"
+message = "\"{name}\" is an Interface endpoint: link the subnets it should get an interface in (one per availability zone), or draw it inside one"
+
+[[providers.aws.checks]]
+when = { all = [ { any = [ { provider_field = "service", equals = "s3" }, { provider_field = "service", equals = "dynamodb" } ] }, { relation = "attachment", target_type = "route_table", absent = true } ] }
+severity = "error"
+message = "\"{name}\" is a Gateway endpoint (s3 / dynamodb): it installs a route rather than an interface, so link the Route Tables of the subnets that should reach the service"
 
 [[providers.aws.blocks]]
 key = "main"
 resource = "aws_vpc_endpoint"
 
 [providers.aws.blocks.args]
-vpc_id              = { relation = "network_membership", ancestor = "virtual_network", attr = "id" }
+vpc_id              = { relation = "network_membership", ancestor = "virtual_network", attr = "id", fallback = { relation = "attachment", target_type = "route_table", ancestor = "virtual_network", attr = "id", fallback = { ancestor = "virtual_network", attr = "id", optional = true } } }
 service_name        = { template = "com.amazonaws.{settings.region}.{provider.service}" }
 vpc_endpoint_type   = { if = { any = [ { provider_field = "service", equals = "s3" }, { provider_field = "service", equals = "dynamodb" } ] }, then = { value = "Gateway" }, else = { value = "Interface" } }
-subnet_ids          = { if = { any = [ { provider_field = "service", equals = "s3" }, { provider_field = "service", equals = "dynamodb" } ] }, then = { list = [] }, else = { relation = "network_membership", attr = "id", wrap = "list" } }
+subnet_ids          = { if = { all = [ { provider_field = "service", not_equals = "s3" }, { provider_field = "service", not_equals = "dynamodb" } ] }, then = { relation = "network_membership", attr = "id", wrap = "list" } }
+route_table_ids     = { if = { any = [ { provider_field = "service", equals = "s3" }, { provider_field = "service", equals = "dynamodb" } ] }, then = { relation = "attachment", target_type = "route_table", attr = "id", wrap = "list" } }
 security_group_ids  = { relation = "attachment", target_type = "security_group", attr = "id", wrap = "list" }
 private_dns_enabled = { if = { any = [ { provider_field = "service", equals = "s3" }, { provider_field = "service", equals = "dynamodb" } ] }, then = { value = false }, else = { value = true } }
-tags                = { object = { Name = { field = "name" }, Target = { relation = "attribute_reference", attr = "id" } } }
+tags                = { object = { Name = { field = "name" }, Target = { relation = "attribute_reference", attr = "id", optional = true } } }
 
 [providers.aws.outputs]
 id = { attr = "id", description = "VPC endpoint id" }
 
 [[providers.aws.manual_steps]]
-title = "Gateway endpoints need a route-table association"
-when = { any = [ { provider_field = "service", equals = "s3" }, { provider_field = "service", equals = "dynamodb" } ] }
-body = """
-S3 and DynamoDB endpoints are Gateway endpoints: associate the endpoint with the route
-table of the linked subnet (`aws_vpc_endpoint_route_table_association`, or add the
-endpoint's route by hand) so traffic from the subnet is routed through it.
-"""
-
-[[providers.aws.manual_steps]]
 title = "Interface endpoints need a security group that allows HTTPS from the subnet"
-when = { relation = "attachment", target_type = "security_group", absent = true }
+when = { all = [ { provider_field = "service", not_equals = "s3" }, { provider_field = "service", not_equals = "dynamodb" }, { relation = "attachment", target_type = "security_group", absent = true } ] }
 body = """
 No security group is linked, so the endpoint gets the VPC default group. Link a Security
 Group that allows inbound 443 from the subnet's CIDR, or confirm the default group does.
@@ -101,6 +112,17 @@ Group that allows inbound 443 from the subnet's CIDR, or confirm the default gro
 # ---------------------------------------------------------------- Azure
 [providers.azure]
 status = "full"
+notes = "One endpoint in one subnet, fronting one service. Azure has no notion of an endpoint that fronts a service name rather than a resource, so 'Connects to' and 'Subnets' are both required here even though AWS can do without them."
+
+[[providers.azure.checks]]
+when = { relation = "attribute_reference", absent = true }
+severity = "error"
+message = "\"{name}\" needs a 'Connects to' link: an Azure private endpoint is a connection to one specific resource (AWS endpoints are named after a service instead)"
+
+[[providers.azure.checks]]
+when = { relation = "network_membership", absent = true }
+severity = "error"
+message = "\"{name}\" needs a subnet: an Azure private endpoint takes its private IP from one"
 
 [[providers.azure.blocks]]
 key = "main"

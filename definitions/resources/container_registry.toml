@@ -17,6 +17,12 @@ network_agnostic = true
 icon = "REG"
 
 [[fields]]
+name = "repositories"
+label = "Repositories"
+type = "string_list"
+description = "Image repositories to create. Empty means one repository named after this node, which is how an ECR 'registry' with a single image is usually drawn. Azure and Google Cloud create repositories on first push, so the list only documents them there."
+
+[[fields]]
 name = "immutable_tags"
 label = "Immutable tags"
 type = "bool"
@@ -40,10 +46,13 @@ description = "Expire older images automatically. 0 keeps every image for ever, 
 # ---------------------------------------------------------------- AWS
 [providers.aws]
 status = "full"
+notes = "ECR has no registry resource: each repository is its own. With no repositories listed the node itself is the one repository; otherwise it is one repository per name, all with the same posture."
 
+# The single-repository form: the node is the repository.
 [[providers.aws.blocks]]
 key = "main"
 resource = "aws_ecr_repository"
+when = { field = "repositories", absent = true }
 
 [providers.aws.blocks.args]
 name                 = { field = "name", transform = "kebab" }
@@ -58,9 +67,26 @@ block = "image_scanning_configuration"
 scan_on_push = { if = { field = "scan_on_push" }, then = { value = true }, else = { value = false } }
 
 [[providers.aws.blocks]]
+key = "repo"
+resource = "aws_ecr_repository"
+for_each_field = "repositories"
+
+[providers.aws.blocks.args]
+name                 = { item = "value", transform = "kebab" }
+image_tag_mutability = { if = { field = "immutable_tags" }, then = { value = "IMMUTABLE" }, else = { value = "MUTABLE" } }
+force_delete         = { value = true }
+tags                 = { object = { Name = { item = "value" }, Registry = { field = "name" } } }
+
+[[providers.aws.blocks.nested]]
+block = "image_scanning_configuration"
+
+[providers.aws.blocks.nested.args]
+scan_on_push = { if = { field = "scan_on_push" }, then = { value = true }, else = { value = false } }
+
+[[providers.aws.blocks]]
 key = "lifecycle"
 resource = "aws_ecr_lifecycle_policy"
-when = { field = "keep_last_images" }
+when = { all = [ { field = "keep_last_images" }, { field = "repositories", absent = true } ] }
 
 [providers.aws.blocks.args]
 repository = { self_block = "main", attr = "name" }
@@ -76,8 +102,33 @@ description  = { template = "Keep only the last {keep_last_images} images" }
 selection    = { object = { tagStatus = { value = "any" }, countType = { value = "imageCountMoreThan" }, countNumber = { field = "keep_last_images" } } }
 action       = { object = { type = { value = "expire" } } }
 
+# One policy per listed repository. The repository is addressed by name rather than by
+# the matching `repo` instance (a repeated block has no single address), so the block
+# carries an explicit dependency on all of them.
+[[providers.aws.blocks]]
+key = "repo_lifecycle"
+resource = "aws_ecr_lifecycle_policy"
+for_each_field = "repositories"
+when = { field = "keep_last_images" }
+
+[providers.aws.blocks.args]
+repository = { item = "value", transform = "kebab" }
+depends_on = { self_block = "repo", attr = "", wrap = "list" }
+
+[providers.aws.blocks.args.policy]
+func = "jsonencode"
+
+[[providers.aws.blocks.args.policy.args]]
+[[providers.aws.blocks.args.policy.args.object.rules.list]]
+[providers.aws.blocks.args.policy.args.object.rules.list.object]
+rulePriority = { value = 1 }
+description  = { template = "Keep only the last {keep_last_images} images" }
+selection    = { object = { tagStatus = { value = "any" }, countType = { value = "imageCountMoreThan" }, countNumber = { field = "keep_last_images" } } }
+action       = { object = { type = { value = "expire" } } }
+
 [providers.aws.outputs]
-url = { attr = "repository_url", description = "Repository URL" }
+url             = { attr = "repository_url", description = "Repository URL" }
+repository_urls = { block = "repo", attr = "repository_url", description = "URL of each listed repository" }
 
 # ---------------------------------------------------------------- Azure
 [providers.azure]
@@ -92,6 +143,10 @@ required = true
 pattern = "^[a-zA-Z0-9]{5,50}$"
 pattern_hint = "5-50 letters and digits; globally unique"
 unique_scope = "container_registry"
+
+[[providers.azure.checks]]
+when = { field = "repositories" }
+message = "\"{name}\" lists repositories, which Azure creates on first push: one registry is generated and each repository appears as a path inside it (push `<login server>/<repository>:<tag>`)"
 
 [[providers.azure.checks]]
 when = { any = [ { field = "immutable_tags" }, { field = "keep_last_images" } ] }
@@ -115,6 +170,10 @@ url = { attr = "login_server", description = "Registry login server" }
 [providers.gcp]
 status = "full"
 notes = "Artifact Registry scans images through Artifact Analysis, which is enabled for the whole project (the Container Scanning API) rather than per repository, so 'Scan images on push' has no setting here."
+
+[[providers.gcp.checks]]
+when = { field = "repositories" }
+message = "\"{name}\" lists repositories, which Artifact Registry creates on first push: one Docker repository is generated and each name becomes an image path inside it (push `<region>-docker.pkg.dev/<project>/<repository>/<image>:<tag>`)"
 
 [[providers.gcp.blocks]]
 key = "main"

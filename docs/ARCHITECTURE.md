@@ -236,6 +236,7 @@ Direction: **source depends on / references target**. Relation kinds:
 | `reads` | source reads target's value | function → secret |
 | `logs_to` | source writes its logs to target | function → log group |
 | `encrypted_with` | source is encrypted at rest with target's key | bucket → encryption key |
+| `dead_letters_to` | messages the source could not deliver go to target | queue → dead-letter queue |
 | `depends_on` | pure ordering, no attribute | anything → anything |
 
 Containment creates an *implicit* `network_membership` edge from child to container when the
