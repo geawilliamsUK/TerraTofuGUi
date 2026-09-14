@@ -1080,6 +1080,88 @@ fn edge_inspector(app: &mut TtgApp, ui: &mut Ui, i: usize) {
 
 // ---------------------------------------------------------------------------------------
 
+/// Project-wide tags (cost allocation, ownership). Renaming a key is a remove plus an
+/// insert, so the rows are edited through a scratch copy and written back as a whole.
+fn tags_ui(app: &mut TtgApp, ui: &mut Ui) {
+    ui.label(RichText::new("Default tags").strong());
+    ui.label(
+        RichText::new(
+            "Applied to every generated resource: AWS provider default_tags, \
+             Google Cloud default_labels, an Azure `tags` argument on each resource.",
+        )
+        .small()
+        .color(Color32::from_gray(110)),
+    );
+    // Draft rows live in egui memory so a half-typed key keeps its place in the table;
+    // they are re-seeded whenever the project's own tags no longer match them (undo,
+    // another editor, a freshly opened file).
+    let draft_id = ui.id().with("project_tags_draft");
+    let stored: Option<Vec<(String, String)>> = ui.data_mut(|d| d.get_temp(draft_id));
+    let mut rows = match stored {
+        Some(rows) if collect_tags(&rows) == app.project.settings.tags => rows,
+        _ => app
+            .project
+            .settings
+            .tags
+            .iter()
+            .map(|(k, v)| (k.clone(), v.clone()))
+            .collect(),
+    };
+    let mut changed = false;
+    let mut remove: Option<usize> = None;
+    egui::Grid::new("project_tags").num_columns(3).show(ui, |ui| {
+        for (i, (k, v)) in rows.iter_mut().enumerate() {
+            let rk = ui.add(
+                egui::TextEdit::singleline(k)
+                    .desired_width(120.0)
+                    .hint_text("key"),
+            );
+            track_text_edit(app, &rk);
+            let rv = ui.add(
+                egui::TextEdit::singleline(v)
+                    .desired_width(160.0)
+                    .hint_text("value"),
+            );
+            track_text_edit(app, &rv);
+            changed |= rk.changed() || rv.changed();
+            if ui.small_button("✕").on_hover_text("Remove this tag").clicked() {
+                remove = Some(i);
+            }
+            ui.end_row();
+        }
+    });
+    if let Some(i) = remove {
+        rows.remove(i);
+        changed = true;
+    }
+    let added = ui.button("Add tag").clicked();
+    if added {
+        rows.push((String::new(), String::new()));
+    }
+    let next = collect_tags(&rows);
+    if changed && next != app.project.settings.tags {
+        // Typing is already one undo step per focused field (track_text_edit); removing a
+        // row has no focus change of its own, so it takes its own snapshot.
+        if remove.is_some() {
+            let before = app.snapshot();
+            app.project.settings.tags = next;
+            app.finish(before);
+        } else {
+            app.project.settings.tags = next;
+            app.dirty = true;
+        }
+    }
+    ui.data_mut(|d| d.insert_temp(draft_id, rows));
+}
+
+/// Rows to a map, dropping the blank key a freshly added row starts with.
+fn collect_tags(rows: &[(String, String)]) -> std::collections::BTreeMap<String, String> {
+    rows.iter()
+        .filter(|(k, _)| !k.trim().is_empty())
+        .map(|(k, v)| (k.trim().to_string(), v.clone()))
+        .collect()
+}
+
 pub fn settings_ui(app: &mut TtgApp, ui: &mut Ui) {
     ui.label(RichText::new("Output").strong());
     ui.horizontal(|ui| {
@@ -1168,6 +1250,8 @@ pub fn settings_ui(app: &mut TtgApp, ui: &mut Ui) {
             }
         });
     }
+    ui.add_space(8.0);
+    tags_ui(app, ui);
     ui.add_space(8.0);
     ui.label(RichText::new("Provider settings").strong());
     ui.label(

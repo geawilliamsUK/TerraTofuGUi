@@ -4,12 +4,12 @@
 use crate::emit::{ManualEntry, OutputSpec, VarSpec};
 use crate::tool::Profile;
 use hcl::{Block, Expression, Identifier, Object, ObjectKey};
-use ttg_catalog::{Catalog, ProviderDef};
+use ttg_catalog::{Catalog, HelperProviderDef, ProviderDef};
 use ttg_core::Project;
 
 fn fmt_block(b: &Block) -> String {
     let s = hcl::format::to_string(b).expect("hcl formatting cannot fail for a built tree");
-    let mut s = align_attributes(&s).replace("{  }", "{}");
+    let mut s = collapse_empty_braces(&align_attributes(&s));
     while s.ends_with("\n\n") {
         s.pop();
     }
@@ -17,6 +17,27 @@ fn fmt_block(b: &Block) -> String {
         s.push('\n');
     }
     s
+}
+
+/// `filter {   }` -> `filter {}`. A block with no arguments at all (an S3 lifecycle
+/// filter that means "every object") comes out of the formatter padded.
+fn collapse_empty_braces(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    let mut rest = s;
+    while let Some(i) = rest.find('{') {
+        out.push_str(&rest[..i]);
+        let after = &rest[i + 1..];
+        let spaces = after.len() - after.trim_start_matches(' ').len();
+        if spaces > 0 && after[spaces..].starts_with('}') {
+            out.push_str("{}");
+            rest = &after[spaces + 1..];
+        } else {
+            out.push('{');
+            rest = after;
+        }
+    }
+    out.push_str(rest);
+    out
 }
 
 /// A `.tf` file of resource blocks, each entity introduced by a comment.
@@ -79,21 +100,42 @@ pub fn render_outputs(header: &str, outputs: &[OutputSpec]) -> String {
     out
 }
 
-pub fn render_versions(header: &str, profile: &Profile, pdef: &ProviderDef) -> String {
-    let mut entry = Object::new();
-    entry.insert(
-        ObjectKey::Identifier(Identifier::unchecked("source")),
-        Expression::String(
+/// `versions.tf`. `helpers` are the side providers some emitted block actually draws a
+/// resource from (`hashicorp/random` for generated secret values); an unused one is left
+/// out so `init` never downloads a provider the configuration does not reference.
+pub fn render_versions(
+    header: &str,
+    profile: &Profile,
+    pdef: &ProviderDef,
+    helpers: &[&HelperProviderDef],
+) -> String {
+    let entry = |source: String, version: &str| {
+        let mut o = Object::new();
+        o.insert(
+            ObjectKey::Identifier(Identifier::unchecked("source")),
+            Expression::String(source),
+        );
+        o.insert(
+            ObjectKey::Identifier(Identifier::unchecked("version")),
+            Expression::String(version.to_string()),
+        );
+        Expression::Object(o)
+    };
+    let mut rp = Block::builder("required_providers").add_attribute((
+        pdef.provider.local_name(),
+        entry(
             profile.provider_source(&pdef.provider.source_namespace, &pdef.provider.source_name),
+            &pdef.provider.version_constraint,
         ),
-    );
-    entry.insert(
-        ObjectKey::Identifier(Identifier::unchecked("version")),
-        Expression::String(pdef.provider.version_constraint.clone()),
-    );
-    let rp = Block::builder("required_providers")
-        .add_attribute((pdef.provider.local_name(), Expression::Object(entry)))
-        .build();
+    ));
+    for h in helpers {
+        let (ns, name) = h.source_parts();
+        rp = rp.add_attribute((
+            h.local_name(),
+            entry(profile.provider_source(ns, name), &h.version),
+        ));
+    }
+    let rp = rp.build();
     let tf = Block::builder("terraform")
         .add_attribute(("required_version", profile.required_version()))
         .add_block(rp)

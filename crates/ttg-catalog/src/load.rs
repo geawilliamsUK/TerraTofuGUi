@@ -114,6 +114,10 @@ const BUILTIN_RESOURCES: &[(&str, &str)] = &[
         include_str!("../../../definitions/resources/secret.toml"),
     ),
     (
+        "resources/encryption_key.toml",
+        include_str!("../../../definitions/resources/encryption_key.toml"),
+    ),
+    (
         "resources/log_group.toml",
         include_str!("../../../definitions/resources/log_group.toml"),
     ),

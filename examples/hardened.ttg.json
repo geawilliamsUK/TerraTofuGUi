@@ -1,0 +1,417 @@
+{
+  "schema_version": 1,
+  "name": "hardened",
+  "settings": {
+    "tool": "opentofu",
+    "target_provider": "aws",
+    "provider_settings": {
+      "aws": {
+        "region": "eu-west-2"
+      },
+      "azure": {
+        "location": "uksouth"
+      },
+      "gcp": {
+        "region": "europe-west2"
+      }
+    },
+    "backend": null,
+    "state_encryption": false,
+    "tags": {
+      "Environment": "prod",
+      "Project": "Hardened"
+    }
+  },
+  "containers": {
+    "rg-hard": {
+      "id": "rg-hard",
+      "name": "hardened",
+      "container_type": "resource_group",
+      "config": {},
+      "provider_config": {},
+      "position": {
+        "x": 40,
+        "y": 40
+      },
+      "size": {
+        "w": 1560,
+        "h": 900
+      },
+      "parent": null,
+      "manual": false
+    },
+    "vnet-hard": {
+      "id": "vnet-hard",
+      "name": "core",
+      "container_type": "virtual_network",
+      "config": {
+        "cidr_block": "10.40.0.0/16"
+      },
+      "provider_config": {},
+      "position": {
+        "x": 80,
+        "y": 100
+      },
+      "size": {
+        "w": 640,
+        "h": 480
+      },
+      "parent": "rg-hard",
+      "manual": false
+    },
+    "kv-hard": {
+      "id": "kv-hard",
+      "name": "vault",
+      "container_type": "key_vault",
+      "config": {},
+      "provider_config": {
+        "azure": {
+          "vault_name": "ttg-hardened-x91"
+        }
+      },
+      "position": {
+        "x": 800,
+        "y": 100
+      },
+      "size": {
+        "w": 420,
+        "h": 260
+      },
+      "parent": "rg-hard",
+      "manual": false
+    }
+  },
+  "nodes": {
+    "sub-db-a": {
+      "id": "sub-db-a",
+      "name": "db a",
+      "resource_type": "subnet",
+      "config": {
+        "cidr_block": "10.40.10.0/24"
+      },
+      "provider_config": {
+        "aws": {
+          "availability_zone": "eu-west-2a"
+        },
+        "azure": {
+          "delegation": "postgres_flexible"
+        }
+      },
+      "position": {
+        "x": 120,
+        "y": 160
+      },
+      "parent": "vnet-hard",
+      "manual": false
+    },
+    "sub-db-b": {
+      "id": "sub-db-b",
+      "name": "db b",
+      "resource_type": "subnet",
+      "config": {
+        "cidr_block": "10.40.11.0/24"
+      },
+      "provider_config": {
+        "aws": {
+          "availability_zone": "eu-west-2b"
+        },
+        "azure": {
+          "delegation": "postgres_flexible"
+        }
+      },
+      "position": {
+        "x": 120,
+        "y": 300
+      },
+      "parent": "vnet-hard",
+      "manual": false
+    },
+    "sg-db": {
+      "id": "sg-db",
+      "name": "db sg",
+      "resource_type": "security_group",
+      "config": {
+        "rules": [
+          {
+            "direction": "ingress",
+            "protocol": "tcp",
+            "from_port": 5432,
+            "to_port": 5432,
+            "cidr": "10.40.0.0/16",
+            "source_group": "",
+            "name": "postgres-internal"
+          }
+        ]
+      },
+      "provider_config": {},
+      "position": {
+        "x": 400,
+        "y": 160
+      },
+      "parent": "vnet-hard",
+      "manual": false
+    },
+    "key-main": {
+      "id": "key-main",
+      "name": "data key",
+      "resource_type": "encryption_key",
+      "config": {
+        "rotation_days": "90",
+        "deletion_window_days": 30
+      },
+      "provider_config": {},
+      "position": {
+        "x": 840,
+        "y": 160
+      },
+      "parent": "kv-hard",
+      "manual": false
+    },
+    "sec-db": {
+      "id": "sec-db",
+      "name": "db password",
+      "resource_type": "secret",
+      "config": {
+        "generate_value": true,
+        "recovery_window_days": 14
+      },
+      "provider_config": {},
+      "position": {
+        "x": 1040,
+        "y": 160
+      },
+      "parent": "kv-hard",
+      "manual": false
+    },
+    "db-main": {
+      "id": "db-main",
+      "name": "records",
+      "resource_type": "relational_database",
+      "config": {
+        "engine": "postgres",
+        "size": "medium",
+        "storage": "64",
+        "database_name": "records",
+        "admin_username": "dbadmin",
+        "high_availability": true,
+        "backup_retention_days": 14,
+        "deletion_protection": false,
+        "final_snapshot": true
+      },
+      "provider_config": {
+        "aws": {
+          "performance_insights": true
+        },
+        "azure": {
+          "server_name": "ttg-hardened-db-x91"
+        }
+      },
+      "position": {
+        "x": 400,
+        "y": 300
+      },
+      "parent": "vnet-hard",
+      "manual": false
+    },
+    "obj-data": {
+      "id": "obj-data",
+      "name": "records store",
+      "resource_type": "object_storage",
+      "config": {
+        "versioning": true,
+        "block_public_access": true,
+        "tls_only": true,
+        "expire_days": 365,
+        "noncurrent_expire_days": 30,
+        "abort_multipart_days": 7,
+        "cors_origins": ["https://app.example.com"]
+      },
+      "provider_config": {
+        "aws": {
+          "bucket_name": "ttg-hardened-records-x91"
+        },
+        "azure": {
+          "account_name": "ttghardenedrecx91",
+          "container_name": "records",
+          "replication": "ZRS"
+        },
+        "gcp": {
+          "bucket_name": "ttg-hardened-records-x91"
+        }
+      },
+      "position": {
+        "x": 800,
+        "y": 420
+      },
+      "parent": "rg-hard",
+      "manual": false
+    },
+    "obj-audit": {
+      "id": "obj-audit",
+      "name": "access log store",
+      "resource_type": "object_storage",
+      "config": {
+        "versioning": false,
+        "block_public_access": true,
+        "tls_only": true,
+        "expire_days": 90
+      },
+      "provider_config": {
+        "aws": {
+          "bucket_name": "ttg-hardened-audit-x91"
+        },
+        "azure": {
+          "account_name": "ttghardenedaudx91",
+          "container_name": "audit",
+          "replication": "LRS"
+        },
+        "gcp": {
+          "bucket_name": "ttg-hardened-audit-x91"
+        }
+      },
+      "position": {
+        "x": 1100,
+        "y": 420
+      },
+      "parent": "rg-hard",
+      "manual": false
+    },
+    "q-work": {
+      "id": "q-work",
+      "name": "work queue",
+      "resource_type": "event_queue",
+      "config": {
+        "visibility_timeout_seconds": 60,
+        "message_retention_seconds": 1209600,
+        "receive_wait_time_seconds": 20
+      },
+      "provider_config": {
+        "azure": {
+          "namespace_name": "ttg-hardened-bus-x91",
+          "sku": "Standard"
+        }
+      },
+      "position": {
+        "x": 800,
+        "y": 580
+      },
+      "parent": "rg-hard",
+      "manual": false
+    },
+    "tp-events": {
+      "id": "tp-events",
+      "name": "record events",
+      "resource_type": "topic",
+      "config": {},
+      "provider_config": {
+        "azure": {
+          "namespace_name": "ttg-hardened-evt-x91"
+        }
+      },
+      "position": {
+        "x": 1100,
+        "y": 580
+      },
+      "parent": "rg-hard",
+      "manual": false
+    },
+    "log-app": {
+      "id": "log-app",
+      "name": "app logs",
+      "resource_type": "log_group",
+      "config": {
+        "retention_days": "365"
+      },
+      "provider_config": {},
+      "position": {
+        "x": 800,
+        "y": 720
+      },
+      "parent": "rg-hard",
+      "manual": false
+    },
+    "reg-images": {
+      "id": "reg-images",
+      "name": "app images",
+      "resource_type": "container_registry",
+      "config": {
+        "immutable_tags": true,
+        "scan_on_push": true,
+        "keep_last_images": 20
+      },
+      "provider_config": {
+        "azure": {
+          "registry_name": "ttghardenedx91"
+        }
+      },
+      "position": {
+        "x": 1100,
+        "y": 720
+      },
+      "parent": "rg-hard",
+      "manual": false
+    }
+  },
+  "edges": [
+    {
+      "source": "db-main",
+      "target": "sub-db-a",
+      "relation": "network_membership"
+    },
+    {
+      "source": "db-main",
+      "target": "sub-db-b",
+      "relation": "network_membership"
+    },
+    {
+      "source": "db-main",
+      "target": "sg-db",
+      "relation": "attribute_reference"
+    },
+    {
+      "source": "db-main",
+      "target": "sec-db",
+      "relation": "reads"
+    },
+    {
+      "source": "db-main",
+      "target": "key-main",
+      "relation": "encrypted_with"
+    },
+    {
+      "source": "obj-data",
+      "target": "key-main",
+      "relation": "encrypted_with"
+    },
+    {
+      "source": "obj-data",
+      "target": "obj-audit",
+      "relation": "logs_to"
+    },
+    {
+      "source": "q-work",
+      "target": "key-main",
+      "relation": "encrypted_with"
+    },
+    {
+      "source": "sec-db",
+      "target": "key-main",
+      "relation": "encrypted_with"
+    },
+    {
+      "source": "log-app",
+      "target": "key-main",
+      "relation": "encrypted_with"
+    },
+    {
+      "source": "tp-events",
+      "target": "key-main",
+      "relation": "encrypted_with"
+    },
+    {
+      "source": "tp-events",
+      "target": "q-work",
+      "relation": "sends_to"
+    }
+  ]
+}

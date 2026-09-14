@@ -290,6 +290,44 @@ Connect for private endpoints, and provider-level project creation (`google_proj
 Release builds: not automated in the repository; `docs/RELEASING.md` is a step-by-step
 guide with a ready-to-paste tag-triggered workflow.
 
+## Security posture (gap report 2.2 and §3)
+
+The CallScope gap report's finding was that a production design exported with
+public-by-default buckets, an unencrypted database, unrecoverable secrets and a `destroy`
+that took the data with it — everything had to be bolted on with `extra` arguments or
+native resources. That vocabulary is now curated, so all three providers get the same
+posture from the same diagram:
+
+- **`encryption_key`** (`aws_kms_key` + alias with a key policy that delegates to the
+  account and lets the CloudWatch Logs, SNS and SQS service principals use the key;
+  `azurerm_key_vault_key` in the enclosing vault; `google_kms_key_ring` +
+  `google_kms_crypto_key`), linked with the new **`encrypted_with`** relation from Object
+  Storage, Relational Database, Event Queue, Secret, Log Group and Topic. Where a provider
+  encrypts with platform keys and cannot take a customer-managed one from the diagram
+  (Azure storage accounts and flexible servers need a user-assigned identity; Service Bus
+  needs Premium; Log Analytics needs a dedicated cluster), the relation is scoped away
+  from that provider and a design-time check says so on the node.
+- **Object Storage**: block public access and TLS-only (both on by default), object /
+  noncurrent-version / unfinished-upload expiry, CORS origins, and access logging to a
+  second bucket through `logs_to`. The AWS bucket policy carries the TLS denial and, for a
+  bucket others log into, the log-delivery grant — which is why a log target keeps SSE-S3
+  even when a key is linked.
+- **Relational Database**: high availability, backup retention, deletion protection, a
+  final snapshot on destroy (on by default, named after the server), engine version and
+  instance-class overrides per provider, Performance Insights on AWS, and
+  `storage_encrypted` always on.
+- **Event Queue**: message retention and long-poll wait. **Secret**: recovery window
+  (7 days by default instead of the old unrecoverable 0) and a generated value.
+  **Container Registry**: immutable tags, scan on push, keep-last-N images.
+- **Project-wide default tags** on `Settings`, emitted as AWS `default_tags`, Google
+  `default_labels` (sanitised to label-safe text) or, on Azure, merged into every emitted
+  resource whose schema has a `tags` argument.
+
+Three mechanisms were added to carry this: a relation condition may look at **incoming**
+edges, a provider definition may declare **helper providers** (`hashicorp/random`, pulled
+into `required_providers` only when a `random_*` resource is emitted) and where its
+**default tags** go. `examples/hardened.ttg.json` exercises the lot on all three providers.
+
 ## Explicitly still out of scope
 
 Running `plan`/`apply`, live-account access, multi-user collaboration, cost estimation,

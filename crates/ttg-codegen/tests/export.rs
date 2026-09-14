@@ -61,8 +61,9 @@ fn three_tier_azure_terraform() {
     assert!(g.files["providers.tf"].contains("features {}"));
     assert_eq!(
         g.manual_steps.len(),
-        3,
-        "role: 2 partial steps; vm: 1 unconsumed edge (lb / nat links are AWS-only relations)"
+        4,
+        "role: 2 partial steps; vm: 1 unconsumed edge (lb / nat links are AWS-only relations); \
+         db: no final snapshot on destroy"
     );
 }
 
@@ -808,26 +809,38 @@ fn extra_arguments_and_native_resources() {
     let mut cat = Catalog::builtin();
     let p = example("native-extras.ttg.json");
     cat.ensure_native_types(&p);
-    assert!(cat.resource("native:aws:aws_s3_bucket_policy").is_some());
+    assert!(cat
+        .resource("native:aws:aws_cloudwatch_log_metric_filter")
+        .is_some());
     let g = generate(&p, &cat, "aws", Tool::OpenTofu).expect("aws generates");
     let norm = |s: &str| s.split_whitespace().collect::<Vec<_>>().join(" ");
     let st = norm(&g.files["storage.tf"]);
     assert!(st.contains("force_destroy = true"), "{st}");
     let nat = norm(&g.files["native.tf"]);
-    assert!(
-        nat.contains("resource \"aws_s3_bucket_policy\" \"assets_policy\""),
-        "{nat}"
-    );
-    // `$ref` with `block` addresses a secondary block of the target, not its primary one
-    // (the bucket versioning resource's id is the bucket name, same as the bucket itself).
-    assert!(
-        nat.contains("bucket = aws_s3_bucket_versioning.assets_versioning.id"),
-        "{nat}"
-    );
     assert!(nat.contains("metric_transformation {"), "{nat}");
     assert!(
         nat.contains("log_group_name = aws_cloudwatch_log_group.app_logs.name"),
         "{nat}"
+    );
+    // `$ref` with `block` addresses a secondary block of the target, not its primary one
+    // (the bucket versioning resource's id is the bucket name, same as the bucket itself).
+    let mut p2 = p.clone();
+    let note: ttg_core::Node = serde_json::from_value(serde_json::json!({
+        "id": "nat-note", "name": "assets note", "resource_type": "native:aws:aws_s3_bucket_policy",
+        "position": {"x": 0, "y": 0}, "parent": "rg-nx000001",
+        "extra": {"aws": {"main": {
+            "bucket": {"$ref": {"entity": "assets", "block": "versioning", "attr": "id"}},
+            "policy": {"$raw": "jsonencode({})"}
+        }}}
+    }))
+    .unwrap();
+    p2.nodes.insert(note.id.clone(), note);
+    cat.ensure_native_types(&p2);
+    let g2 = generate(&p2, &cat, "aws", Tool::OpenTofu).expect("aws generates");
+    assert!(
+        norm(&g2.files["native.tf"]).contains("bucket = aws_s3_bucket_versioning.assets_versioning.id"),
+        "{}",
+        g2.files["native.tf"]
     );
     // Azure keeps the curated extras and leaves the AWS-only natives out.
     let g = generate(&p, &cat, "azure", Tool::Terraform).expect("azure generates");
@@ -856,19 +869,19 @@ fn extra_arguments_and_native_resources() {
     assert!(msgs.iter().any(|m| m.contains("arn is read-only")), "{msgs:?}");
     // A native resource missing a required argument is an error.
     let mut bad = p.clone();
-    bad.extra_args_mut("nat-policy", "aws", "main")
+    bad.extra_args_mut("nat-metric", "aws", "main")
         .unwrap()
-        .remove("policy");
+        .remove("pattern");
     let d = ttg_codegen::diagnostics::run(&bad, &cat, "aws");
     assert!(
         d.iter()
-            .any(|x| x.severity == Severity::Error && x.message.contains("requires: policy")),
+            .any(|x| x.severity == Severity::Error && x.message.contains("requires: pattern")),
         "{d:?}"
     );
     // Extras round-trip through the file.
     let text = ttg_core::project::to_string(&p).unwrap();
     let back = ttg_core::project::load_str(&text).unwrap();
-    assert_eq!(back.nodes["nat-policy"].extra, p.nodes["nat-policy"].extra);
+    assert_eq!(back.nodes["nat-metric"].extra, p.nodes["nat-metric"].extra);
 }
 
 #[test]
@@ -1010,4 +1023,282 @@ fn reachability_crosses_peerings_load_balancers_and_private_endpoints() {
         .any(|d| d.entity.as_deref() == Some("fn-worker")
             && d.severity == ttg_codegen::diagnostics::Severity::Info
             && d.message.contains("private endpoints")));
+}
+
+/// The security posture that used to need `extra` arguments or native resources: one
+/// example, three providers, both the key relation and the hardening fields.
+#[test]
+fn hardened_example_carries_the_posture_on_every_provider() {
+    let cat = Catalog::builtin();
+    let p = example("hardened.ttg.json");
+    let norm = |s: &str| s.split_whitespace().collect::<Vec<_>>().join(" ");
+
+    // ---- AWS
+    let g = generate(&p, &cat, "aws", Tool::OpenTofu).unwrap();
+    let sec = norm(&g.files["security.tf"]);
+    assert!(sec.contains("resource \"aws_kms_key\" \"data_key\""), "{sec}");
+    assert!(sec.contains("enable_key_rotation = true"), "{sec}");
+    assert!(sec.contains("rotation_period_in_days = 90"), "{sec}");
+    assert!(sec.contains("deletion_window_in_days = 30"), "{sec}");
+    assert!(
+        sec.contains("resource \"aws_kms_alias\" \"data_key_alias\""),
+        "{sec}"
+    );
+    // The key policy lets the account administer it and the log / event services use it.
+    assert!(sec.contains("Sid = \"AccountAdministration\""), "{sec}");
+    assert!(
+        sec.contains("format(\"logs.%s.amazonaws.com\", data.aws_region.data_key_region.name)"),
+        "{sec}"
+    );
+    assert!(
+        sec.contains("Service = [\"sns.amazonaws.com\", \"sqs.amazonaws.com\""),
+        "{sec}"
+    );
+
+    // Public access block, TLS-only policy, lifecycle, CORS and access logging.
+    let st = norm(&g.files["storage.tf"]);
+    assert!(
+        st.contains("resource \"aws_s3_bucket_public_access_block\" \"records_store_public_access\""),
+        "{st}"
+    );
+    assert!(st.contains("restrict_public_buckets = true"), "{st}");
+    assert!(st.contains("Sid = \"DenyInsecureTransport\""), "{st}");
+    assert!(st.contains("\"aws:SecureTransport\" = \"false\""), "{st}");
+    assert!(st.contains("expiration { days = 365 }"), "{st}");
+    assert!(
+        st.contains("noncurrent_version_expiration { noncurrent_days = 30 }"),
+        "{st}"
+    );
+    assert!(
+        st.contains("abort_incomplete_multipart_upload { days_after_initiation = 7 }"),
+        "{st}"
+    );
+    assert!(
+        st.contains("allowed_origins = [ \"https://app.example.com\" ]"),
+        "{st}"
+    );
+    assert!(
+        st.contains("target_bucket = aws_s3_bucket.access_log_store.id"),
+        "{st}"
+    );
+    // The key encrypts the records bucket; the log target keeps SSE-S3 (S3 refuses to
+    // deliver logs into a KMS-encrypted bucket) and gets the delivery grant instead.
+    assert!(
+        st.contains("kms_master_key_id = aws_kms_key.data_key.arn"),
+        "{st}"
+    );
+    assert!(
+        !st.contains("\"aws_s3_bucket_server_side_encryption_configuration\" \"access_log_store"),
+        "{st}"
+    );
+    assert!(st.contains("Sid = \"AllowServerAccessLogDelivery\""), "{st}");
+
+    // Database: HA, backups, encryption, a final snapshot named after the server.
+    let db = norm(&g.files["database.tf"]);
+    assert!(db.contains("multi_az = true"), "{db}");
+    assert!(db.contains("backup_retention_period = 14"), "{db}");
+    assert!(db.contains("storage_encrypted = true"), "{db}");
+    assert!(db.contains("kms_key_id = aws_kms_key.data_key.arn"), "{db}");
+    assert!(db.contains("skip_final_snapshot = false"), "{db}");
+    assert!(
+        db.contains("final_snapshot_identifier = \"records-final\""),
+        "{db}"
+    );
+    assert!(db.contains("performance_insights_enabled = true"), "{db}");
+    assert!(db.contains("engine_version = \"16\""), "{db}");
+
+    // Queue, topic and log group all take the same key.
+    let srv = norm(&g.files["serverless.tf"]);
+    assert!(srv.contains("message_retention_seconds = 1209600"), "{srv}");
+    assert!(srv.contains("receive_wait_time_seconds = 20"), "{srv}");
+    assert_eq!(
+        srv.matches("kms_master_key_id = aws_kms_key.data_key.arn")
+            .count(),
+        2,
+        "queue and topic: {srv}"
+    );
+    assert!(
+        norm(&g.files["monitoring.tf"]).contains("kms_key_id = aws_kms_key.data_key.arn"),
+        "log group"
+    );
+
+    // Secret: recovery window, key, and a generated value from hashicorp/random.
+    let secrets = norm(&g.files["secrets.tf"]);
+    assert!(secrets.contains("recovery_window_in_days = 14"), "{secrets}");
+    assert!(
+        secrets.contains("kms_key_id = aws_kms_key.data_key.arn"),
+        "{secrets}"
+    );
+    assert!(
+        secrets.contains("resource \"random_password\" \"db_password_generated\""),
+        "{secrets}"
+    );
+    assert!(
+        secrets.contains("secret_string = random_password.db_password_generated.result"),
+        "{secrets}"
+    );
+    assert!(
+        g.files["versions.tf"].contains("registry.opentofu.org/hashicorp/random"),
+        "the helper provider is required because a random_password is emitted"
+    );
+
+    // Registry hardening.
+    let reg = norm(&g.files["container.tf"]);
+    assert!(reg.contains("image_tag_mutability = \"IMMUTABLE\""), "{reg}");
+    assert!(
+        reg.contains("image_scanning_configuration { scan_on_push = true }"),
+        "{reg}"
+    );
+    assert!(
+        reg.contains("countType = \"imageCountMoreThan\", countNumber = 20"),
+        "{reg}"
+    );
+
+    // Default tags: one provider-level declaration, not a tag per resource.
+    assert!(
+        norm(&g.files["providers.tf"])
+            .contains("default_tags { tags = { Environment = \"prod\" Project = \"Hardened\" } }"),
+        "{}",
+        g.files["providers.tf"]
+    );
+
+    // ---- Azure
+    let g = generate(&p, &cat, "azure", Tool::Terraform).unwrap();
+    let st = norm(&g.files["storage.tf"]);
+    assert!(st.contains("allow_nested_items_to_be_public = false"), "{st}");
+    assert!(st.contains("https_traffic_only_enabled = true"), "{st}");
+    assert!(st.contains("min_tls_version = \"TLS1_2\""), "{st}");
+    assert!(
+        st.contains("delete_after_days_since_modification_greater_than = 365"),
+        "{st}"
+    );
+    assert!(st.contains("delete_after_days_since_creation = 30"), "{st}");
+    assert!(st.contains("cors_rule {"), "{st}");
+    let db = norm(&g.files["database.tf"]);
+    assert!(db.contains("backup_retention_days = 14"), "{db}");
+    assert!(
+        db.contains("high_availability { mode = \"ZoneRedundant\" }"),
+        "{db}"
+    );
+    assert!(
+        norm(&g.files["security.tf"]).contains("resource \"azurerm_key_vault_key\" \"data_key\""),
+        "the key lives in the enclosing vault"
+    );
+    // azurerm has no provider-level default tags: every taggable resource carries them,
+    // and a resource's own tags win.
+    assert!(!g.files["providers.tf"].contains("default_tags"));
+    assert!(
+        st.contains("tags = { Environment = \"prod\" Project = \"Hardened\" Name = \"access log store\" }"),
+        "{st}"
+    );
+    assert!(
+        norm(&g.files["secrets.tf"]).contains("tags = { Environment = \"prod\" Project = \"Hardened\" }"),
+        "a resource with no tags of its own still gets the project's"
+    );
+    // The links Azure cannot honour are reported at design time, not silently dropped.
+    let warned: Vec<&str> = g
+        .diagnostics
+        .iter()
+        .filter(|d| d.message.contains("linked to an Encryption Key"))
+        .map(|d| d.entity.as_deref().unwrap_or(""))
+        .collect();
+    for id in ["obj-data", "db-main", "q-work", "sec-db", "log-app", "tp-events"] {
+        assert!(warned.contains(&id), "{id} not warned: {warned:?}");
+    }
+
+    // ---- GCP
+    let g = generate(&p, &cat, "gcp", Tool::OpenTofu).unwrap();
+    let sec = norm(&g.files["security.tf"]);
+    assert!(
+        sec.contains("resource \"google_kms_key_ring\" \"data_key_ring\""),
+        "{sec}"
+    );
+    assert!(sec.contains("rotation_period = \"7776000s\""), "{sec}");
+    let st = norm(&g.files["storage.tf"]);
+    assert!(st.contains("public_access_prevention = \"enforced\""), "{st}");
+    assert!(
+        st.contains("encryption { default_kms_key_name = google_kms_crypto_key.data_key.id }"),
+        "{st}"
+    );
+    assert!(
+        st.contains("logging { log_bucket = google_storage_bucket.access_log_store.name"),
+        "{st}"
+    );
+    assert!(st.contains("type = \"AbortIncompleteMultipartUpload\""), "{st}");
+    let db = norm(&g.files["database.tf"]);
+    assert!(db.contains("availability_type = \"REGIONAL\""), "{db}");
+    assert!(db.contains("retained_backups = 14"), "{db}");
+    assert!(
+        db.contains("encryption_key_name = google_kms_crypto_key.data_key.id"),
+        "{db}"
+    );
+    let srv = norm(&g.files["serverless.tf"]);
+    assert!(
+        srv.contains("message_retention_duration = format(\"%ds\", 1209600)"),
+        "{srv}"
+    );
+    assert_eq!(
+        srv.matches("kms_key_name = google_kms_crypto_key.data_key.id")
+            .count(),
+        2,
+        "queue and topic: {srv}"
+    );
+    assert!(
+        norm(&g.files["monitoring.tf"])
+            .contains("cmek_settings { kms_key_name = google_kms_crypto_key.data_key.id }"),
+        "log bucket"
+    );
+    assert!(
+        norm(&g.files["secrets.tf"]).contains("customer_managed_encryption {"),
+        "a linked key switches Secret Manager to a regional replica: {}",
+        g.files["secrets.tf"]
+    );
+    let reg = norm(&g.files["container.tf"]);
+    assert!(reg.contains("docker_config { immutable_tags = true }"), "{reg}");
+    assert!(reg.contains("keep_count = 20"), "{reg}");
+    // Labels, not tags: Google Cloud only accepts lowercase.
+    assert!(
+        norm(&g.files["providers.tf"])
+            .contains("default_labels = { environment = \"prod\" project = \"hardened\" }"),
+        "{}",
+        g.files["providers.tf"]
+    );
+}
+
+/// Nothing emits a `random_*` resource, so the helper provider stays out of versions.tf.
+#[test]
+fn helper_provider_is_only_required_when_used() {
+    let cat = Catalog::builtin();
+    let p = example("job-pipeline.ttg.json");
+    let g = generate(&p, &cat, "aws", Tool::OpenTofu).unwrap();
+    assert!(
+        !g.files["versions.tf"].contains("random"),
+        "{}",
+        g.files["versions.tf"]
+    );
+}
+
+/// The safe defaults reach a project written before these fields existed.
+#[test]
+fn older_projects_gain_the_safe_defaults() {
+    let cat = Catalog::builtin();
+    let p = example("three-tier.ttg.json");
+    let norm = |s: &str| s.split_whitespace().collect::<Vec<_>>().join(" ");
+    let g = generate(&p, &cat, "aws", Tool::OpenTofu).unwrap();
+    let st = norm(&g.files["storage.tf"]);
+    assert!(
+        st.contains("resource \"aws_s3_bucket_public_access_block\""),
+        "{st}"
+    );
+    assert!(st.contains("Sid = \"DenyInsecureTransport\""), "{st}");
+    let db = norm(&g.files["database.tf"]);
+    assert!(db.contains("storage_encrypted = true"), "{db}");
+    assert!(db.contains("backup_retention_period = 7"), "{db}");
+    assert!(db.contains("skip_final_snapshot = false"), "{db}");
+    // No project tags configured: no default_tags block at all.
+    assert!(
+        !g.files["providers.tf"].contains("default_tags"),
+        "{}",
+        g.files["providers.tf"]
+    );
 }

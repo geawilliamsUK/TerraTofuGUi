@@ -108,7 +108,8 @@ All types live in `ttg-core::ir`. Field names below are the serialized names.
       "azure": { "location": "uksouth" }
     },
     "backend": null,                    // or { "type": "s3", "args": { "bucket": "...", ... } }
-    "state_encryption": false           // OpenTofu-only feature; ignored for Terraform
+    "state_encryption": false,          // OpenTofu-only feature; ignored for Terraform
+    "tags": { "Project": "demo" }       // put on every generated resource (see MAPPING_FORMAT §4.2)
   },
   "containers": { "<id>": Container, ... },
   "nodes":      { "<id>": Node, ... },
@@ -230,6 +231,11 @@ Direction: **source depends on / references target**. Relation kinds:
 | `network_membership` | source lives inside target's network | subnet → vnet, instance → subnet |
 | `attribute_reference` | source's config references an attribute of target | instance → object storage |
 | `iam_binding` | source assumes / is bound to target identity | instance → IAM role |
+| `attachment` | source is attached to / registered with target | route table → subnet |
+| `sends_to` | source publishes messages to target | function → queue |
+| `reads` | source reads target's value | function → secret |
+| `logs_to` | source writes its logs to target | function → log group |
+| `encrypted_with` | source is encrypted at rest with target's key | bucket → encryption key |
 | `depends_on` | pure ordering, no attribute | anything → anything |
 
 Containment creates an *implicit* `network_membership` edge from child to container when the

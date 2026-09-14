@@ -1,6 +1,8 @@
-# Abstract type: Container Registry
+# Abstract type: Container Registry  (schema_version 2)
 #
-# AWS: aws_ecr_repository. Azure: azurerm_container_registry (Basic).
+# AWS: aws_ecr_repository (+ aws_ecr_lifecycle_policy when old images are expired).
+# Azure: azurerm_container_registry (Basic).
+# GCP: google_artifact_registry_repository in Docker format.
 
 schema_version = 2
 
@@ -14,6 +16,27 @@ allowed_parents = ["resource_group", "virtual_network"]
 network_agnostic = true
 icon = "REG"
 
+[[fields]]
+name = "immutable_tags"
+label = "Immutable tags"
+type = "bool"
+default = false
+description = "Refuse to move or overwrite a tag once it points at an image, so a deployed tag always means the same bytes."
+
+[[fields]]
+name = "scan_on_push"
+label = "Scan images on push"
+type = "bool"
+default = true
+description = "Run a vulnerability scan as each image arrives."
+
+[[fields]]
+name = "keep_last_images"
+label = "Keep only the last N images"
+type = "int"
+default = 0
+description = "Expire older images automatically. 0 keeps every image for ever, which is what most registry bills are made of."
+
 # ---------------------------------------------------------------- AWS
 [providers.aws]
 status = "full"
@@ -24,9 +47,34 @@ resource = "aws_ecr_repository"
 
 [providers.aws.blocks.args]
 name                 = { field = "name", transform = "kebab" }
-image_tag_mutability = { value = "MUTABLE" }
+image_tag_mutability = { if = { field = "immutable_tags" }, then = { value = "IMMUTABLE" }, else = { value = "MUTABLE" } }
 force_delete         = { value = true }
 tags                 = { object = { Name = { field = "name" } } }
+
+[[providers.aws.blocks.nested]]
+block = "image_scanning_configuration"
+
+[providers.aws.blocks.nested.args]
+scan_on_push = { if = { field = "scan_on_push" }, then = { value = true }, else = { value = false } }
+
+[[providers.aws.blocks]]
+key = "lifecycle"
+resource = "aws_ecr_lifecycle_policy"
+when = { field = "keep_last_images" }
+
+[providers.aws.blocks.args]
+repository = { self_block = "main", attr = "name" }
+
+[providers.aws.blocks.args.policy]
+func = "jsonencode"
+
+[[providers.aws.blocks.args.policy.args]]
+[[providers.aws.blocks.args.policy.args.object.rules.list]]
+[providers.aws.blocks.args.policy.args.object.rules.list.object]
+rulePriority = { value = 1 }
+description  = { template = "Keep only the last {keep_last_images} images" }
+selection    = { object = { tagStatus = { value = "any" }, countType = { value = "imageCountMoreThan" }, countNumber = { field = "keep_last_images" } } }
+action       = { object = { type = { value = "expire" } } }
 
 [providers.aws.outputs]
 url = { attr = "repository_url", description = "Repository URL" }
@@ -34,6 +82,7 @@ url = { attr = "repository_url", description = "Repository URL" }
 # ---------------------------------------------------------------- Azure
 [providers.azure]
 status = "full"
+notes = "A Basic registry. Tag immutability and a retention policy are Premium-SKU features, and 'Scan images on push' is Microsoft Defender for Containers on the subscription rather than a registry setting."
 
 [[providers.azure.fields]]
 name = "registry_name"
@@ -43,6 +92,10 @@ required = true
 pattern = "^[a-zA-Z0-9]{5,50}$"
 pattern_hint = "5-50 letters and digits; globally unique"
 unique_scope = "container_registry"
+
+[[providers.azure.checks]]
+when = { any = [ { field = "immutable_tags" }, { field = "keep_last_images" } ] }
+message = "\"{name}\" asks for immutable tags or an image retention policy; both need a Premium registry, and this mapping creates a Basic one (raise the SKU with an extra argument and set the policy there)"
 
 [[providers.azure.blocks]]
 key = "main"
@@ -61,6 +114,7 @@ url = { attr = "login_server", description = "Registry login server" }
 # ---------------------------------------------------------------- GCP
 [providers.gcp]
 status = "full"
+notes = "Artifact Registry scans images through Artifact Analysis, which is enabled for the whole project (the Container Scanning API) rather than per repository, so 'Scan images on push' has no setting here."
 
 [[providers.gcp.blocks]]
 key = "main"
@@ -71,6 +125,43 @@ repository_id = { field = "name", transform = "kebab" }
 location      = { var = "region" }
 format        = { value = "DOCKER" }
 description   = { template = "{name} (managed by TerraTofu GUI)" }
+
+[[providers.gcp.blocks.nested]]
+block = "docker_config"
+when = { field = "immutable_tags" }
+
+[providers.gcp.blocks.nested.args]
+immutable_tags = { value = true }
+
+# A KEEP policy alone deletes nothing; the DELETE policy is what expires the rest, and
+# KEEP wins wherever the two overlap.
+[[providers.gcp.blocks.nested]]
+block = "cleanup_policies"
+when = { field = "keep_last_images" }
+
+[providers.gcp.blocks.nested.args]
+id     = { value = "keep-recent" }
+action = { value = "KEEP" }
+
+[[providers.gcp.blocks.nested.nested]]
+block = "most_recent_versions"
+
+[providers.gcp.blocks.nested.nested.args]
+keep_count = { field = "keep_last_images" }
+
+[[providers.gcp.blocks.nested]]
+block = "cleanup_policies"
+when = { field = "keep_last_images" }
+
+[providers.gcp.blocks.nested.args]
+id     = { value = "expire-the-rest" }
+action = { value = "DELETE" }
+
+[[providers.gcp.blocks.nested.nested]]
+block = "condition"
+
+[providers.gcp.blocks.nested.nested.args]
+tag_state = { value = "ANY" }
 
 [providers.gcp.outputs]
 id = { attr = "id", description = "Repository id" }

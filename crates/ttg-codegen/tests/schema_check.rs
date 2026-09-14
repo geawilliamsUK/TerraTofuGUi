@@ -24,9 +24,17 @@ fn check_nested(schema: &BlockSchema, n: &NestedBlockDef, at: &str, errs: &mut V
     }
 }
 
-fn check_block(provider: &str, b: &BlockDef, at: &str, errs: &mut Vec<String>) {
+fn check_block(cat: &Catalog, provider: &str, b: &BlockDef, at: &str, errs: &mut Vec<String>) {
     if b.resource == "terraform_data" {
         return; // built into Terraform / OpenTofu, not part of any provider schema
+    }
+    // Helper providers (hashicorp/random) are not part of the bundled index.
+    if cat.provider(provider).is_some_and(|p| {
+        p.helper_providers
+            .iter()
+            .any(|h| b.resource.starts_with(&h.prefix))
+    }) {
+        return;
     }
     let idx = ttg_schema::index();
     let Some(schema) = idx.resource(provider, &b.resource) else {
@@ -54,7 +62,7 @@ fn curated_mappings_match_provider_schemas() {
     for (tid, def) in &cat.resources {
         for (pid, m) in &def.providers {
             for b in &m.blocks {
-                check_block(pid, b, &format!("{tid}/{pid}/{}", b.key), &mut errs);
+                check_block(&cat, pid, b, &format!("{tid}/{pid}/{}", b.key), &mut errs);
             }
         }
     }

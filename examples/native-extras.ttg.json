@@ -76,35 +76,6 @@
         }
       }
     },
-    "nat-policy": {
-      "id": "nat-policy",
-      "name": "assets policy",
-      "resource_type": "native:aws:aws_s3_bucket_policy",
-      "config": {},
-      "provider_config": {},
-      "position": {
-        "x": 420,
-        "y": 120
-      },
-      "parent": "rg-nx000001",
-      "manual": false,
-      "extra": {
-        "aws": {
-          "main": {
-            "bucket": {
-              "$ref": {
-                "entity": "assets",
-                "attr": "id",
-                "block": "versioning"
-              }
-            },
-            "policy": {
-              "$raw": "jsonencode({ Version = \"2012-10-17\", Statement = [{ Sid = \"DenyInsecure\", Effect = \"Deny\", Principal = \"*\", Action = \"s3:*\", Resource = [aws_s3_bucket.assets.arn, \"${aws_s3_bucket.assets.arn}/*\"], Condition = { Bool = { \"aws:SecureTransport\" = \"false\" } } }] })"
-            }
-          }
-        }
-      }
-    },
     "log-app": {
       "id": "log-app",
       "name": "app logs",
@@ -161,11 +132,6 @@
     }
   },
   "edges": [
-    {
-      "source": "nat-policy",
-      "target": "obj-assets",
-      "relation": "depends_on"
-    },
     {
       "source": "nat-metric",
       "target": "log-app",

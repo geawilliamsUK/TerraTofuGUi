@@ -31,3 +31,13 @@ subscription_id = { var = "subscription_id" }
 # `features {}` is mandatory even when empty.
 [[provider_block.nested]]
 block = "features"
+
+[[helper_providers]]
+source = "hashicorp/random"
+version = "~> 3.6"
+prefix = "random_"
+
+# azurerm has no provider-level default tags, so the emitter merges them into the `tags`
+# argument of every emitted resource whose schema has one.
+[default_tags]
+resource_arg = "tags"

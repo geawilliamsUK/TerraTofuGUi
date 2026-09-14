@@ -1,0 +1,193 @@
+# Abstract type: Encryption Key  (schema_version 2)
+#
+# A customer-managed key other resources are encrypted with ('Encrypted with').
+# AWS:   aws_kms_key + aws_kms_alias. The key policy lets the account root administer the
+#        key and lets the CloudWatch Logs and event service principals use it, so an
+#        encrypted log group, queue and topic work without further edits.
+# Azure: azurerm_key_vault_key inside the enclosing Key Vault (required).
+# GCP:   google_kms_key_ring + google_kms_crypto_key in the provider's region.
+
+schema_version = 2
+
+[resource]
+type = "encryption_key"
+category = "secrets"
+display_name = "Encryption Key"
+description = "A customer-managed key at rest. Link the resources it protects with 'Encrypted with'. On Azure it must be drawn inside a Key Vault."
+kind = "node"
+allowed_parents = ["key_vault", "resource_group"]
+network_agnostic = true
+icon = "KEY"
+expects_incoming = true
+
+[[fields]]
+name = "rotation_days"
+label = "Rotate every (days)"
+type = "enum"
+required = true
+options = ["90", "180", "365"]
+default = "90"
+description = "Automatic rotation period. 90 days is the shortest AWS KMS accepts."
+
+[[fields]]
+name = "deletion_window_days"
+label = "Deletion waiting period (days)"
+type = "int"
+required = true
+default = 30
+description = "AWS only: how long a scheduled deletion can be cancelled for (7-30). Azure and Google Cloud use the vault's / key ring's own soft-delete behaviour."
+
+# ---------------------------------------------------------------- AWS
+[providers.aws]
+status = "full"
+file = "security"
+
+[[providers.aws.data]]
+key = "account"
+resource = "aws_caller_identity"
+
+[[providers.aws.data]]
+key = "region"
+resource = "aws_region"
+
+[[providers.aws.blocks]]
+key = "main"
+resource = "aws_kms_key"
+
+[providers.aws.blocks.args]
+description             = { template = "{name} (managed by TerraTofu GUI)" }
+enable_key_rotation     = { value = true }
+rotation_period_in_days = { map = "rotation_days", table = { "90" = 90, "180" = 180, "365" = 365 } }
+deletion_window_in_days = { field = "deletion_window_days", fallback = { value = 30 } }
+tags                    = { object = { Name = { field = "name" } } }
+
+# Key policy: without one, only the key's creator can use it. The account root statement
+# delegates to IAM (so a role policy can grant use); the service statements let the
+# CloudWatch Logs and event services encrypt with it on the account's behalf.
+[providers.aws.blocks.args.policy]
+func = "jsonencode"
+
+[[providers.aws.blocks.args.policy.args]]
+[providers.aws.blocks.args.policy.args.object]
+Version = { value = "2012-10-17" }
+
+[[providers.aws.blocks.args.policy.args.object.Statement.list]]
+[providers.aws.blocks.args.policy.args.object.Statement.list.object]
+Sid       = { value = "AccountAdministration" }
+Effect    = { value = "Allow" }
+Principal = { object = { AWS = { func = "format", args = [ { value = "arn:aws:iam::%s:root" }, { self_data = "account", attr = "account_id" } ] } } }
+Action    = { value = "kms:*" }
+Resource  = { value = "*" }
+
+[[providers.aws.blocks.args.policy.args.object.Statement.list]]
+[providers.aws.blocks.args.policy.args.object.Statement.list.object]
+Sid       = { value = "CloudWatchLogs" }
+Effect    = { value = "Allow" }
+Principal = { object = { Service = { func = "format", args = [ { value = "logs.%s.amazonaws.com" }, { self_data = "region", attr = "name" } ] } } }
+Action    = { value = ["kms:Encrypt*", "kms:Decrypt*", "kms:ReEncrypt*", "kms:GenerateDataKey*", "kms:Describe*"] }
+Resource  = { value = "*" }
+
+[[providers.aws.blocks.args.policy.args.object.Statement.list]]
+[providers.aws.blocks.args.policy.args.object.Statement.list.object]
+Sid       = { value = "EventServices" }
+Effect    = { value = "Allow" }
+Principal = { object = { Service = { value = ["sns.amazonaws.com", "sqs.amazonaws.com", "events.amazonaws.com"] } } }
+Action    = { value = ["kms:Decrypt", "kms:GenerateDataKey*"] }
+Resource  = { value = "*" }
+
+[[providers.aws.blocks]]
+key = "alias"
+resource = "aws_kms_alias"
+
+[providers.aws.blocks.args]
+name           = { func = "format", args = [ { value = "alias/%s" }, { field = "name", transform = "kebab" } ] }
+target_key_id  = { self_block = "main", attr = "key_id" }
+
+[providers.aws.outputs]
+arn    = { attr = "arn", description = "Key ARN" }
+key_id = { attr = "key_id", description = "Key id" }
+
+# ---------------------------------------------------------------- Azure
+[providers.azure]
+status = "full"
+file = "security"
+notes = "An RSA key in the enclosing Key Vault, with a rotation policy. The vault's own soft-delete and purge protection govern how a deleted key can be recovered."
+
+[[providers.azure.checks]]
+when = { ancestor = "key_vault", absent = true }
+severity = "error"
+message = "\"{name}\" must be drawn inside a Key Vault container: Azure keys live in a vault"
+
+[[providers.azure.blocks]]
+key = "main"
+resource = "azurerm_key_vault_key"
+
+[providers.azure.blocks.args]
+name         = { field = "name", transform = "kebab" }
+key_vault_id = { ancestor = "key_vault", attr = "id" }
+key_type     = { value = "RSA" }
+key_size     = { value = 2048 }
+key_opts     = { value = ["decrypt", "encrypt", "sign", "unwrapKey", "verify", "wrapKey"] }
+
+[[providers.azure.blocks.nested]]
+block = "rotation_policy"
+
+[providers.azure.blocks.nested.args]
+expire_after         = { map = "rotation_days", table = { "90" = "P180D", "180" = "P365D", "365" = "P730D" } }
+notify_before_expiry = { value = "P30D" }
+
+[[providers.azure.blocks.nested.nested]]
+block = "automatic"
+
+[providers.azure.blocks.nested.nested.args]
+time_after_creation = { map = "rotation_days", table = { "90" = "P90D", "180" = "P180D", "365" = "P365D" } }
+
+[providers.azure.outputs]
+id = { attr = "id", description = "Key id (versioned)" }
+
+# ---------------------------------------------------------------- GCP
+[providers.gcp]
+status = "partial"
+file = "security"
+notes = "A key ring of its own plus one symmetric crypto key in the provider's region."
+
+[[providers.gcp.blocks]]
+key = "ring"
+resource = "google_kms_key_ring"
+
+[providers.gcp.blocks.args]
+name     = { template = "{name}-ring", transform = "kebab" }
+location = { var = "region" }
+
+[[providers.gcp.blocks]]
+key = "main"
+resource = "google_kms_crypto_key"
+
+[providers.gcp.blocks.args]
+name            = { field = "name", transform = "kebab" }
+key_ring        = { self_block = "ring", attr = "id" }
+purpose         = { value = "ENCRYPT_DECRYPT" }
+rotation_period = { map = "rotation_days", table = { "90" = "7776000s", "180" = "15552000s", "365" = "31536000s" } }
+
+[providers.gcp.outputs]
+id = { attr = "id", description = "Crypto key id" }
+
+[[providers.gcp.manual_steps]]
+title = "Cloud KMS key rings and keys are never destroyed"
+body = """
+Google Cloud cannot delete a key ring or a crypto key. `destroy` removes them from state
+and leaves them in the project, and a later `apply` with the same names adopts them again
+only after an `import`. Plan the names accordingly, and schedule key *versions* for
+destruction in the console when a key is genuinely retired.
+"""
+
+[[providers.gcp.manual_steps]]
+title = "Grant the service agents use of the key"
+body = """
+Each Google Cloud service encrypts with a key through its own service agent. Grant
+`roles/cloudkms.cryptoKeyEncrypterDecrypter` on this key to the service agent of every
+linked resource (Cloud Storage, Cloud SQL, Pub/Sub, Secret Manager, Cloud Logging) — the
+agent addresses are printed by `gcloud storage service-agent`, `gcloud beta services
+identity create --service=sqladmin.googleapis.com`, and so on — before applying the
+resources that reference it.
+"""

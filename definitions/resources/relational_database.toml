@@ -62,6 +62,41 @@ default = "dbadmin"
 pattern = "^[a-z][a-z0-9_]{1,15}$"
 pattern_hint = "lowercase, 2-16 chars, starting with a letter"
 
+[[fields]]
+name = "high_availability"
+label = "High availability"
+type = "bool"
+default = false
+description = "Run a standby in a second zone and fail over to it (Multi-AZ / zone-redundant / regional)."
+
+[[fields]]
+name = "backup_retention_days"
+label = "Backup retention (days)"
+type = "int"
+default = 7
+description = "How long automated backups are kept. 0 turns automated backups off, which no production database should do."
+
+[[fields]]
+name = "deletion_protection"
+label = "Deletion protection"
+type = "bool"
+default = false
+description = "Refuse to delete the server until the flag is cleared. Turn it on for anything holding real data; a `destroy` then fails until you clear it and apply again."
+
+[[fields]]
+name = "final_snapshot"
+label = "Take a final snapshot on destroy"
+type = "bool"
+default = true
+description = "Keep a snapshot when the server is destroyed, named after it. Turning this off means a destroy takes the data with it."
+
+[[relations]]
+kind = "encrypted_with"
+label = "Encrypted with"
+providers = ["aws", "gcp"]
+targets = ["encryption_key"]
+cardinality = "optional"
+
 [[relations]]
 kind = "network_membership"
 label = "Subnets"
@@ -95,6 +130,35 @@ message = "\"{name}\" needs subnets linked: RDS requires a subnet group with two
 when = { relation = "attribute_reference", target_type = "security_group", absent = true }
 message = "\"{name}\" has no security group; it will use the VPC default group"
 
+[[providers.aws.checks]]
+when = { all = [ { field = "size", equals = "small" }, { provider_field = "performance_insights" } ] }
+message = "\"{name}\" enables Performance Insights on the 'small' class (db.t3.micro), which does not support it; choose a larger size or an instance class override"
+
+[[providers.aws.checks]]
+when = { field = "backup_retention_days", equals = "0" }
+message = "\"{name}\" has automated backups turned off (retention 0): a deleted or corrupted database cannot be restored"
+
+[[providers.aws.fields]]
+name = "engine_version"
+label = "Engine version"
+type = "string"
+description = "Major version to pin, e.g. `16` for PostgreSQL or `8.0` for MySQL. Defaults to the engine's current major."
+
+[[providers.aws.fields]]
+name = "instance_class"
+label = "Instance class override"
+type = "string"
+pattern = "^db\\.[a-z0-9]+\\.[a-z0-9]+$"
+pattern_hint = "an RDS instance class such as db.m6g.large"
+description = "Overrides the class the size table picks."
+
+[[providers.aws.fields]]
+name = "performance_insights"
+label = "Performance Insights"
+type = "bool"
+default = false
+description = "Collect query-level performance data (not available on the db.t3.micro that 'small' selects)."
+
 [[providers.aws.variables]]
 name = "db_password"
 type = "string"
@@ -115,18 +179,26 @@ key = "main"
 resource = "aws_db_instance"
 
 [providers.aws.blocks.args]
-identifier             = { field = "name", transform = "kebab" }
-engine                 = { map = "engine", table = { postgres = "postgres", mysql = "mysql" } }
-instance_class         = { map = "size", table = { small = "db.t3.micro", medium = "db.t3.medium", large = "db.m5.large" } }
-allocated_storage      = { map = "storage", table = { "32" = 32, "64" = 64, "128" = 128, "256" = 256, "512" = 512 } }
-db_name                = { field = "database_name" }
-username               = { field = "admin_username" }
-password               = { if = { relation = "reads" }, then = { relation = "reads", block = "version", attr = "secret_string" }, else = { var = "db_password" } }
-db_subnet_group_name   = { self_block = "subnets", attr = "name" }
-vpc_security_group_ids = { relation = "attribute_reference", target_type = "security_group", attr = "id", wrap = "list", optional = true }
-publicly_accessible    = { value = false }
-skip_final_snapshot    = { value = true }
-tags                   = { object = { Name = { field = "name" } } }
+identifier                   = { field = "name", transform = "kebab" }
+engine                       = { map = "engine", table = { postgres = "postgres", mysql = "mysql" } }
+engine_version               = { provider_field = "engine_version", fallback = { map = "engine", table = { postgres = "16", mysql = "8.0" } } }
+instance_class               = { provider_field = "instance_class", fallback = { map = "size", table = { small = "db.t3.micro", medium = "db.t3.medium", large = "db.m5.large" } } }
+allocated_storage            = { map = "storage", table = { "32" = 32, "64" = 64, "128" = 128, "256" = 256, "512" = 512 } }
+db_name                      = { field = "database_name" }
+username                     = { field = "admin_username" }
+password                     = { if = { relation = "reads" }, then = { relation = "reads", block = "version", attr = "secret_string" }, else = { var = "db_password" } }
+db_subnet_group_name         = { self_block = "subnets", attr = "name" }
+vpc_security_group_ids       = { relation = "attribute_reference", target_type = "security_group", attr = "id", wrap = "list", optional = true }
+publicly_accessible          = { value = false }
+multi_az                     = { if = { field = "high_availability" }, then = { value = true }, else = { value = false } }
+backup_retention_period      = { field = "backup_retention_days", fallback = { value = 7 } }
+deletion_protection          = { if = { field = "deletion_protection" }, then = { value = true }, else = { value = false } }
+skip_final_snapshot          = { if = { field = "final_snapshot" }, then = { value = false }, else = { value = true } }
+final_snapshot_identifier    = { if = { field = "final_snapshot" }, then = { template = "{name}-final", transform = "kebab" } }
+performance_insights_enabled = { if = { provider_field = "performance_insights" }, then = { value = true }, else = { value = false } }
+storage_encrypted            = { value = true }
+kms_key_id                   = { relation = "encrypted_with", attr = "arn", optional = true }
+tags                         = { object = { Name = { field = "name" } } }
 
 [providers.aws.outputs]
 endpoint = { attr = "endpoint", description = "Connection endpoint (host:port)" }
@@ -144,6 +216,18 @@ required = true
 pattern = "^[a-z0-9][a-z0-9-]{1,61}[a-z0-9]$"
 pattern_hint = "3-63 lowercase letters, digits and hyphens; globally unique"
 unique_scope = "database_server"
+
+[[providers.azure.fields]]
+name = "engine_version"
+label = "Engine version"
+type = "string"
+description = "Flexible server version, e.g. `16` for PostgreSQL or `8.0.21` for MySQL. Defaults to the engine's current major."
+
+[[providers.azure.fields]]
+name = "sku_name"
+label = "SKU override"
+type = "string"
+description = "Overrides the SKU the size table picks, e.g. `GP_Standard_D2s_v3`. Zone-redundant high availability needs a General Purpose or Memory Optimized SKU."
 
 [[providers.azure.fields]]
 name = "public_access_cidr"
@@ -198,15 +282,23 @@ when = { field = "engine", equals = "postgres" }
 name                          = { provider_field = "server_name" }
 resource_group_name           = { ancestor = "resource_group", attr = "name" }
 location                      = { var = "location" }
-version                       = { value = "16" }
+version                       = { provider_field = "engine_version", fallback = { value = "16" } }
 administrator_login           = { field = "admin_username" }
 administrator_password        = { if = { relation = "reads" }, then = { relation = "reads", attr = "value" }, else = { var = "db_password" } }
-sku_name                      = { map = "size", table = { small = "B_Standard_B1ms", medium = "GP_Standard_D2s_v3", large = "GP_Standard_D4s_v3" } }
+sku_name                      = { provider_field = "sku_name", fallback = { map = "size", table = { small = "B_Standard_B1ms", medium = "GP_Standard_D2s_v3", large = "GP_Standard_D4s_v3" } } }
 storage_mb                    = { map = "storage", table = { "32" = 32768, "64" = 65536, "128" = 131072, "256" = 262144, "512" = 524288 } }
+backup_retention_days         = { field = "backup_retention_days", fallback = { value = 7 } }
 delegated_subnet_id           = { relation = "network_membership", attr = "id", optional = true }
 private_dns_zone_id           = { self_block = "dns", attr = "id" }
 public_network_access_enabled = { if = { relation = "network_membership" }, then = { value = false }, else = { value = true } }
 depends_on                    = { list = [ { self_block = "dns_link", attr = "" } ] }
+
+[[providers.azure.blocks.nested]]
+block = "high_availability"
+when = { field = "high_availability" }
+
+[providers.azure.blocks.nested.args]
+mode = { value = "ZoneRedundant" }
 
 [[providers.azure.blocks]]
 key = "pgdb"
@@ -228,10 +320,11 @@ when = { field = "engine", equals = "mysql" }
 name                   = { provider_field = "server_name" }
 resource_group_name    = { ancestor = "resource_group", attr = "name" }
 location               = { var = "location" }
-version                = { value = "8.0.21" }
+version                = { provider_field = "engine_version", fallback = { value = "8.0.21" } }
 administrator_login    = { field = "admin_username" }
 administrator_password = { if = { relation = "reads" }, then = { relation = "reads", attr = "value" }, else = { var = "db_password" } }
-sku_name               = { map = "size", table = { small = "B_Standard_B1ms", medium = "GP_Standard_D2ds_v4", large = "GP_Standard_D4ds_v4" } }
+sku_name               = { provider_field = "sku_name", fallback = { map = "size", table = { small = "B_Standard_B1ms", medium = "GP_Standard_D2ds_v4", large = "GP_Standard_D4ds_v4" } } }
+backup_retention_days  = { field = "backup_retention_days", fallback = { value = 7 } }
 delegated_subnet_id    = { relation = "network_membership", attr = "id", optional = true }
 private_dns_zone_id    = { self_block = "dns", attr = "id" }
 depends_on             = { list = [ { self_block = "dns_link", attr = "" } ] }
@@ -241,6 +334,13 @@ block = "storage"
 
 [providers.azure.blocks.nested.args]
 size_gb = { map = "storage", table = { "32" = 32, "64" = 64, "128" = 128, "256" = 256, "512" = 512 } }
+
+[[providers.azure.blocks.nested]]
+block = "high_availability"
+when = { field = "high_availability" }
+
+[providers.azure.blocks.nested.args]
+mode = { value = "ZoneRedundant" }
 
 [[providers.azure.blocks]]
 key = "mydb"
@@ -286,9 +386,30 @@ message = "\"{name}\" is VNet-integrated but no linked subnet is delegated to po
 when = { all = [ { field = "engine", equals = "mysql" }, { relation = "network_membership" }, { relation = "network_membership", target_provider_field = "delegation", equals = "mysql_flexible", absent = true } ] }
 message = "\"{name}\" is VNet-integrated but no linked subnet is delegated to mysql_flexible (set the subnet's Azure Delegation field; only the first linked subnet is used)"
 
+[[providers.azure.checks]]
+when = { all = [ { field = "high_availability" }, { field = "size", equals = "small" }, { provider_field = "sku_name", absent = true } ] }
+message = "\"{name}\" asks for high availability on the 'small' size, whose Burstable SKU cannot be zone-redundant; choose a larger size or set the Azure SKU override"
+
+[[providers.azure.checks]]
+when = { relation = "encrypted_with" }
+message = "\"{name}\" is linked to an Encryption Key, which the Azure mapping cannot use: a flexible server's customer-managed key needs a user-assigned identity holding Key Vault rights, which the diagram does not model. Storage stays encrypted with Microsoft-managed keys"
+
+[[providers.azure.checks]]
+when = { field = "deletion_protection" }
+message = "\"{name}\" asks for deletion protection, which Azure flexible servers have no setting for; protect it with a management lock on the resource group instead"
+
 [providers.azure.outputs]
 postgres_fqdn = { block = "pg", attr = "fqdn", description = "PostgreSQL server host name" }
 mysql_fqdn    = { block = "my", attr = "fqdn", description = "MySQL server host name" }
+
+[[providers.azure.manual_steps]]
+title = "Keep a copy before destroying the server"
+when = { field = "final_snapshot" }
+body = """
+Azure flexible servers have no "final snapshot on destroy": automated backups are deleted
+with the server. Before `destroy`, take a manual copy — `az postgres flexible-server
+backup create` / a restore into a new server, or a `pg_dump` / `mysqldump` to storage.
+"""
 
 [[providers.azure.manual_steps]]
 title = "Open network access to the database server"
@@ -304,6 +425,22 @@ generated), or add `azurerm_*_flexible_server_firewall_rule` resources by hand.
 [providers.gcp]
 status = "partial"
 notes = "Cloud SQL. Linked to a subnet it gets a private IP through private services access on the subnet's network (one connection per network); without one it is public with no authorised networks."
+
+[[providers.gcp.fields]]
+name = "database_version"
+label = "Database version override"
+type = "string"
+description = "A Cloud SQL database version such as `POSTGRES_15` or `MYSQL_8_0`. Defaults to the engine's current major."
+
+[[providers.gcp.fields]]
+name = "tier"
+label = "Machine tier override"
+type = "string"
+description = "Overrides the tier the size table picks, e.g. `db-custom-2-7680`. Regional (high-availability) instances cannot use the shared-core `db-f1-micro` that 'small' selects."
+
+[[providers.gcp.checks]]
+when = { all = [ { field = "high_availability" }, { field = "size", equals = "small" }, { provider_field = "tier", absent = true } ] }
+message = "\"{name}\" asks for high availability on the 'small' size, whose shared-core tier cannot be regional; choose a larger size or set the Google Cloud tier override"
 
 [[providers.gcp.variables]]
 name = "db_password"
@@ -339,18 +476,36 @@ key = "main"
 resource = "google_sql_database_instance"
 
 [providers.gcp.blocks.args]
-name                = { field = "name", transform = "kebab" }
-region              = { var = "region" }
-database_version    = { map = "engine", table = { postgres = "POSTGRES_16", mysql = "MYSQL_8_0" } }
-deletion_protection = { value = false }
+name                     = { field = "name", transform = "kebab" }
+region                   = { var = "region" }
+database_version         = { provider_field = "database_version", fallback = { map = "engine", table = { postgres = "POSTGRES_16", mysql = "MYSQL_8_0" } } }
+deletion_protection      = { if = { field = "deletion_protection" }, then = { value = true }, else = { value = false } }
+encryption_key_name      = { relation = "encrypted_with", attr = "id", optional = true }
 
 [[providers.gcp.blocks.nested]]
 block = "settings"
 
 [providers.gcp.blocks.nested.args]
-tier              = { map = "size", table = { small = "db-f1-micro", medium = "db-custom-2-7680", large = "db-custom-4-15360" } }
-disk_size         = { map = "storage", table = { "32" = 32, "64" = 64, "128" = 128, "256" = 256, "512" = 512 } }
-availability_type = { value = "ZONAL" }
+tier                     = { provider_field = "tier", fallback = { map = "size", table = { small = "db-f1-micro", medium = "db-custom-2-7680", large = "db-custom-4-15360" } } }
+disk_size                = { map = "storage", table = { "32" = 32, "64" = 64, "128" = 128, "256" = 256, "512" = 512 } }
+availability_type        = { if = { field = "high_availability" }, then = { value = "REGIONAL" }, else = { value = "ZONAL" } }
+retain_backups_on_delete = { if = { field = "final_snapshot" }, then = { value = true }, else = { value = false } }
+
+[[providers.gcp.blocks.nested.nested]]
+block = "backup_configuration"
+when = { field = "backup_retention_days" }
+
+[providers.gcp.blocks.nested.nested.args]
+enabled                        = { value = true }
+point_in_time_recovery_enabled = { if = { field = "engine", equals = "postgres" }, then = { value = true }, else = { value = false } }
+binary_log_enabled             = { if = { field = "engine", equals = "mysql" }, then = { value = true }, else = { value = false } }
+
+[[providers.gcp.blocks.nested.nested.nested]]
+block = "backup_retention_settings"
+
+[providers.gcp.blocks.nested.nested.nested.args]
+retained_backups = { field = "backup_retention_days", fallback = { value = 7 } }
+retention_unit   = { value = "COUNT" }
 
 [[providers.gcp.blocks.nested.nested]]
 block = "ip_configuration"
@@ -380,6 +535,16 @@ password = { if = { relation = "reads" }, then = { relation = "reads", block = "
 private_ip      = { attr = "private_ip_address", description = "Private IPv4 address (VNet-integrated instances)" }
 public_ip       = { attr = "public_ip_address", description = "Public IPv4 address (public instances)" }
 connection_name = { attr = "connection_name", description = "Cloud SQL connection name (for the Auth Proxy)" }
+
+[[providers.gcp.manual_steps]]
+title = "Let Cloud SQL use the encryption key"
+when = { relation = "encrypted_with" }
+body = """
+A Cloud SQL instance can only be created with a customer-managed key once the Cloud SQL
+service agent holds `roles/cloudkms.cryptoKeyEncrypterDecrypter` on that key. Create the
+agent with `gcloud beta services identity create --service=sqladmin.googleapis.com` and
+grant it the role on the key before the first `apply`.
+"""
 
 [[providers.gcp.manual_steps]]
 title = "Open network access to the database instance"

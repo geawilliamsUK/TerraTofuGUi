@@ -93,6 +93,13 @@
           "description": "OpenTofu-only: emit a state `encryption` block. Ignored for Terraform.",
           "type": "boolean",
           "default": false
+        },
+        "tags": {
+          "description": "Tags applied to every resource the project generates (cost allocation, ownership).\nHow they reach the HCL is the provider definition's business: AWS `default_tags`,\nGCP `default_labels`, Azure a `tags` argument merged into each resource.",
+          "type": "object",
+          "additionalProperties": {
+            "type": "string"
+          }
         }
       }
     },
@@ -426,6 +433,11 @@
           "description": "Source writes its logs to target (function -> log group).",
           "type": "string",
           "const": "logs_to"
+        },
+        {
+          "description": "Source is encrypted at rest with target's key (bucket -> encryption key).",
+          "type": "string",
+          "const": "encrypted_with"
         }
       ]
     },

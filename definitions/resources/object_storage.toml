@@ -1,7 +1,12 @@
-# Abstract type: Object Storage
+# Abstract type: Object Storage  (schema_version 2)
 #
-# AWS: aws_s3_bucket (+ aws_s3_bucket_versioning when versioning is on).
-# Azure: azurerm_storage_account + azurerm_storage_container.
+# AWS: aws_s3_bucket plus the sibling resources that carry its posture — public access
+#      block, a bucket policy that refuses plain HTTP, lifecycle expiry, CORS, server
+#      access logging and (with a linked Encryption Key) SSE-KMS.
+# Azure: azurerm_storage_account + azurerm_storage_container, with the same posture
+#      expressed as account settings and a management policy.
+# GCP: google_storage_bucket; public access prevention, lifecycle rules, CORS, logging
+#      and a default KMS key are all on the one resource.
 # Provider-specific naming rules are enforced with `pattern` on provider fields.
 
 schema_version = 2
@@ -22,6 +27,61 @@ type = "bool"
 default = false
 description = "Keep previous versions of overwritten objects."
 
+[[fields]]
+name = "block_public_access"
+label = "Block all public access"
+type = "bool"
+default = true
+description = "Refuse public ACLs and public bucket policies. Turn this off only for a bucket that is deliberately a public website."
+
+[[fields]]
+name = "tls_only"
+label = "Require TLS"
+type = "bool"
+default = true
+description = "Refuse requests that do not use HTTPS. Google Cloud Storage is HTTPS-only regardless."
+
+[[fields]]
+name = "expire_days"
+label = "Expire objects after (days)"
+type = "int"
+default = 0
+description = "Delete objects this many days after they are written. 0 keeps them for ever."
+
+[[fields]]
+name = "noncurrent_expire_days"
+label = "Expire old versions after (days)"
+type = "int"
+default = 0
+description = "With versioning on, delete superseded versions this many days after they stop being current. 0 keeps them for ever."
+
+[[fields]]
+name = "abort_multipart_days"
+label = "Abort unfinished uploads after (days)"
+type = "int"
+default = 0
+description = "Clean up multipart uploads that were never completed (they are billed until aborted). 0 leaves them."
+
+[[fields]]
+name = "cors_origins"
+label = "CORS allowed origins"
+type = "string_list"
+description = "Browser origins allowed to read objects (GET and HEAD). Empty means no CORS configuration."
+
+[[relations]]
+kind = "encrypted_with"
+label = "Encrypted with"
+providers = ["aws", "gcp"]
+targets = ["encryption_key"]
+cardinality = "optional"
+
+[[relations]]
+kind = "logs_to"
+label = "Access logs to bucket"
+providers = ["aws", "gcp"]
+targets = ["object_storage"]
+cardinality = "optional"
+
 # ---------------------------------------------------------------- AWS
 [providers.aws]
 status = "full"
@@ -34,6 +94,11 @@ required = true
 pattern = "^[a-z0-9][a-z0-9.-]{1,61}[a-z0-9]$"
 pattern_hint = "3-63 chars, lowercase letters, digits, dots and hyphens; globally unique"
 unique_scope = "bucket"
+
+# S3 refuses log delivery into a bucket encrypted with a customer-managed key.
+[[providers.aws.checks]]
+when = { all = [ { relation = "encrypted_with" }, { relation = "logs_to", incoming = true } ] }
+message = "\"{name}\" receives access logs, so it keeps SSE-S3 encryption: S3 cannot deliver server access logs into a bucket encrypted with a customer-managed KMS key, and the linked key is ignored for it"
 
 [[providers.aws.blocks]]
 key = "main"
@@ -57,6 +122,134 @@ block = "versioning_configuration"
 [providers.aws.blocks.nested.args]
 status = { value = "Enabled" }
 
+[[providers.aws.blocks]]
+key = "public_access"
+resource = "aws_s3_bucket_public_access_block"
+when = { field = "block_public_access" }
+
+[providers.aws.blocks.args]
+bucket                  = { self_block = "main", attr = "id" }
+block_public_acls       = { value = true }
+block_public_policy     = { value = true }
+ignore_public_acls      = { value = true }
+restrict_public_buckets = { value = true }
+
+# One bucket policy carries every statement the posture needs: the TLS refusal and, for a
+# bucket other buckets log into, the grant that lets S3 deliver those logs.
+[[providers.aws.blocks]]
+key = "policy"
+resource = "aws_s3_bucket_policy"
+when = { any = [ { field = "tls_only" }, { relation = "logs_to", incoming = true } ] }
+
+[providers.aws.blocks.args]
+bucket     = { self_block = "main", attr = "id" }
+depends_on = { list = [ { self_block = "public_access", attr = "" } ] }
+
+[providers.aws.blocks.args.policy]
+func = "jsonencode"
+
+[[providers.aws.blocks.args.policy.args]]
+[providers.aws.blocks.args.policy.args.object]
+Version = { value = "2012-10-17" }
+
+[[providers.aws.blocks.args.policy.args.object.Statement.list]]
+if = { field = "tls_only" }
+then = { object = { Sid = { value = "DenyInsecureTransport" }, Effect = { value = "Deny" }, Principal = { value = "*" }, Action = { value = "s3:*" }, Resource = { list = [ { self_block = "main", attr = "arn" }, { func = "format", args = [ { value = "%s/*" }, { self_block = "main", attr = "arn" } ] } ] }, Condition = { object = { Bool = { object = { "aws:SecureTransport" = { value = "false" } } } } } } }
+
+[[providers.aws.blocks.args.policy.args.object.Statement.list]]
+if = { relation = "logs_to", incoming = true }
+then = { object = { Sid = { value = "AllowServerAccessLogDelivery" }, Effect = { value = "Allow" }, Principal = { object = { Service = { value = "logging.s3.amazonaws.com" } } }, Action = { value = "s3:PutObject" }, Resource = { func = "format", args = [ { value = "%s/*" }, { self_block = "main", attr = "arn" } ] } } }
+
+# A linked key switches the bucket to SSE-KMS — unless it is a log target, which S3 only
+# writes into when it is encrypted with SSE-S3.
+[[providers.aws.blocks]]
+key = "encryption"
+resource = "aws_s3_bucket_server_side_encryption_configuration"
+when = { all = [ { relation = "encrypted_with" }, { relation = "logs_to", incoming = true, absent = true } ] }
+
+[providers.aws.blocks.args]
+bucket = { self_block = "main", attr = "id" }
+
+[[providers.aws.blocks.nested]]
+block = "rule"
+
+[providers.aws.blocks.nested.args]
+bucket_key_enabled = { value = true }
+
+[[providers.aws.blocks.nested.nested]]
+block = "apply_server_side_encryption_by_default"
+
+[providers.aws.blocks.nested.nested.args]
+sse_algorithm     = { value = "aws:kms" }
+kms_master_key_id = { relation = "encrypted_with", attr = "arn" }
+
+[[providers.aws.blocks]]
+key = "lifecycle"
+resource = "aws_s3_bucket_lifecycle_configuration"
+when = { any = [ { field = "expire_days" }, { field = "noncurrent_expire_days" }, { field = "abort_multipart_days" } ] }
+
+[providers.aws.blocks.args]
+bucket = { self_block = "main", attr = "id" }
+
+[[providers.aws.blocks.nested]]
+block = "rule"
+
+[providers.aws.blocks.nested.args]
+id     = { value = "retention" }
+status = { value = "Enabled" }
+
+# An empty filter means "every object"; the provider requires a filter or a prefix.
+[[providers.aws.blocks.nested.nested]]
+block = "filter"
+
+[[providers.aws.blocks.nested.nested]]
+block = "expiration"
+when = { field = "expire_days" }
+
+[providers.aws.blocks.nested.nested.args]
+days = { field = "expire_days" }
+
+[[providers.aws.blocks.nested.nested]]
+block = "noncurrent_version_expiration"
+when = { field = "noncurrent_expire_days" }
+
+[providers.aws.blocks.nested.nested.args]
+noncurrent_days = { field = "noncurrent_expire_days" }
+
+[[providers.aws.blocks.nested.nested]]
+block = "abort_incomplete_multipart_upload"
+when = { field = "abort_multipart_days" }
+
+[providers.aws.blocks.nested.nested.args]
+days_after_initiation = { field = "abort_multipart_days" }
+
+[[providers.aws.blocks]]
+key = "cors"
+resource = "aws_s3_bucket_cors_configuration"
+when = { field = "cors_origins" }
+
+[providers.aws.blocks.args]
+bucket = { self_block = "main", attr = "id" }
+
+[[providers.aws.blocks.nested]]
+block = "cors_rule"
+
+[providers.aws.blocks.nested.args]
+allowed_origins = { field = "cors_origins" }
+allowed_methods = { value = ["GET", "HEAD"] }
+allowed_headers = { value = ["*"] }
+max_age_seconds = { value = 3600 }
+
+[[providers.aws.blocks]]
+key = "logging"
+resource = "aws_s3_bucket_logging"
+when = { relation = "logs_to" }
+
+[providers.aws.blocks.args]
+bucket        = { self_block = "main", attr = "id" }
+target_bucket = { relation = "logs_to", attr = "id" }
+target_prefix = { func = "format", args = [ { value = "%s/" }, { field = "name", transform = "kebab" } ] }
+
 [providers.aws.outputs]
 id  = { attr = "id", description = "Bucket name" }
 arn = { attr = "arn", description = "Bucket ARN" }
@@ -64,6 +257,7 @@ arn = { attr = "arn", description = "Bucket ARN" }
 # ---------------------------------------------------------------- Azure
 [providers.azure]
 status = "full"
+notes = "Blobs are always encrypted at rest with Microsoft-managed keys, and unfinished block uploads are garbage-collected by the service, so those two settings have no Azure counterpart."
 
 [[providers.azure.fields]]
 name = "account_name"
@@ -90,24 +284,50 @@ type = "enum"
 options = ["LRS", "ZRS", "GRS"]
 default = "LRS"
 
+[[providers.azure.checks]]
+when = { relation = "encrypted_with" }
+message = "\"{name}\" is linked to an Encryption Key, which the Azure mapping cannot use: a customer-managed key on a storage account needs a user-assigned identity holding Key Vault rights, which the diagram does not model. Blobs stay encrypted with Microsoft-managed keys"
+
+[[providers.azure.checks]]
+when = { relation = "logs_to" }
+message = "\"{name}\" logs access to another bucket, which has no Azure counterpart: storage diagnostics go to a Log Analytics workspace through a diagnostic setting, not into a second account"
+
+[[providers.azure.checks]]
+when = { field = "abort_multipart_days" }
+message = "\"{name}\" sets an abort-unfinished-uploads age, which Azure has no setting for: uncommitted blocks expire after seven days on their own"
+
 [[providers.azure.blocks]]
 key = "main"
 resource = "azurerm_storage_account"
 
 [providers.azure.blocks.args]
-name                     = { provider_field = "account_name" }
-resource_group_name      = { ancestor = "resource_group", attr = "name" }
-location                 = { var = "location" }
-account_tier             = { value = "Standard" }
-account_replication_type = { provider_field = "replication" }
-tags                     = { object = { Name = { field = "name" } } }
+name                            = { provider_field = "account_name" }
+resource_group_name             = { ancestor = "resource_group", attr = "name" }
+location                        = { var = "location" }
+account_tier                    = { value = "Standard" }
+account_replication_type        = { provider_field = "replication" }
+allow_nested_items_to_be_public = { if = { field = "block_public_access" }, then = { value = false }, else = { value = true } }
+https_traffic_only_enabled      = { if = { field = "tls_only" }, then = { value = true }, else = { value = false } }
+min_tls_version                 = { if = { field = "tls_only" }, then = { value = "TLS1_2" } }
+tags                            = { object = { Name = { field = "name" } } }
 
 [[providers.azure.blocks.nested]]
 block = "blob_properties"
-when = { field = "versioning" }
+when = { any = [ { field = "versioning" }, { field = "cors_origins" } ] }
 
 [providers.azure.blocks.nested.args]
-versioning_enabled = { value = true }
+versioning_enabled = { if = { field = "versioning" }, then = { value = true }, else = { value = false } }
+
+[[providers.azure.blocks.nested.nested]]
+block = "cors_rule"
+when = { field = "cors_origins" }
+
+[providers.azure.blocks.nested.nested.args]
+allowed_origins    = { field = "cors_origins" }
+allowed_methods    = { value = ["GET", "HEAD"] }
+allowed_headers    = { value = ["*"] }
+exposed_headers    = { value = ["*"] }
+max_age_in_seconds = { value = 3600 }
 
 [[providers.azure.blocks]]
 key = "container"
@@ -118,12 +338,51 @@ name                  = { provider_field = "container_name" }
 storage_account_id    = { self_block = "main", attr = "id" }
 container_access_type = { value = "private" }
 
+[[providers.azure.blocks]]
+key = "lifecycle"
+resource = "azurerm_storage_management_policy"
+when = { any = [ { field = "expire_days" }, { field = "noncurrent_expire_days" } ] }
+
+[providers.azure.blocks.args]
+storage_account_id = { self_block = "main", attr = "id" }
+
+[[providers.azure.blocks.nested]]
+block = "rule"
+
+[providers.azure.blocks.nested.args]
+name    = { value = "retention" }
+enabled = { value = true }
+
+[[providers.azure.blocks.nested.nested]]
+block = "filters"
+
+[providers.azure.blocks.nested.nested.args]
+blob_types = { value = ["blockBlob"] }
+
+[[providers.azure.blocks.nested.nested]]
+block = "actions"
+
+[[providers.azure.blocks.nested.nested.nested]]
+block = "base_blob"
+when = { field = "expire_days" }
+
+[providers.azure.blocks.nested.nested.nested.args]
+delete_after_days_since_modification_greater_than = { field = "expire_days" }
+
+[[providers.azure.blocks.nested.nested.nested]]
+block = "version"
+when = { field = "noncurrent_expire_days" }
+
+[providers.azure.blocks.nested.nested.nested.args]
+delete_after_days_since_creation = { field = "noncurrent_expire_days" }
+
 [providers.azure.outputs]
 id = { attr = "id", description = "Storage account id" }
 
 # ---------------------------------------------------------------- GCP
 [providers.gcp]
-status = "full"
+status = "partial"
+notes = "Cloud Storage is HTTPS-only, so 'Require TLS' needs no setting here."
 
 [[providers.gcp.fields]]
 name = "bucket_name"
@@ -146,6 +405,7 @@ resource = "google_storage_bucket"
 name                        = { provider_field = "bucket_name", fallback = { field = "name", transform = "kebab" } }
 location                    = { var = "region" }
 uniform_bucket_level_access = { value = true }
+public_access_prevention    = { if = { field = "block_public_access" }, then = { value = "enforced" }, else = { value = "inherited" } }
 force_destroy               = { value = false }
 labels                      = { object = { name = { field = "name", transform = "kebab" } } }
 
@@ -156,6 +416,98 @@ when = { field = "versioning" }
 [providers.gcp.blocks.nested.args]
 enabled = { value = true }
 
+[[providers.gcp.blocks.nested]]
+block = "encryption"
+when = { relation = "encrypted_with" }
+
+[providers.gcp.blocks.nested.args]
+default_kms_key_name = { relation = "encrypted_with", attr = "id" }
+
+[[providers.gcp.blocks.nested]]
+block = "logging"
+when = { relation = "logs_to" }
+
+[providers.gcp.blocks.nested.args]
+log_bucket        = { relation = "logs_to", attr = "name" }
+log_object_prefix = { field = "name", transform = "kebab" }
+
+[[providers.gcp.blocks.nested]]
+block = "cors"
+when = { field = "cors_origins" }
+
+[providers.gcp.blocks.nested.args]
+origin          = { field = "cors_origins" }
+method          = { value = ["GET", "HEAD"] }
+response_header = { value = ["*"] }
+max_age_seconds = { value = 3600 }
+
+[[providers.gcp.blocks.nested]]
+block = "lifecycle_rule"
+when = { field = "expire_days" }
+
+[[providers.gcp.blocks.nested.nested]]
+block = "action"
+
+[providers.gcp.blocks.nested.nested.args]
+type = { value = "Delete" }
+
+[[providers.gcp.blocks.nested.nested]]
+block = "condition"
+
+[providers.gcp.blocks.nested.nested.args]
+age = { field = "expire_days" }
+
+[[providers.gcp.blocks.nested]]
+block = "lifecycle_rule"
+when = { field = "noncurrent_expire_days" }
+
+[[providers.gcp.blocks.nested.nested]]
+block = "action"
+
+[providers.gcp.blocks.nested.nested.args]
+type = { value = "Delete" }
+
+[[providers.gcp.blocks.nested.nested]]
+block = "condition"
+
+[providers.gcp.blocks.nested.nested.args]
+days_since_noncurrent_time = { field = "noncurrent_expire_days" }
+
+[[providers.gcp.blocks.nested]]
+block = "lifecycle_rule"
+when = { field = "abort_multipart_days" }
+
+[[providers.gcp.blocks.nested.nested]]
+block = "action"
+
+[providers.gcp.blocks.nested.nested.args]
+type = { value = "AbortIncompleteMultipartUpload" }
+
+[[providers.gcp.blocks.nested.nested]]
+block = "condition"
+
+[providers.gcp.blocks.nested.nested.args]
+age = { field = "abort_multipart_days" }
+
 [providers.gcp.outputs]
 id  = { attr = "id", description = "Bucket name" }
 url = { attr = "url", description = "gs:// URL" }
+
+[[providers.gcp.manual_steps]]
+title = "Let Cloud Storage use the encryption key"
+when = { relation = "encrypted_with" }
+body = """
+A bucket with a default KMS key can only be created once the Cloud Storage service agent
+holds `roles/cloudkms.cryptoKeyEncrypterDecrypter` on that key. Find the agent with
+`gcloud storage service-agent --project <project>` and grant it the role (a
+`google_kms_crypto_key_iam_member` resource, or one command) before the first `apply`.
+"""
+
+[[providers.gcp.manual_steps]]
+title = "Let Cloud Storage write access logs into the target bucket"
+when = { relation = "logs_to" }
+body = """
+Usage logs are delivered by the group `cloud-storage-analytics@google.com`, which needs
+`roles/storage.objectCreator` on the target bucket. Grant it there (a
+`google_storage_bucket_iam_member`) or the log objects never appear.
+"""

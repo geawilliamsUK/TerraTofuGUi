@@ -56,7 +56,9 @@ Which edges this type may be the *source* of. Direction is always
 
 ```toml
 [[relations]]
-kind = "network_membership"   # network_membership | attribute_reference | iam_binding | depends_on
+kind = "network_membership"   # network_membership | attribute_reference | iam_binding |
+                              # attachment | sends_to | reads | logs_to | encrypted_with |
+                              # depends_on
 label = "Belongs to network"
 targets = ["virtual_network"]
 cardinality = "one"           # one (required, exactly one) | optional | many
@@ -265,6 +267,15 @@ template placeholders.
 **Sensitive outputs.** `[providers.<id>.outputs] kube_config = { attr = "kube_config_raw", sensitive = true }`
 adds `sensitive = true` to the output, which Terraform requires when the attribute is sensitive.
 
+**Incoming links.** `{ relation = "logs_to", incoming = true }` looks at the edges that
+point *at* this entity rather than away from it — "somebody logs to me". `target_type`
+then filters the *other* end's type, and `absent = true` still inverts. Containment never
+stands in for an incoming edge, so `via_parent` plays no part. Only a condition can be
+`incoming` (there is nothing single to reference: any number of entities may point here),
+and an incoming condition does not count as *consuming* the relation, because the edge
+belongs to whoever drew it. Object Storage uses it for the log-delivery statement a
+bucket needs in its own policy when other buckets send their access logs to it.
+
 **Conditions, extended.** `{ relation = "…", absent = true }` holds when there is *no*
 such target; `{ all = [ … ] }` and `{ any = [ … ] }` combine conditions. When a field or
 provider field has no value, conditions use the field's declared `default`;
@@ -392,6 +403,49 @@ block = "features"
 
 The Terraform / OpenTofu difference (registry address prefix, `required_version`) is not
 part of the definition; it is applied by `ttg-codegen::tool::Profile`.
+
+### 4.1 Helper providers
+
+A mapping sometimes needs one resource from a small side provider — a `random_password`
+for a generated secret value. Declaring it as a *helper* keeps it out of the way: there is
+no provider block, no variables and no mappings of its own, and it only reaches
+`required_providers` when some emitted block's resource type starts with its `prefix`, so
+`init` never downloads a provider the configuration does not reference.
+
+```toml
+[[helper_providers]]
+source = "hashicorp/random"
+version = "~> 3.6"
+prefix = "random_"
+local_name = "random"                  # optional; defaults to the part after the slash
+```
+
+A block whose `resource` belongs to a helper provider is skipped by the schema check (the
+bundled index only carries the target providers), so keep such blocks small and literal.
+
+### 4.2 Project-wide default tags
+
+`Settings::tags` (Settings ▸ Default tags in the app, `tags` on the MCP `settings_set`
+tool) is one map of tags for the whole project. Each provider definition says where they
+land; nothing in a *resource* definition changes.
+
+```toml
+[default_tags]                         # AWS: a nested block on the provider block
+block = "default_tags"
+arg = "tags"
+
+[default_tags]                         # Google Cloud: an argument on the provider block
+arg = "default_labels"
+sanitize_labels = true                 # lowercase, punctuation to '-' (labels are strict)
+
+[default_tags]                         # Azure: merged into each resource that has one
+resource_arg = "tags"
+```
+
+Exactly one of `arg` and `resource_arg` must be set, and `block` only goes with `arg`.
+With `resource_arg` the emitter adds the argument to every emitted resource whose provider
+schema has it, after the mapping has run; a tag the mapping set itself (a resource's own
+`Name`) wins over the project's.
 
 ---
 

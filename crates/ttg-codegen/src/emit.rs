@@ -333,6 +333,26 @@ pub fn generate(p: &Project, cat: &Catalog, provider: &str, tool: Tool) -> Resul
         }
     }
 
+    // Providers that write their default tags per resource (Azure has no provider-level
+    // equivalent of AWS `default_tags`), applied once to everything that was emitted.
+    let per_resource_tags = pdef
+        .default_tags
+        .as_ref()
+        .and_then(|t| t.resource_arg.as_deref())
+        .filter(|_| !p.settings.tags.is_empty());
+    if let Some(arg) = per_resource_tags {
+        let tags = tag_pairs(&p.settings.tags, pdef);
+        let idx = ttg_schema::index();
+        for b in emitted.iter_mut().filter(|b| b.kind == "resource") {
+            let settable = idx
+                .resource(provider, &b.resource_type)
+                .is_some_and(|s| s.attributes.get(arg).is_some_and(|a| !a.read_only()));
+            if settable {
+                b.block = merge_tags(&b.block, arg, &tags);
+            }
+        }
+    }
+
     // Duplicate address guard.
     let mut seen = HashSet::new();
     for b in &emitted {
@@ -378,9 +398,14 @@ pub fn generate(p: &Project, cat: &Catalog, provider: &str, tool: Tool) -> Resul
         .collect();
     files.insert("variables.tf".into(), files::render_variables(&header, &vars));
     files.insert("outputs.tf".into(), files::render_outputs(&header, &outputs));
+    let helpers: Vec<&ttg_catalog::HelperProviderDef> = pdef
+        .helper_providers
+        .iter()
+        .filter(|h| emitted.iter().any(|b| b.resource_type.starts_with(&h.prefix)))
+        .collect();
     files.insert(
         "versions.tf".into(),
-        files::render_versions(&header, &em.profile, pdef),
+        files::render_versions(&header, &em.profile, pdef, &helpers),
     );
     let provider_block = em.build_provider_block()?;
     files.insert(
@@ -469,6 +494,69 @@ fn var_ref(name: &str) -> Expression {
     Expression::Traversal(Box::new(
         Traversal::builder(Variable::unchecked("var")).attr(name).build(),
     ))
+}
+
+/// The project's default tags in the form this provider wants them, sanitised to
+/// label-safe text where the provider requires it (Google Cloud labels).
+fn tag_pairs(tags: &std::collections::BTreeMap<String, String>, pdef: &ProviderDef) -> Vec<(String, String)> {
+    let label = pdef.default_tags.as_ref().is_some_and(|t| t.sanitize_labels);
+    tags.iter()
+        .map(|(k, v)| {
+            if label {
+                (label_safe(k), label_safe(v))
+            } else {
+                (k.clone(), v.clone())
+            }
+        })
+        .collect()
+}
+
+/// Google Cloud labels accept lowercase letters, digits, `-` and `_` only.
+fn label_safe(s: &str) -> String {
+    ttg_core::slugify(s).replace('_', "-")
+}
+
+fn tag_object(tags: &[(String, String)]) -> Expression {
+    let mut o = Object::new();
+    for (k, v) in tags {
+        o.insert(object_key(k), Expression::String(v.clone()));
+    }
+    Expression::Object(o)
+}
+
+/// Merge the project's default tags into one resource block's `tags` argument. Tags the
+/// mapping already set win, so a resource keeps its own `Name`. An argument the user
+/// supplied as something other than an object (a raw expression through `extra`) is left
+/// exactly as it is rather than being merged into or written twice.
+fn merge_tags(block: &Block, arg: &str, tags: &[(String, String)]) -> Block {
+    let mut b = Block::builder(block.identifier.clone());
+    for l in block.labels.iter() {
+        b = b.add_label(l.clone());
+    }
+    let mut present = false;
+    for s in block.body.iter() {
+        if let hcl::Structure::Attribute(a) = s {
+            if a.key() == arg {
+                present = true;
+                if let Expression::Object(existing) = a.expr() {
+                    let mut o = Object::new();
+                    for (k, v) in tags {
+                        o.insert(object_key(k), Expression::String(v.clone()));
+                    }
+                    for (k, v) in existing.iter() {
+                        o.insert(k.clone(), v.clone());
+                    }
+                    b = b.add_attribute((arg, Expression::Object(o)));
+                    continue;
+                }
+            }
+        }
+        b = b.add_structure(s.clone());
+    }
+    if !present {
+        b = b.add_attribute((arg, tag_object(tags)));
+    }
+    b.build()
 }
 
 /// Add `depends_on` entries to a block, merging with a `depends_on` the mapping itself
@@ -926,6 +1014,22 @@ impl<'a> Emitter<'a> {
                 }
             }
             builder = builder.add_block(nb.build());
+        }
+        // Project-wide tags, for providers that carry them on the provider block.
+        if let Some(t) = &self.pdef.default_tags {
+            if let Some(arg) = &t.arg {
+                if !self.p.settings.tags.is_empty() {
+                    let expr = tag_object(&tag_pairs(&self.p.settings.tags, self.pdef));
+                    builder = match &t.block {
+                        Some(block) => builder.add_block(
+                            Block::builder(block.as_str())
+                                .add_attribute((arg.as_str(), expr))
+                                .build(),
+                        ),
+                        None => builder.add_attribute((arg.as_str(), expr)),
+                    };
+                }
+            }
         }
         Ok(builder.build())
     }

@@ -823,6 +823,7 @@ impl TtgApp {
                 tool,
                 provider,
                 provider_settings,
+                tags,
             } => {
                 let before = self.snapshot();
                 if let Some(t) = tool {
@@ -846,6 +847,13 @@ impl TtgApp {
                             m.insert(k, v.as_str().map(|s| s.to_string()).unwrap_or(v.to_string()));
                         }
                     }
+                }
+                if let Some(t) = tags {
+                    // The whole map is replaced, so `{}` clears the project's tags.
+                    self.project.settings.tags = t
+                        .into_iter()
+                        .map(|(k, v)| (k, v.as_str().map(|s| s.to_string()).unwrap_or(v.to_string())))
+                        .collect();
                 }
                 self.finish(before);
                 Ok(

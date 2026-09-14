@@ -25,6 +25,27 @@ required = true
 default = 30
 description = "How long a received message stays hidden from other consumers (max 300 on Azure)."
 
+[[fields]]
+name = "message_retention_seconds"
+label = "Message retention (s)"
+type = "int"
+default = 345600
+description = "How long an unprocessed message is kept before the service discards it. Four days by default; SQS allows up to 14 days, Pub/Sub up to 31."
+
+[[fields]]
+name = "receive_wait_time_seconds"
+label = "Long-poll wait (s)"
+type = "int"
+default = 20
+description = "How long a receive call waits for a message before returning empty. 20 seconds is long polling, which costs far fewer empty receives than 0."
+
+[[relations]]
+kind = "encrypted_with"
+label = "Encrypted with"
+providers = ["aws", "gcp"]
+targets = ["encryption_key"]
+cardinality = "optional"
+
 # ---------------------------------------------------------------- AWS
 [providers.aws]
 status = "full"
@@ -45,6 +66,9 @@ name                        = { if = { provider_field = "fifo" }, then = { func 
 fifo_queue                  = { if = { provider_field = "fifo" }, then = { value = true } }
 content_based_deduplication = { if = { provider_field = "fifo" }, then = { value = true } }
 visibility_timeout_seconds  = { field = "visibility_timeout_seconds" }
+message_retention_seconds   = { field = "message_retention_seconds", fallback = { value = 345600 } }
+receive_wait_time_seconds   = { field = "receive_wait_time_seconds", fallback = { value = 20 } }
+kms_master_key_id           = { relation = "encrypted_with", attr = "arn", optional = true }
 tags                        = { object = { Name = { field = "name" } } }
 
 [providers.aws.outputs]
@@ -54,6 +78,11 @@ arn = { attr = "arn", description = "Queue ARN" }
 # ---------------------------------------------------------------- Azure
 [providers.azure]
 status = "full"
+notes = "Service Bus data is always encrypted at rest with Microsoft-managed keys, and long polling is a client-side receive timeout rather than a queue setting."
+
+[[providers.azure.checks]]
+when = { relation = "encrypted_with" }
+message = "\"{name}\" is linked to an Encryption Key, which the Azure mapping cannot use: Service Bus customer-managed keys need a Premium namespace and a user-assigned identity. Messages stay encrypted with Microsoft-managed keys"
 
 # A queue drawn inside a Service Bus Namespace container uses that namespace; otherwise
 # it creates one of its own from these two fields.
@@ -95,9 +124,10 @@ key = "main"
 resource = "azurerm_servicebus_queue"
 
 [providers.azure.blocks.args]
-name          = { field = "name", transform = "kebab" }
-namespace_id  = { if = { ancestor = "servicebus_namespace" }, then = { ancestor = "servicebus_namespace", attr = "id", optional = true }, else = { self_block = "ns", attr = "id" } }
-lock_duration = { template = "PT{visibility_timeout_seconds}S" }
+name                = { field = "name", transform = "kebab" }
+namespace_id        = { if = { ancestor = "servicebus_namespace" }, then = { ancestor = "servicebus_namespace", attr = "id", optional = true }, else = { self_block = "ns", attr = "id" } }
+lock_duration       = { template = "PT{visibility_timeout_seconds}S" }
+default_message_ttl = { func = "format", args = [ { value = "PT%dS" }, { field = "message_retention_seconds", fallback = { value = 345600 } } ] }
 
 [providers.azure.outputs]
 id   = { attr = "id", description = "Queue id" }
@@ -105,25 +135,37 @@ name = { attr = "name", description = "Queue name" }
 
 # ---------------------------------------------------------------- GCP
 [providers.gcp]
-status = "full"
-notes = "A Pub/Sub topic with one pull subscription: publishers use the topic, consumers pull from the subscription."
+status = "partial"
+notes = "A Pub/Sub topic with one pull subscription: publishers use the topic, consumers pull from the subscription. Pull subscriptions block until a message arrives, so long polling needs no setting."
+
+[[providers.gcp.manual_steps]]
+title = "Let Pub/Sub use the encryption key"
+when = { relation = "encrypted_with" }
+body = """
+A topic with `kms_key_name` can only be created once the Pub/Sub service agent
+(`service-<project number>@gcp-sa-pubsub.iam.gserviceaccount.com`) holds
+`roles/cloudkms.cryptoKeyEncrypterDecrypter` on that key. Grant it before the first `apply`.
+"""
 
 [[providers.gcp.blocks]]
 key = "main"
 resource = "google_pubsub_topic"
 
 [providers.gcp.blocks.args]
-name   = { field = "name", transform = "kebab" }
-labels = { object = { name = { field = "name", transform = "kebab" } } }
+name                       = { field = "name", transform = "kebab" }
+labels                     = { object = { name = { field = "name", transform = "kebab" } } }
+message_retention_duration = { func = "format", args = [ { value = "%ds" }, { field = "message_retention_seconds", fallback = { value = 345600 } } ] }
+kms_key_name               = { relation = "encrypted_with", attr = "id", optional = true }
 
 [[providers.gcp.blocks]]
 key = "sub"
 resource = "google_pubsub_subscription"
 
 [providers.gcp.blocks.args]
-name                 = { template = "{name}-sub", transform = "kebab" }
-topic                = { self_block = "main", attr = "id" }
-ack_deadline_seconds = { field = "visibility_timeout_seconds" }
+name                       = { template = "{name}-sub", transform = "kebab" }
+topic                      = { self_block = "main", attr = "id" }
+ack_deadline_seconds       = { field = "visibility_timeout_seconds" }
+message_retention_duration = { func = "format", args = [ { value = "%ds" }, { field = "message_retention_seconds", fallback = { value = 345600 } } ] }
 
 [providers.gcp.outputs]
 topic        = { attr = "id", description = "Topic id (publish here)" }

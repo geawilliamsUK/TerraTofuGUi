@@ -23,9 +23,17 @@ required = true
 options = ["30", "90", "365"]
 default = "30"
 
+[[relations]]
+kind = "encrypted_with"
+label = "Encrypted with"
+providers = ["aws", "gcp"]
+targets = ["encryption_key"]
+cardinality = "optional"
+
 # ---------------------------------------------------------------- AWS
 [providers.aws]
 status = "full"
+notes = "Log groups are encrypted with an AWS-managed key by default; a linked Encryption Key replaces it. Its key policy already lets the CloudWatch Logs service principal of the region use it."
 
 [[providers.aws.blocks]]
 key = "main"
@@ -34,6 +42,7 @@ resource = "aws_cloudwatch_log_group"
 [providers.aws.blocks.args]
 name              = { field = "name", transform = "kebab" }
 retention_in_days = { map = "retention_days", table = { "30" = 30, "90" = 90, "365" = 365 } }
+kms_key_id        = { relation = "encrypted_with", attr = "arn", optional = true }
 tags              = { object = { Name = { field = "name" } } }
 
 [providers.aws.outputs]
@@ -42,6 +51,11 @@ arn = { attr = "arn", description = "Log group ARN" }
 # ---------------------------------------------------------------- Azure
 [providers.azure]
 status = "full"
+notes = "Log Analytics encrypts data with Microsoft-managed keys; a customer-managed key is a property of a dedicated Log Analytics cluster, not of a workspace."
+
+[[providers.azure.checks]]
+when = { relation = "encrypted_with" }
+message = "\"{name}\" is linked to an Encryption Key, which the Azure mapping cannot use: a customer-managed key for Log Analytics is set on a dedicated cluster the workspace is linked to"
 
 [[providers.azure.blocks]]
 key = "main"
@@ -59,7 +73,7 @@ id = { attr = "id", description = "Workspace id" }
 
 # ---------------------------------------------------------------- GCP
 [providers.gcp]
-status = "full"
+status = "partial"
 notes = "A Cloud Logging bucket in the project. Workloads log to Cloud Logging automatically; route logs into this bucket with a sink if you want them separated."
 
 [[providers.gcp.blocks]]
@@ -72,5 +86,23 @@ location       = { value = "global" }
 bucket_id      = { field = "name", transform = "kebab" }
 retention_days = { map = "retention_days", table = { "30" = 30, "90" = 90, "365" = 365 } }
 
+[[providers.gcp.blocks.nested]]
+block = "cmek_settings"
+when = { relation = "encrypted_with" }
+
+[providers.gcp.blocks.nested.args]
+kms_key_name = { relation = "encrypted_with", attr = "id" }
+
 [providers.gcp.outputs]
 id = { attr = "id", description = "Log bucket id" }
+
+[[providers.gcp.manual_steps]]
+title = "Put the encryption key where the log bucket can use it"
+when = { relation = "encrypted_with" }
+body = """
+This bucket is created in the `global` location, and Cloud Logging only accepts a CMEK key
+in the bucket's own location. Either move the linked key to a global key ring, or give the
+bucket a regional location that matches the key. Either way the Log Router service account
+(`cmek_settings.service_account_id` on this resource) needs
+`roles/cloudkms.cryptoKeyEncrypterDecrypter` on the key before logs can be written.
+"""

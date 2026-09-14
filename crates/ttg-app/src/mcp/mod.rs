@@ -235,6 +235,8 @@ pub enum AgentCommand {
         tool: Option<String>,
         provider: Option<String>,
         provider_settings: Option<serde_json::Map<String, serde_json::Value>>,
+        /// Replaces the project's default tags outright; `{}` clears them.
+        tags: Option<serde_json::Map<String, serde_json::Value>>,
     },
     ProjectSave {
         path: Option<String>,

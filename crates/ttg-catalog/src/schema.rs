@@ -374,6 +374,10 @@ pub struct CondAny {
 #[serde(deny_unknown_fields)]
 pub struct CondRelation {
     pub relation: String,
+    /// Look at edges that point *at* this entity instead of away from it (v2): "somebody
+    /// logs to me". The entity at the other end is still filtered by `target_type`.
+    #[serde(default)]
+    pub incoming: bool,
     /// Only count targets of this abstract type (schema_version 2).
     #[serde(default)]
     pub target_type: Option<String>,
@@ -737,6 +741,62 @@ pub struct ProviderDef {
     /// Container type every resource must be inside (Azure: `resource_group`).
     #[serde(default)]
     pub required_ancestor: Option<String>,
+    /// Small side providers a mapping may draw a resource from (`hashicorp/random`).
+    /// Each is added to `required_providers` only when an emitted block's resource type
+    /// starts with its `prefix`.
+    #[serde(default)]
+    pub helper_providers: Vec<HelperProviderDef>,
+    /// How the project's default tags reach this provider's output.
+    #[serde(default)]
+    pub default_tags: Option<DefaultTagsDef>,
+}
+
+/// A provider a curated mapping borrows one resource type from, without it becoming a
+/// target provider of its own (no provider block, no variables, no mappings).
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct HelperProviderDef {
+    /// Registry source, e.g. `hashicorp/random`.
+    pub source: String,
+    pub version: String,
+    /// Resource-type prefix that marks a block as belonging to this provider (`random_`).
+    pub prefix: String,
+    /// `required_providers` key; defaults to the last segment of `source`.
+    #[serde(default)]
+    pub local_name: Option<String>,
+}
+
+impl HelperProviderDef {
+    pub fn local_name(&self) -> &str {
+        self.local_name
+            .as_deref()
+            .unwrap_or_else(|| self.source.rsplit('/').next().unwrap_or(&self.source))
+    }
+    /// (namespace, name) of the registry source.
+    pub fn source_parts(&self) -> (&str, &str) {
+        self.source.split_once('/').unwrap_or(("hashicorp", &self.source))
+    }
+}
+
+/// Where `Settings::tags` is written for one provider. Exactly one of `arg` (an argument
+/// on the `provider` block, optionally inside `block`) and `resource_arg` (an argument
+/// merged into every emitted resource whose schema has it) must be set.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct DefaultTagsDef {
+    /// Argument on the `provider` block, e.g. `default_labels`.
+    #[serde(default)]
+    pub arg: Option<String>,
+    /// Nested block of the `provider` block that holds `arg`, e.g. `default_tags`.
+    #[serde(default)]
+    pub block: Option<String>,
+    /// Argument merged into every emitted resource that accepts it, e.g. `tags`.
+    #[serde(default)]
+    pub resource_arg: Option<String>,
+    /// Normalise keys and values to a label-safe form (lowercase, `-` for punctuation),
+    /// which Google Cloud labels require.
+    #[serde(default)]
+    pub sanitize_labels: bool,
 }
 
 #[derive(Debug, Clone, Deserialize)]

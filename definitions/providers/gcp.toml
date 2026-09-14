@@ -35,3 +35,13 @@ default = "europe-west2-a"
 project = { var = "project" }
 region  = { var = "region" }
 zone    = { var = "zone" }
+
+[[helper_providers]]
+source = "hashicorp/random"
+version = "~> 3.6"
+prefix = "random_"
+
+# Labels, not tags: Google Cloud only accepts lowercase keys and values.
+[default_tags]
+arg = "default_labels"
+sanitize_labels = true

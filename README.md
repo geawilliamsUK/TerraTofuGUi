@@ -13,18 +13,29 @@ provider — never a single "portable" HCL file, because no such thing can exist
 
 ![TerraTofu GUI with the three-tier example open](docs/screenshot.png)
 
-Status: **Phase 3** — 31 curated abstract types mapped for AWS, Azure and Google Cloud,
+Status: **Phase 3** — 32 curated abstract types mapped for AWS, Azure and Google Cloud,
 plus every native provider resource through the bundled schema index (see "Beyond the
 curated catalog"). Curated: networking (Virtual Network, Subnet, Internet Gateway, NAT
 Gateway, Route Table, Security Group, Private Endpoint, Network Peering), compute (Compute Instance,
 Autoscaling Group, Load Balancer), data (Relational Database, NoSQL Table, Cache, Object
 Storage), serverless (Function, Event Queue, Topic, the Azure-only Storage Queue and
 Service Bus Namespace), containers (Container App,
-Container Registry, Kubernetes Cluster), DNS (Zone, Record), secrets (Key Vault, Secret),
+Container Registry, Kubernetes Cluster), DNS (Zone, Record), secrets (Key Vault, Secret,
+Encryption Key),
 monitoring (Log Group, Alarm), IAM Role and the Resource Group container. Gaps a provider cannot
 express (an Azure database's network access, for example) are reported as manual steps,
 never papered over. Every example passes `tofu validate` for all three providers and
 both tools in CI.
+
+Security posture is part of the curated vocabulary rather than something to bolt on
+afterwards: buckets block public access and refuse plain HTTP by default, expire objects
+and unfinished uploads, and can log access to a second bucket; databases encrypt their
+storage, keep backups and take a final snapshot before a destroy; queues, secrets, log
+groups and topics can all be linked to an **Encryption Key** with the *Encrypted with*
+relation, which becomes a KMS key with a usable key policy on AWS, a Key Vault key on
+Azure and a KMS key ring on Google Cloud. Project-wide **default tags** (Settings ▸
+Default tags) reach every resource as AWS `default_tags`, Google `default_labels` or an
+Azure `tags` argument. See `examples/hardened.ttg.json`.
 
 Google Cloud (added 2026-09-09, `hashicorp/google` 6.x): networks and subnets, Cloud NAT,
 firewall rules driven by network tags, Compute Engine, service accounts, Cloud Storage,

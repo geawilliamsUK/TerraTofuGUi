@@ -64,6 +64,11 @@ pub struct Settings {
     /// OpenTofu-only: emit a state `encryption` block. Ignored for Terraform.
     #[serde(default)]
     pub state_encryption: bool,
+    /// Tags applied to every resource the project generates (cost allocation, ownership).
+    /// How they reach the HCL is the provider definition's business: AWS `default_tags`,
+    /// GCP `default_labels`, Azure a `tags` argument merged into each resource.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub tags: BTreeMap<String, String>,
 }
 
 fn default_provider() -> String {
@@ -78,6 +83,7 @@ impl Default for Settings {
             provider_settings: BTreeMap::new(),
             backend: None,
             state_encryption: false,
+            tags: BTreeMap::new(),
         }
     }
 }
@@ -192,11 +198,13 @@ pub enum Relation {
     Reads,
     /// Source writes its logs to target (function -> log group).
     LogsTo,
+    /// Source is encrypted at rest with target's key (bucket -> encryption key).
+    EncryptedWith,
     DependsOn,
 }
 
 impl Relation {
-    pub const ALL: [Relation; 8] = [
+    pub const ALL: [Relation; 9] = [
         Relation::NetworkMembership,
         Relation::AttributeReference,
         Relation::IamBinding,
@@ -204,6 +212,7 @@ impl Relation {
         Relation::SendsTo,
         Relation::Reads,
         Relation::LogsTo,
+        Relation::EncryptedWith,
         Relation::DependsOn,
     ];
     /// The identifier used in definition files.
@@ -216,6 +225,7 @@ impl Relation {
             Relation::SendsTo => "sends_to",
             Relation::Reads => "reads",
             Relation::LogsTo => "logs_to",
+            Relation::EncryptedWith => "encrypted_with",
             Relation::DependsOn => "depends_on",
         }
     }
@@ -228,6 +238,7 @@ impl Relation {
             Relation::SendsTo => "Sends to",
             Relation::Reads => "Reads",
             Relation::LogsTo => "Logs to",
+            Relation::EncryptedWith => "Encrypted with",
             Relation::DependsOn => "Depends on (ordering only)",
         }
     }

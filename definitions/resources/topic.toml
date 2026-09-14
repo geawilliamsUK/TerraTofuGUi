@@ -28,17 +28,26 @@ label = "Delivers to (queues, functions)"
 targets = ["event_queue", "function"]
 cardinality = "many"
 
+[[relations]]
+kind = "encrypted_with"
+label = "Encrypted with"
+providers = ["aws", "gcp"]
+targets = ["encryption_key"]
+cardinality = "optional"
+
 # ---------------------------------------------------------------- AWS
 [providers.aws]
 status = "full"
+notes = "A linked Encryption Key turns on server-side encryption for the topic. Its key policy already lets the SNS and SQS service principals use it, which fan-out into an encrypted queue needs."
 
 [[providers.aws.blocks]]
 key = "main"
 resource = "aws_sns_topic"
 
 [providers.aws.blocks.args]
-name = { field = "name", transform = "kebab" }
-tags = { object = { Name = { field = "name" } } }
+name              = { field = "name", transform = "kebab" }
+kms_master_key_id = { relation = "encrypted_with", attr = "arn", optional = true }
+tags              = { object = { Name = { field = "name" } } }
 
 # Queue subscribers: subscription + a queue policy that lets this topic deliver.
 [[providers.aws.blocks]]
@@ -109,6 +118,11 @@ arn = { attr = "arn", description = "Topic ARN (publish here)" }
 # ---------------------------------------------------------------- Azure
 [providers.azure]
 status = "partial"
+notes = "Service Bus data is always encrypted at rest with Microsoft-managed keys."
+
+[[providers.azure.checks]]
+when = { relation = "encrypted_with" }
+message = "\"{name}\" is linked to an Encryption Key, which the Azure mapping cannot use: Service Bus customer-managed keys need a Premium namespace and a user-assigned identity"
 
 # A topic drawn inside a Service Bus Namespace container uses that namespace (and can
 # then auto-forward into queues drawn next to it); otherwise it creates its own.
@@ -219,8 +233,9 @@ key = "main"
 resource = "google_pubsub_topic"
 
 [providers.gcp.blocks.args]
-name   = { field = "name", transform = "kebab" }
-labels = { object = { name = { field = "name", transform = "kebab" } } }
+name         = { field = "name", transform = "kebab" }
+labels       = { object = { name = { field = "name", transform = "kebab" } } }
+kms_key_name = { relation = "encrypted_with", attr = "id", optional = true }
 
 [[providers.gcp.blocks]]
 key = "sub_queue"
@@ -244,6 +259,15 @@ topic = { self_block = "main", attr = "id" }
 
 [providers.gcp.outputs]
 id = { attr = "id", description = "Topic id (publish here)" }
+
+[[providers.gcp.manual_steps]]
+title = "Let Pub/Sub use the encryption key"
+when = { relation = "encrypted_with" }
+body = """
+A topic with `kms_key_name` can only be created once the Pub/Sub service agent
+(`service-<project number>@gcp-sa-pubsub.iam.gserviceaccount.com`) holds
+`roles/cloudkms.cryptoKeyEncrypterDecrypter` on that key. Grant it before the first `apply`.
+"""
 
 [[providers.gcp.manual_steps]]
 title = "Consumers of fanned-out queues pull from this topic's subscriptions"

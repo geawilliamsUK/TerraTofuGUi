@@ -273,6 +273,7 @@ pub fn command_from_json(tool: &str, args: serde_json::Value) -> Result<AgentCom
                 tool: a.tool,
                 provider: a.provider,
                 provider_settings: a.provider_settings,
+                tags: a.tags,
             }
         }
         other => {
@@ -588,6 +589,10 @@ pub struct SettingsArgs {
     pub provider: Option<String>,
     #[schemars(description = "Provider variables: { \"aws\": { \"region\": \"eu-west-2\" } }")]
     pub provider_settings: Option<serde_json::Map<String, serde_json::Value>>,
+    #[schemars(
+        description = "Tags put on every generated resource (AWS default_tags, Google default_labels, an Azure `tags` argument): { \"Project\": \"CallScope\" }. Replaces the whole set; {} clears it"
+    )]
+    pub tags: Option<serde_json::Map<String, serde_json::Value>>,
 }
 
 #[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
@@ -1054,12 +1059,15 @@ impl TtgServer {
         .await
     }
 
-    #[tool(description = "Change the tool, target provider or provider variables.")]
+    #[tool(
+        description = "Change the tool, target provider, provider variables or the project-wide default tags."
+    )]
     async fn settings_set(&self, Parameters(a): Parameters<SettingsArgs>) -> CallToolResult {
         self.run(AgentCommand::SettingsSet {
             tool: a.tool,
             provider: a.provider,
             provider_settings: a.provider_settings,
+            tags: a.tags,
         })
         .await
     }

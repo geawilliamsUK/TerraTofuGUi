@@ -25,3 +25,15 @@ default = "eu-west-2"
 
 [provider_block.args]
 region = { var = "region" }
+
+# Generated values (Secret "generate value") come from hashicorp/random; the provider is
+# only required when some emitted block is a `random_*` resource.
+[[helper_providers]]
+source = "hashicorp/random"
+version = "~> 3.6"
+prefix = "random_"
+
+# The project's default tags: AWS applies them to every taggable resource itself.
+[default_tags]
+block = "default_tags"
+arg = "tags"

@@ -730,6 +730,21 @@ pub fn relation_targets_of_type(
         .collect()
 }
 
+/// Entities that link *to* `e` with this relation, optionally only those of one abstract
+/// type. Containment never stands in for an incoming edge, so `via_parent` does not apply.
+pub fn relation_sources_of_type(
+    p: &Project,
+    e: &EntityRef,
+    kind: Relation,
+    source_type: Option<&str>,
+) -> Vec<Id> {
+    p.edges_to(e.id)
+        .filter(|x| x.relation == kind)
+        .map(|x| x.source.clone())
+        .filter(|s| source_type.is_none_or(|st| p.entity(s).is_some_and(|x| x.resource_type == st)))
+        .collect()
+}
+
 /// Evaluate a definition condition for an entity. `item` is the current row of a
 /// repeated block (record and index), when there is one.
 pub fn condition_holds(
@@ -757,7 +772,13 @@ pub fn condition_holds_for(
     match c {
         Condition::Relation(r) => {
             let targets = Relation::from_key(&r.relation)
-                .map(|k| relation_targets_of_type(p, cat, e, k, r.target_type.as_deref()))
+                .map(|k| {
+                    if r.incoming {
+                        relation_sources_of_type(p, e, k, r.target_type.as_deref())
+                    } else {
+                        relation_targets_of_type(p, cat, e, k, r.target_type.as_deref())
+                    }
+                })
                 .unwrap_or_default();
             let present = targets.iter().any(|t| {
                 let Some(te) = p.entity(t) else { return false };
@@ -975,7 +996,9 @@ fn scan_nested(n: &NestedBlockDef, rel: &mut HashSet<Consumed>, anc: &mut HashSe
 
 fn scan_cond(c: &Condition, rel: &mut HashSet<Consumed>) {
     match c {
-        Condition::Relation(r) => {
+        // An `incoming` condition reads the *other* end's edge; it says nothing about
+        // what this entity does with its own outgoing links.
+        Condition::Relation(r) if !r.incoming => {
             rel.insert(Consumed {
                 relation: r.relation.clone(),
                 target_type: r.target_type.clone(),

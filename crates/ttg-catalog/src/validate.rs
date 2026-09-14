@@ -31,6 +31,33 @@ pub fn catalog(cat: &Catalog) -> Vec<String> {
                 ));
             }
         }
+        for h in &p.helper_providers {
+            if h.prefix.trim().is_empty() {
+                errs.push(format!(
+                    "provider '{pid}': helper provider '{}' has an empty prefix",
+                    h.source
+                ));
+            }
+            if !h.source.contains('/') {
+                errs.push(format!(
+                    "provider '{pid}': helper provider source '{}' must be <namespace>/<name>",
+                    h.source
+                ));
+            }
+        }
+        if let Some(t) = &p.default_tags {
+            match (&t.arg, &t.resource_arg) {
+                (Some(_), Some(_)) | (None, None) => errs.push(format!(
+                    "provider '{pid}': default_tags needs exactly one of 'arg' and 'resource_arg'"
+                )),
+                _ => {}
+            }
+            if t.block.is_some() && t.arg.is_none() {
+                errs.push(format!(
+                    "provider '{pid}': default_tags 'block' only applies together with 'arg'"
+                ));
+            }
+        }
         let vars: Vec<&str> = p.variables.iter().map(|v| v.name.as_str()).collect();
         let mut ctx = SourceCtx {
             what: format!("provider '{pid}' provider_block"),
@@ -373,6 +400,27 @@ fn check_condition(ctx: &mut SourceCtx, c: &Condition, errs: &mut Vec<String>) {
         Condition::Relation(r) => {
             if r.absent || r.target_field.is_some() || r.target_provider_field.is_some() {
                 ctx.v2 = true;
+            }
+            if r.incoming {
+                // The relation belongs to whoever links *here*, so it is not one of this
+                // type's own declarations: only the kind and the other end's type exist
+                // to check.
+                ctx.v2 = true;
+                if Relation::from_key(&r.relation).is_none() {
+                    errs.push(format!(
+                        "{}when incoming: unknown relation kind '{}'",
+                        ctx.what, r.relation
+                    ));
+                }
+                if let Some(tt) = &r.target_type {
+                    if !ctx.cat.resources.contains_key(tt) {
+                        errs.push(format!(
+                            "{}when incoming: target_type '{tt}' is not a known type",
+                            ctx.what
+                        ));
+                    }
+                }
+                return;
             }
             if r.target_field.is_some() && r.target_provider_field.is_some() {
                 errs.push(format!(
