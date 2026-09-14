@@ -407,10 +407,12 @@ fn check_condition(ctx: &mut SourceCtx, c: &Condition, errs: &mut Vec<String>) {
             }
         }
         Condition::Field(f) => {
-            if f.absent {
+            if f.absent || f.starts_with.is_some() || f.not_starts_with.is_some() || f.transform.is_some() {
                 ctx.v2 = true;
             }
-            if !ctx.fields.iter().any(|x| x.name == f.field) {
+            // "name" is the implicit display-name field: never declared in `fields`,
+            // but always valid to test against.
+            if f.field != "name" && !ctx.fields.iter().any(|x| x.name == f.field) {
                 errs.push(format!(
                     "{}when references undeclared field '{}'",
                     ctx.what, f.field

@@ -692,6 +692,11 @@ pub fn field_or_default(
     name: &str,
     provider_field: bool,
 ) -> Option<Value> {
+    if !provider_field && name == "name" {
+        // `EntityRef::field("name")` deliberately returns `None` (it is not a config
+        // entry); resolve it here the same way argument sources and templates do.
+        return Some(Value::Str(e.name.to_string()));
+    }
     let current = if provider_field {
         e.provider_field(provider, name)
     } else {
@@ -783,7 +788,25 @@ pub fn condition_holds_for(
                 return e.field(&f.field).is_none_or(|v| v.is_empty());
             }
             let v = field_or_default(cat, provider, e, &f.field, false);
-            cond_value(v.as_ref(), &f.equals, &f.not_equals)
+            let v = match f.transform {
+                Some(t) => v.map(|v| Value::Str(t.apply(&v.display()))),
+                None => v,
+            };
+            if f.equals.is_some() || f.not_equals.is_some() {
+                cond_value(v.as_ref(), &f.equals, &f.not_equals)
+            } else if let Some(sw) = &f.starts_with {
+                v.as_ref()
+                    .map(|v| v.display())
+                    .unwrap_or_default()
+                    .starts_with(sw.as_str())
+            } else if let Some(nsw) = &f.not_starts_with {
+                !v.as_ref()
+                    .map(|v| v.display())
+                    .unwrap_or_default()
+                    .starts_with(nsw.as_str())
+            } else {
+                cond_value(v.as_ref(), &f.equals, &f.not_equals)
+            }
         }
         Condition::ProviderField(f) => {
             if f.absent {

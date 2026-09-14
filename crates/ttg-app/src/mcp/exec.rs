@@ -7,7 +7,7 @@ use crate::app::TtgApp;
 use egui::Pos2;
 use serde_json::{json, Map, Value as J};
 use std::time::Instant;
-use ttg_catalog::{FieldDef, ResourceKind};
+use ttg_catalog::{Catalog, FieldDef, FieldType, ResourceKind};
 use ttg_core::{Id, Relation, Tool, Value};
 
 type R = Result<J, String>;
@@ -79,7 +79,12 @@ impl TtgApp {
             AgentCommand::ProjectGet => serde_json::to_value(&self.project).map_err(|e| e.to_string()),
             AgentCommand::ProjectSummary => Ok(self.summary_json()),
             AgentCommand::CatalogTypes => Ok(self.catalog_types_json()),
-            AgentCommand::CatalogType { type_id } => self.catalog_type_json(&type_id),
+            AgentCommand::CatalogType { type_id } => {
+                if Catalog::is_native(&type_id) {
+                    self.catalog.ensure_native(&type_id);
+                }
+                self.catalog_type_json(&type_id)
+            }
             AgentCommand::Diagnostics => {
                 self.refresh_diagnostics();
                 Ok(self.diagnostics_json())
@@ -383,11 +388,18 @@ impl TtgApp {
                     .collect();
                 Ok(json!({"provider": prov, "version": ps.version, "hits": hits}))
             }
-            AgentCommand::SchemaShow { provider, resource } => {
+            AgentCommand::SchemaShow {
+                provider,
+                resource,
+                depth,
+                required_only,
+            } => {
                 let prov = provider.unwrap_or(self.project.settings.target_provider.clone());
                 let b = ttg_schema::index()
                     .resource(&prov, &resource)
-                    .ok_or_else(|| format!("no {resource} on {prov}"))?;
+                    .ok_or_else(|| format!("no {resource} on {prov}"))?
+                    .filtered(depth, required_only.unwrap_or(false));
+                let b = &b;
                 fn block_json(b: &ttg_schema::BlockSchema) -> J {
                     json!({
                         "attributes": b.attributes.iter().map(|(k, a)| (k.clone(), json!({
@@ -794,6 +806,9 @@ impl TtgApp {
         x: Option<i32>,
         y: Option<i32>,
     ) -> R {
+        if Catalog::is_native(type_id) {
+            self.catalog.ensure_native(type_id);
+        }
         let def = self
             .catalog
             .resource(type_id)
@@ -855,6 +870,51 @@ impl TtgApp {
         )
     }
 
+    /// JSON -> IR value for a field, validated against the definition, with `entity_ref`
+    /// values (bare, or inside a `struct_list` row) resolved from an id or display name
+    /// to the entity id the same way every other tool addresses entities. `null` clears
+    /// the field.
+    fn convert_value(&self, f: &FieldDef, v: &J) -> Result<Option<Value>, String> {
+        if v.is_null() {
+            return Ok(None);
+        }
+        let mut val: Value =
+            serde_json::from_value(v.clone()).map_err(|e| format!("field \"{}\": {e}", f.name))?;
+        self.resolve_entity_refs(f, &mut val)
+            .map_err(|e| format!("field \"{}\": {e}", f.name))?;
+        ttg_catalog::fields::check_value(f, Some(&val)).map_err(|e| format!("field \"{}\": {e}", f.name))?;
+        Ok(Some(val))
+    }
+
+    /// Resolve `entity_ref` values to entity ids, case-insensitively by display name,
+    /// erroring on an ambiguous name (same rule as `resolve`). Recurses into
+    /// `struct_list` rows so e.g. a security-group rule's `source_group` accepts a name.
+    fn resolve_entity_refs(&self, f: &FieldDef, val: &mut Value) -> Result<(), String> {
+        match f.field_type {
+            FieldType::EntityRef => {
+                if let Value::Str(s) = val {
+                    *s = self.resolve(s)?;
+                }
+            }
+            FieldType::StructList => {
+                if let Value::Records(rows) = val {
+                    for row in rows {
+                        for item in &f.items {
+                            if item.field_type != FieldType::EntityRef {
+                                continue;
+                            }
+                            if let Some(v) = row.get_mut(&item.name) {
+                                self.resolve_entity_refs(item, v)?;
+                            }
+                        }
+                    }
+                }
+            }
+            _ => {}
+        }
+        Ok(())
+    }
+
     fn agent_entity_update(
         &mut self,
         entity: &str,
@@ -876,7 +936,7 @@ impl TtgApp {
                         field_names(&def.fields)
                     )
                 })?;
-                abstract_vals.push((k.clone(), convert_value(f, v)?));
+                abstract_vals.push((k.clone(), self.convert_value(f, v)?));
             }
         }
         let mut prov_vals: Vec<(String, String, Option<Value>)> = Vec::new();
@@ -896,7 +956,7 @@ impl TtgApp {
                             field_names(&m.fields)
                         )
                     })?;
-                    prov_vals.push((pid.clone(), k.clone(), convert_value(f, v)?));
+                    prov_vals.push((pid.clone(), k.clone(), self.convert_value(f, v)?));
                 }
             }
         }
@@ -1172,14 +1232,4 @@ fn field_names(fields: &[FieldDef]) -> String {
         .map(|f| f.name.as_str())
         .collect::<Vec<_>>()
         .join(", ")
-}
-
-/// JSON -> IR value for a field, validated against the definition. `null` clears it.
-fn convert_value(f: &FieldDef, v: &J) -> Result<Option<Value>, String> {
-    if v.is_null() {
-        return Ok(None);
-    }
-    let val: Value = serde_json::from_value(v.clone()).map_err(|e| format!("field \"{}\": {e}", f.name))?;
-    ttg_catalog::fields::check_value(f, Some(&val)).map_err(|e| format!("field \"{}\": {e}", f.name))?;
-    Ok(Some(val))
 }

@@ -46,8 +46,10 @@ definition; redundant containment links refused with the same message as the UI)
 `link_remove`, `selection_set`, `view_set`, `view_save`, `view_activate`,
 `view_group_add`, `view_flow_add`, `view_annotation_remove` (architecture-map
 annotations in the active view; `entity_move` lands in the active view's own layout
-when it has one), `schema_search`, `schema_show` (the provider schema index), `entity_update.extra`
-(extra / native arguments), `layout_tidy`, `layout_align`,
+when it has one), `schema_search`, `schema_show` (the provider schema index; `depth` and
+`required_only` narrow a large resource - the full `aws_wafv2_web_acl` schema is ~900 KB -
+via `BlockSchema::filtered` in `ttg-schema`, also behind `ttg schema show --depth N
+--required-only`), `entity_update.extra` (extra / native arguments), `layout_tidy`, `layout_align`,
 `layout_distribute`, `settings_set`, `project_save`, `project_open`, `project_new`,
 `export_run` (validate runs off the UI thread), `undo`, `redo`.
 
@@ -69,18 +71,35 @@ each subscriber, coalesced over 250 ms so a drag is one notification. Subscripti
 kept per session in a shared list; a peer that fails to receive is dropped.
 
 Entities can be addressed by id or by display name (case-insensitive; ambiguous names
-are rejected). Writes are refused while a modal dialog is open, naming the dialog.
+are rejected). This applies everywhere an entity is named, including `entity_ref`
+struct-list items (e.g. a security-group rule's `source_group` in `entity_update.config`):
+the name is resolved to the id before the value is stored, so diagnostics never see a
+stray display name. Writes are refused while a modal dialog is open, naming the dialog.
+
+`entity_add` and `catalog_type` accept native type ids (`native:<provider>:<resource>`,
+as returned by `schema_search`) directly: the synthetic definition is registered on first
+use (`Catalog::ensure_native`), same as dropping one from the palette.
+
+An `entity_update.extra` value's `{"$ref": {"entity": ..., "attr": ...}}` targets the
+referenced entity's primary block; add `"block": "<key>"` to address one of its secondary
+blocks instead (e.g. Object Storage's `versioning` block on AWS).
 
 ## 3. Settings and persistence
 
 `autostart`, `port` (default 9337), `token` (uuid, regenerable), `confirm_disk`
 (default on: save / open / new / export wait for an Allow / Deny prompt) and
-`confirm_delete` (default off: entity, link and annotation removal) persist in eframe
-storage. A command that needs approval parks in `McpState::pending_confirm`; the queue
-behind it waits, the prompt is a centred window, and the tool call's timeout is ten
-minutes for writes so the user has time to answer. `TTG_MCP=1` (+ `TTG_MCP_PORT`, `TTG_MCP_TOKEN`) force the server on for one run
-without touching the stored autostart flag; `TTG_MCP_AUTOSTART=off` clears a stored
-autostart. Used by the smoke test.
+`confirm_delete` (default off: entity and link removal; annotation removal is never
+exported, so it is never confirmed) persist in eframe storage. A command that needs
+approval parks in `McpState::pending_confirm`; the prompt is a centred window, and the
+tool call's timeout is ten minutes for writes so the user has time to answer. A pending
+prompt no longer stalls the whole queue: reads (`!AgentCommand::is_write`) keep answering
+while it is open, and further writes queue up in `McpState::deferred` in arrival order
+rather than jumping ahead of it. Resolving the prompt (Allow or Deny, via
+`TtgApp::resolve_confirm`, used by both the confirm window and the headless unit test)
+starts the next deferred write, which may itself need approval and become the new
+`pending_confirm`, still ahead of the rest of the queue. `TTG_MCP=1` (+ `TTG_MCP_PORT`,
+`TTG_MCP_TOKEN`) force the server on for one run without touching the stored autostart
+flag; `TTG_MCP_AUTOSTART=off` clears a stored autostart. Used by the smoke test.
 
 ## 4. Testing
 

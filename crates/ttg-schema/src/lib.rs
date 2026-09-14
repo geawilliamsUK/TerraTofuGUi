@@ -155,6 +155,33 @@ impl TypeKind {
 }
 
 impl BlockSchema {
+    /// A trimmed copy for display: `depth` limits how many levels of nested blocks are
+    /// kept (`Some(0)` = this block's attributes only, no nested blocks; `None` =
+    /// unlimited, the default), and `required_only` drops every attribute and nested
+    /// block that is not required. Used by `schema_show` / `ttg schema show`, whose full
+    /// dump can run into the hundreds of KB for a large resource like
+    /// `aws_wafv2_web_acl`.
+    pub fn filtered(&self, depth: Option<u32>, required_only: bool) -> BlockSchema {
+        let attributes = self
+            .attributes
+            .iter()
+            .filter(|(_, a)| !required_only || a.required())
+            .map(|(k, a)| (k.clone(), a.clone()))
+            .collect();
+        let blocks = if depth == Some(0) {
+            BTreeMap::new()
+        } else {
+            self.blocks
+                .iter()
+                .filter(|(_, n)| !required_only || n.required())
+                .map(|(k, n)| {
+                    let inner = n.block().filtered(depth.map(|d| d - 1), required_only);
+                    (k.clone(), NestedSchema(n.0.clone(), n.1, n.2, inner))
+                })
+                .collect()
+        };
+        BlockSchema { attributes, blocks }
+    }
     /// Does this block accept `name` as an attribute or a nested block?
     pub fn has(&self, name: &str) -> bool {
         self.attributes.contains_key(name) || self.blocks.contains_key(name)
@@ -417,6 +444,26 @@ mod tests {
         let aws = index().provider("aws").unwrap();
         let hits = aws.search("sqs queue", 5);
         assert_eq!(hits.first().copied(), Some("aws_sqs_queue"));
+    }
+
+    #[test]
+    fn filtered_depth_shrinks_a_large_resource() {
+        // aws_wafv2_web_acl's full schema is ~900 KB of deeply nested rule blocks;
+        // schema_show / `ttg schema show` need a way to ask for just the shape.
+        let b = index()
+            .resource("aws", "aws_wafv2_web_acl")
+            .expect("aws_wafv2_web_acl in the bundled index");
+        let full = serde_json::to_string(b).unwrap().len();
+        let shallow = serde_json::to_string(&b.filtered(Some(1), false)).unwrap().len();
+        assert!(
+            shallow < full / 10,
+            "depth 1 ({shallow} bytes) should be a small fraction of the full schema ({full} bytes)"
+        );
+        let required = serde_json::to_string(&b.filtered(None, true)).unwrap().len();
+        assert!(
+            required < full / 2,
+            "required_only ({required} bytes) should shrink the full schema ({full} bytes)"
+        );
     }
 
     #[test]

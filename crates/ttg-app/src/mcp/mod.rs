@@ -17,6 +17,7 @@ pub mod exec;
 pub mod server;
 
 use crate::app::TtgApp;
+use std::collections::VecDeque;
 use std::sync::mpsc;
 use std::time::Instant;
 use ttg_core::Id;
@@ -105,6 +106,10 @@ pub enum AgentCommand {
     SchemaShow {
         provider: Option<String>,
         resource: String,
+        /// Levels of nested blocks to include (0 = attributes only); `None` = everything.
+        depth: Option<u32>,
+        /// Only required attributes and nested blocks.
+        required_only: Option<bool>,
     },
     EntityMove {
         entity: String,
@@ -235,9 +240,8 @@ impl AgentCommand {
             AgentCommand::LinkRemove { source, target, .. } if s.confirm_delete => {
                 Some(format!("remove the link {source} \u{2192} {target}"))
             }
-            AgentCommand::AnnotationRemove { key } if s.confirm_delete => {
-                Some(format!("remove the annotation {key}"))
-            }
+            // Annotations (groups, flows) are architecture-map decoration only; they are
+            // never exported, so removing one never needs approval.
             AgentCommand::Batch(cmds) => {
                 let reasons: Vec<String> = cmds.iter().filter_map(|c| c.confirm_reason(s)).collect();
                 if reasons.is_empty() {
@@ -326,8 +330,14 @@ pub struct McpState {
     pub flash: Vec<(Id, Instant)>,
     pub last_error: Option<String>,
     pub show_window: bool,
-    /// A write waiting for the user's approval; nothing else is executed meanwhile.
+    /// A write waiting for the user's approval; reads keep running meanwhile, and any
+    /// further writes queue up in `deferred` instead of jumping ahead of it.
     pub pending_confirm: Option<PendingConfirm>,
+    /// Write commands that arrived while another write was already waiting for
+    /// approval, in arrival order. Started one at a time as `pending_confirm` is
+    /// resolved (Allow or Deny); one of these may itself need approval and become the
+    /// new `pending_confirm`, still ahead of the rest of this queue.
+    pub deferred: VecDeque<(AgentCommand, AgentReply)>,
     /// Bumped on every committed change (user or agent); `project_changes` reports it.
     pub revision: u64,
     pub last_change: Option<(Instant, &'static str)>,
@@ -351,6 +361,7 @@ impl Default for McpState {
             last_error: None,
             show_window: false,
             pending_confirm: None,
+            deferred: VecDeque::new(),
             revision: 0,
             last_change: None,
             in_agent: false,
@@ -466,12 +477,12 @@ fn summarize(v: &serde_json::Value) -> String {
 }
 
 impl TtgApp {
-    /// Apply queued agent commands on the UI thread (called once per frame).
+    /// Apply queued agent commands on the UI thread (called once per frame). A pending
+    /// approval prompt no longer parks the whole queue: reads keep answering while it is
+    /// open, and further writes queue up behind it in `mcp.deferred` instead of jumping
+    /// ahead.
     pub fn drain_agent_commands(&mut self, ctx: &egui::Context) {
         loop {
-            if self.mcp.pending_confirm.is_some() {
-                break; // the user has not answered yet; keep the queue in order
-            }
             let next = self.mcp.rx.try_recv();
             let Ok((cmd, reply)) = next else { break };
             if matches!(cmd, AgentCommand::Screenshot) {
@@ -487,19 +498,17 @@ impl TtgApp {
                 );
                 continue;
             }
-            if !self.mcp.headless {
-                if let Some(reason) = cmd.confirm_reason(&self.mcp.settings) {
-                    self.status = "Agent: waiting for your approval".into();
-                    self.mcp.pending_confirm = Some(PendingConfirm {
-                        cmd,
-                        reply,
-                        reason,
-                        at: Instant::now(),
-                    });
-                    break;
-                }
+            if !cmd.is_write() {
+                // Reads must not wait behind an approval prompt.
+                self.run_agent(cmd, reply);
+                continue;
             }
-            self.run_agent(cmd, reply);
+            if self.mcp.pending_confirm.is_some() {
+                // Another write is already waiting for the user; keep this one in order.
+                self.mcp.deferred.push_back((cmd, reply));
+                continue;
+            }
+            self.offer_or_run(cmd, reply);
         }
         // Deliver screenshots.
         if !self.mcp.pending_screenshots.is_empty() {
@@ -533,6 +542,46 @@ impl TtgApp {
             .retain(|(_, t)| now.duration_since(*t).as_secs_f32() < 1.5);
         if !self.mcp.flash.is_empty() {
             ctx.request_repaint_after(std::time::Duration::from_millis(40));
+        }
+    }
+
+    /// Run a write now, or park it as `pending_confirm` if the settings require
+    /// approval (skipped entirely in headless `--serve` mode).
+    fn offer_or_run(&mut self, cmd: AgentCommand, reply: AgentReply) {
+        if !self.mcp.headless {
+            if let Some(reason) = cmd.confirm_reason(&self.mcp.settings) {
+                self.status = "Agent: waiting for your approval".into();
+                self.mcp.pending_confirm = Some(PendingConfirm {
+                    cmd,
+                    reply,
+                    reason,
+                    at: Instant::now(),
+                });
+                return;
+            }
+        }
+        self.run_agent(cmd, reply);
+    }
+
+    /// Resolve the pending approval prompt (Allow when `allow` is true, else Deny), the
+    /// same decision `confirm_window` makes from the Allow/Deny buttons but callable
+    /// without egui (used by the headless test). Then start the next deferred write in
+    /// arrival order - it may itself need approval and become the new `pending_confirm`,
+    /// still ahead of anything queued after it.
+    pub fn resolve_confirm(&mut self, allow: bool) {
+        let Some(p) = self.mcp.pending_confirm.take() else {
+            return;
+        };
+        if allow {
+            self.run_agent(p.cmd, p.reply);
+        } else {
+            let result = Err("denied by the user".to_string());
+            self.status = format!("Agent: {} denied", p.cmd.label());
+            self.mcp.push_log(p.cmd.label(), &result);
+            let _ = p.reply.send(result);
+        }
+        if let Some((cmd, reply)) = self.mcp.deferred.pop_front() {
+            self.offer_or_run(cmd, reply);
         }
     }
 
@@ -587,17 +636,7 @@ impl TtgApp {
                 });
             });
         match decision {
-            Some(true) => {
-                let p = self.mcp.pending_confirm.take().unwrap();
-                self.run_agent(p.cmd, p.reply);
-            }
-            Some(false) => {
-                let p = self.mcp.pending_confirm.take().unwrap();
-                let result = Err("denied by the user".to_string());
-                self.status = format!("Agent: {} denied", p.cmd.label());
-                self.mcp.push_log(p.cmd.label(), &result);
-                let _ = p.reply.send(result);
-            }
+            Some(allow) => self.resolve_confirm(allow),
             None => ctx.request_repaint_after(std::time::Duration::from_millis(250)),
         }
     }
@@ -653,4 +692,102 @@ fn encode_png(img: &egui::ColorImage) -> Result<Vec<u8>, image::ImageError> {
         image::ExtendedColorType::Rgba8,
     )?;
     Ok(out)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::app::TtgApp;
+
+    type Reply = tokio::sync::oneshot::Receiver<Result<serde_json::Value, String>>;
+
+    fn push(app: &TtgApp, cmd: AgentCommand) -> Reply {
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        app.mcp.tx.send((cmd, tx)).unwrap();
+        rx
+    }
+
+    /// A pending approval prompt must not park the whole queue: a read queued behind a
+    /// write that is waiting for Allow/Deny still gets answered on the same drain.
+    #[test]
+    fn reads_answer_while_a_write_waits_for_approval() {
+        let ctx = egui::Context::default();
+        let mut app = TtgApp::build(&ctx, None, None, None);
+        app.mcp.settings.confirm_disk = true;
+
+        let mut save_rx = push(
+            &app,
+            AgentCommand::ProjectSave {
+                path: Some("out.ttg.json".into()),
+            },
+        );
+        let mut summary_rx = push(&app, AgentCommand::ProjectSummary);
+
+        app.drain_agent_commands(&ctx);
+
+        // The read behind the pending write was still answered immediately.
+        summary_rx
+            .try_recv()
+            .expect("summary answered")
+            .expect("summary ok");
+        // The write is parked, not yet answered.
+        assert!(save_rx.try_recv().is_err(), "save should still be pending");
+        match app.mcp.pending_confirm.as_ref().map(|p| &p.cmd) {
+            Some(AgentCommand::ProjectSave { .. }) => {}
+            other => panic!("expected a pending ProjectSave, got {other:?}"),
+        }
+
+        // Resolve it exactly the way the Allow/Deny window does.
+        app.resolve_confirm(false);
+        let result = save_rx.try_recv().expect("save answered after being resolved");
+        assert!(result.is_err(), "denied write should come back as an error");
+        assert!(app.mcp.pending_confirm.is_none());
+    }
+
+    /// A second write that arrives while one is already waiting for approval queues in
+    /// `deferred` instead of jumping ahead; resolving the first starts the next one,
+    /// which may itself need approval and become the new `pending_confirm`.
+    #[test]
+    fn a_second_write_defers_behind_the_first_and_starts_when_resolved() {
+        let ctx = egui::Context::default();
+        let mut app = TtgApp::build(&ctx, None, None, None);
+        app.mcp.settings.confirm_delete = true;
+
+        let mut first_rx = push(
+            &app,
+            AgentCommand::EntityDelete {
+                entities: vec!["first".into()],
+            },
+        );
+        let mut second_rx = push(
+            &app,
+            AgentCommand::EntityDelete {
+                entities: vec!["second".into()],
+            },
+        );
+
+        app.drain_agent_commands(&ctx);
+
+        assert!(app.mcp.pending_confirm.is_some());
+        assert_eq!(app.mcp.deferred.len(), 1);
+        assert!(second_rx.try_recv().is_err(), "deferred write not answered yet");
+
+        app.resolve_confirm(true); // Allow the first.
+        let _ = first_rx.try_recv().expect("first answered");
+        assert!(app.mcp.deferred.is_empty(), "the deferred write was started");
+        match app.mcp.pending_confirm.as_ref().map(|p| &p.cmd) {
+            Some(AgentCommand::EntityDelete { entities }) => {
+                assert_eq!(entities, &vec!["second".to_string()])
+            }
+            other => panic!("expected the deferred EntityDelete to now be pending, got {other:?}"),
+        }
+        assert!(
+            second_rx.try_recv().is_err(),
+            "still waiting for its own approval"
+        );
+
+        app.resolve_confirm(false); // Deny the second.
+        let _ = second_rx.try_recv().expect("second answered");
+        assert!(app.mcp.pending_confirm.is_none());
+    }
 }

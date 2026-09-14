@@ -201,10 +201,12 @@ and uses it in three ways:
   a test instead of a user's export.
 
 `ttg schema info` shows the index in use, `ttg schema search aws "sqs queue"` and
-`ttg schema show azure azurerm_storage_queue` explore it, and `ttg schema refresh`
-regenerates it from the installed tool into your data directory, where it takes
-precedence over the bundled copy (`--out crates/ttg-schema/data/index.json.gz` refreshes
-the bundled one). See `examples/native-extras.ttg.json`.
+`ttg schema show azure azurerm_storage_queue` explore it (add `--depth N` /
+`--required-only` to narrow a large resource - `aws_wafv2_web_acl` alone is ~900 KB
+unfiltered), and `ttg schema refresh` regenerates it from the installed tool into your
+data directory, where it takes precedence over the bundled copy (`--out
+crates/ttg-schema/data/index.json.gz` refreshes the bundled one). See
+`examples/native-extras.ttg.json`.
 
 ![A native resource with its schema-driven inspector](docs/screenshot-native.png)
 
@@ -238,12 +240,16 @@ project, its summary, diagnostics, the catalog and the docs are also exposed as 
 resources (`ttg://project`, `ttg://catalog/<type>`, `ttg://docs/mapping-format`, …).
 In *Agent ▸ Settings & activity* you choose which actions must be approved first: by
 default saving, opening, starting a new project and writing an export pop an
-Allow / Deny prompt; deletions can be added. Only localhost can connect and every
-request needs the bearer token. `terratofu-gui --serve --port N --token T [project]`
-runs the same server without a window (no screenshots, no prompts) for CI and scripted
-editing; the headless integration test in `crates/ttg-app/tests` drives it that way. The feature is the `mcp` cargo feature of `ttg-app` (on by default; build with
-`--no-default-features` to leave it out). Windows note: ports in the 6xxx-7xxx block are
-often reserved by Hyper-V, which is why the default is 9337.
+Allow / Deny prompt; deleting entities or links can be added (removing an annotation
+never needs approval - groups and flows are never exported). A prompt does not stall the
+agent: reads keep answering while one is open, and further writes queue up behind it in
+order rather than jumping ahead. Only localhost can connect and every request needs the
+bearer token. `terratofu-gui --serve --port N --token T [project]` runs the same server
+without a window (no screenshots, no prompts) for CI and scripted editing; the headless
+integration test in `crates/ttg-app/tests` drives it that way. The feature is the `mcp`
+cargo feature of `ttg-app` (on by default; build with `--no-default-features` to leave it
+out). Windows note: ports in the 6xxx-7xxx block are often reserved by Hyper-V, which is
+why the default is 9337.
 
 ![An agent session: a queue added, linked and the diagram tidied over MCP, with the orange flash on the touched entities and the activity in the status bar](docs/screenshot-mcp.png)
 

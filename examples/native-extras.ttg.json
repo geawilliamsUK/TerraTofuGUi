@@ -94,7 +94,8 @@
             "bucket": {
               "$ref": {
                 "entity": "assets",
-                "attr": "id"
+                "attr": "id",
+                "block": "versioning"
               }
             },
             "policy": {

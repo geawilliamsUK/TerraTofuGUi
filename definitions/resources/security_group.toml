@@ -108,6 +108,11 @@ for_each_field = "rules"
 when = { all = [ { item = "direction", equals = "ingress" }, { item = "cidr", equals = "0.0.0.0/0" }, { item = "from_port", not_equals = "80" }, { item = "from_port", not_equals = "443" } ] }
 message = "rule '{item.name}' opens port {item.from_port} to the whole internet"
 
+[[providers.aws.checks]]
+when = { field = "name", transform = "kebab", starts_with = "sg-" }
+severity = "error"
+message = "\"{name}\": AWS rejects security group names beginning with sg-; rename it (for example web-sg)"
+
 [[providers.aws.blocks]]
 key = "main"
 resource = "aws_security_group"

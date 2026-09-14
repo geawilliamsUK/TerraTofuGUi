@@ -410,6 +410,16 @@ pub struct CondField {
     pub equals: Option<String>,
     #[serde(default)]
     pub not_equals: Option<String>,
+    /// The resolved value must start / not start with this string (v2). Ignored when
+    /// `equals` / `not_equals` is also given.
+    #[serde(default)]
+    pub starts_with: Option<String>,
+    #[serde(default)]
+    pub not_starts_with: Option<String>,
+    /// Normalise the resolved string value (e.g. to the kebab-cased form the mapping
+    /// actually emits) before comparing (v2).
+    #[serde(default)]
+    pub transform: Option<Transform>,
     /// Holds when the entity has no value for the field (defaults do not count) (v2).
     #[serde(default)]
     pub absent: bool,

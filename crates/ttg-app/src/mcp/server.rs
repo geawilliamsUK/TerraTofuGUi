@@ -304,7 +304,7 @@ pub struct EntityUpdateArgs {
     #[schemars(description = "Provider layers this entity belongs to; [] = every provider")]
     pub providers: Option<Vec<String>>,
     #[schemars(
-        description = "Extra provider arguments merged into the generated block, keyed by argument name (see schema_show). Values: JSON scalars/lists/objects, {\"$ref\": {\"entity\": \"<id or name>\", \"attr\": \"id\"}} for a reference, {\"$raw\": \"<hcl>\"} for raw HCL; null removes. For native resources this is where every argument goes"
+        description = "Extra provider arguments merged into the generated block, keyed by argument name (see schema_show). Values: JSON scalars/lists/objects, {\"$ref\": {\"entity\": \"<id or name>\", \"attr\": \"id\"}} for a reference to the target's primary block (add \"block\": \"<key>\" to address one of its secondary blocks instead, e.g. object_storage's \"versioning\" block on AWS), {\"$raw\": \"<hcl>\"} for raw HCL; null removes. For native resources this is where every argument goes"
     )]
     pub extra: Option<serde_json::Map<String, serde_json::Value>>,
     #[schemars(description = "Provider the extra arguments are for; defaults to the target provider")]
@@ -326,6 +326,12 @@ pub struct SchemaShowArgs {
     pub provider: Option<String>,
     #[schemars(description = "Resource type, e.g. `aws_s3_bucket_policy`")]
     pub resource: String,
+    #[schemars(
+        description = "Levels of nested blocks to include (0 = attributes only); omit for everything. Some resources (e.g. aws_wafv2_web_acl) run to hundreds of KB unfiltered"
+    )]
+    pub depth: Option<u32>,
+    #[schemars(description = "Only required attributes and nested blocks")]
+    pub required_only: Option<bool>,
 }
 
 #[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
@@ -577,12 +583,14 @@ impl TtgServer {
     }
 
     #[tool(
-        description = "Every argument and nested block of a provider resource type, with types, required flags and descriptions."
+        description = "Every argument and nested block of a provider resource type, with types, required flags and descriptions. Large resources can run to hundreds of KB unfiltered; narrow with `depth` and/or `required_only`."
     )]
     async fn schema_show(&self, Parameters(a): Parameters<SchemaShowArgs>) -> CallToolResult {
         self.run(AgentCommand::SchemaShow {
             provider: a.provider,
             resource: a.resource,
+            depth: a.depth,
+            required_only: a.required_only,
         })
         .await
     }
@@ -1059,7 +1067,7 @@ impl ServerHandler for TtgServer {
              you make it and every write is one undo step. Start with project_summary and \
              catalog_types. Entities can be addressed by id or by display name. Never call \
              project_save without the user asking. Prefer entity_set_parent over explicit \
-             network_membership links to containers: containment implies membership. One              diagram serves every provider: tag an entity or link with `providers` to keep it              out of the other provider's export (provider-only types are tagged automatically).              Curated types cover the portable concepts; for anything else use schema_search and add              a native resource (`native:<provider>:<type>`), setting its arguments via              entity_update.extra. Extra arguments on curated types add or override provider              arguments and are validated against the schema. Use project_apply to make several              writes as one undo step, project_changes (or a subscription to ttg://project) to notice              the user's own edits, and export_diff before export_run to show what would change. Some              writes (saving, opening, exporting, deleting) may wait for the user's approval.",
+             network_membership links to containers: containment implies membership. One              diagram serves every provider: tag an entity or link with `providers` to keep it              out of the other provider's export (provider-only types are tagged automatically).              Curated types cover the portable concepts; for anything else use schema_search and add              a native resource (`native:<provider>:<type>`), setting its arguments via              entity_update.extra. Extra arguments on curated types add or override provider              arguments and are validated against the schema. Use project_apply to make several              writes as one undo step, project_changes (or a subscription to ttg://project) to notice              the user's own edits, and export_diff before export_run to show what would change. Some              writes (saving, opening, exporting, deleting) may wait for the user's approval; while a              prompt is open, reads keep answering (writes queue up behind it in arrival order).              `terratofu-gui --serve --port N --token T [project]` runs the same server headless, with              no window and no approval prompts, for scripting and CI.",
         )
     }
 }

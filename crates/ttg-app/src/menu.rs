@@ -343,10 +343,7 @@ pub fn mcp_window(app: &mut TtgApp, ui: &mut Ui) {
         &mut app.mcp.settings.confirm_disk,
         "saves, opens, starts a new project or writes an export",
     );
-    ui.checkbox(
-        &mut app.mcp.settings.confirm_delete,
-        "deletes resources, links or annotations",
-    );
+    ui.checkbox(&mut app.mcp.settings.confirm_delete, "deletes resources or links");
     ui.add_enabled_ui(!running, |ui| {
         ui.horizontal(|ui| {
             ui.label("Port");

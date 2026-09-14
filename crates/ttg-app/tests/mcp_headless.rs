@@ -246,6 +246,86 @@ fn headless_server_tools_resources_and_batch() {
     );
     assert!(err, "{msg}");
 
+    // 1.1: native resources go through entity_add directly (schema_search hands out
+    // `native:<provider>:<resource>` ids that used to only work via the palette, which
+    // calls `Catalog::ensure_native` before looking the type up; the MCP handler now
+    // does the same).
+    let (err, endpoint) = c.call(
+        "entity_add",
+        json!({"type_id": "native:aws:aws_vpc_endpoint", "name": "s3 endpoint", "parent": "main"}),
+    );
+    assert!(!err, "{endpoint}");
+    let (err, upd) = c.call(
+        "entity_update",
+        json!({
+            "entity": "s3 endpoint",
+            "extra": {
+                "vpc_id": {"$ref": {"entity": "main", "attr": "id"}},
+                "service_name": "com.amazonaws.eu-west-2.s3",
+            },
+        }),
+    );
+    assert!(!err, "{upd}");
+    let (err, preview) = c.call("export_preview", json!({}));
+    assert!(!err, "{preview}");
+    let native_tf: String = preview["files"]["native.tf"]
+        .as_str()
+        .unwrap_or_default()
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ");
+    assert!(
+        native_tf.contains("resource \"aws_vpc_endpoint\" \"s3_endpoint\""),
+        "{native_tf}"
+    );
+    assert!(
+        native_tf.contains("service_name = \"com.amazonaws.eu-west-2.s3\""),
+        "{native_tf}"
+    );
+    assert!(native_tf.contains("vpc_id = aws_vpc.main.id"), "{native_tf}");
+
+    // 1.2: an `entity_ref` item inside a struct_list (a security-group rule's
+    // `source_group`) accepts a display name, resolved to the id the same way every
+    // other tool addresses entities, so diagnostics never see a stray name.
+    let (err, _) = c.call(
+        "entity_add",
+        json!({"type_id": "security_group", "name": "ref sg a", "parent": "main"}),
+    );
+    assert!(!err);
+    let (err, upd_a) = c.call(
+        "entity_update",
+        json!({
+            "entity": "ref sg a",
+            "config": {"rules": [
+                {"name": "allow-out", "direction": "egress", "protocol": "all", "from_port": 0, "to_port": 0, "cidr": "0.0.0.0/0"}
+            ]},
+        }),
+    );
+    assert!(!err, "{upd_a}");
+    let (err, _) = c.call(
+        "entity_add",
+        json!({"type_id": "security_group", "name": "ref sg b", "parent": "main"}),
+    );
+    assert!(!err);
+    let (err, upd) = c.call(
+        "entity_update",
+        json!({
+            "entity": "ref sg b",
+            "config": {"rules": [
+                {"name": "from-a", "direction": "ingress", "protocol": "tcp", "from_port": 443, "to_port": 443, "source_group": "REF SG A"}
+            ]},
+        }),
+    );
+    assert!(!err, "{upd}");
+    // Clean diagnostics for the entity: no "no longer exists" complaint about the name.
+    assert_eq!(upd["diagnostics"], json!([]), "{upd}");
+    let stored_id = upd["entity"]["config"]["rules"][0]["source_group"]
+        .as_str()
+        .unwrap_or_default()
+        .to_string();
+    assert_ne!(stored_id, "REF SG A", "the name must be resolved to an id: {upd}");
+    assert!(!stored_id.is_empty(), "{upd}");
+
     // export_diff against an empty directory: everything is added, nothing written.
     let dir = std::env::temp_dir().join(format!("ttg-diff-{}", std::process::id()));
     let (err, diff) = c.call("export_diff", json!({"dir": dir.to_string_lossy()}));

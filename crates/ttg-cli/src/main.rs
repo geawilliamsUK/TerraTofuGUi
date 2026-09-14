@@ -147,7 +147,17 @@ enum SchemaCmd {
         limit: usize,
     },
     /// Print the arguments and nested blocks of one resource type.
-    Show { provider: String, resource: String },
+    Show {
+        provider: String,
+        resource: String,
+        /// Levels of nested blocks to include (0 = attributes only); omit for everything.
+        /// Some resources (e.g. aws_wafv2_web_acl) run to hundreds of KB unfiltered.
+        #[arg(long)]
+        depth: Option<u32>,
+        /// Only required attributes and nested blocks.
+        #[arg(long)]
+        required_only: bool,
+    },
 }
 
 fn load_catalog(dir: &Option<PathBuf>) -> Result<Catalog> {
@@ -304,12 +314,17 @@ fn main() -> Result<()> {
                     println!("{r}");
                 }
             }
-            SchemaCmd::Show { provider, resource } => {
+            SchemaCmd::Show {
+                provider,
+                resource,
+                depth,
+                required_only,
+            } => {
                 let idx = ttg_schema::index();
                 let b = idx
                     .resource(&provider, &resource)
                     .ok_or_else(|| anyhow::anyhow!("no {resource} on {provider}"))?;
-                print_block(b, 0);
+                print_block(&b.filtered(depth, required_only), 0);
             }
         },
         Cmd::Tidy { project, out } => {

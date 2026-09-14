@@ -292,6 +292,13 @@ namespace, falling back to the enclosing namespace container otherwise.
 Terraform and OpenTofu) to hold a value other resources reference, e.g. the network tag
 a GCP security group hands to its members; the schema check skips it.
 
+**String-prefix conditions.** `{ field = "x", starts_with = "sg-" }` /
+`not_starts_with = "…"` test the resolved value's prefix (ignored when `equals` /
+`not_equals` is also given). Add `transform = "slug" | "kebab" | "lower" | "alnum"` to
+normalise the value first, e.g. to the kebab-cased form the mapping actually emits before
+checking it against a provider naming rule. `field = "name"` is the entity's display name,
+same as in an argument source or a template.
+
 **Provider layers.** Every node, container and link in a project may carry
 `providers = ["azure"]` (empty = all). Codegen, diagnostics and reachability run on the
 provider's *layer*: the graph minus entities not tagged for it, minus entities whose type

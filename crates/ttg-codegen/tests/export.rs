@@ -802,7 +802,12 @@ fn extra_arguments_and_native_resources() {
         nat.contains("resource \"aws_s3_bucket_policy\" \"assets_policy\""),
         "{nat}"
     );
-    assert!(nat.contains("bucket = aws_s3_bucket.assets.id"), "{nat}");
+    // `$ref` with `block` addresses a secondary block of the target, not its primary one
+    // (the bucket versioning resource's id is the bucket name, same as the bucket itself).
+    assert!(
+        nat.contains("bucket = aws_s3_bucket_versioning.assets_versioning.id"),
+        "{nat}"
+    );
     assert!(nat.contains("metric_transformation {"), "{nat}");
     assert!(
         nat.contains("log_group_name = aws_cloudwatch_log_group.app_logs.name"),
@@ -848,6 +853,26 @@ fn extra_arguments_and_native_resources() {
     let text = ttg_core::project::to_string(&p).unwrap();
     let back = ttg_core::project::load_str(&text).unwrap();
     assert_eq!(back.nodes["nat-policy"].extra, p.nodes["nat-policy"].extra);
+}
+
+#[test]
+fn security_group_name_cannot_start_with_sg_dash_on_aws() {
+    let cat = Catalog::builtin();
+    let mut p = example("three-tier.ttg.json");
+    p.nodes.get_mut("sg-2b3c4d5e").unwrap().name = "sg-web".into();
+    let d = ttg_codegen::diagnostics::run(&p, &cat, "aws");
+    assert!(
+        d.iter().any(|x| x.severity == Severity::Error
+            && x.message
+                .contains("AWS rejects security group names beginning with sg-")),
+        "{d:?}"
+    );
+    // Azure has no such rule, and the original name is unaffected.
+    let d = ttg_codegen::diagnostics::run(&p, &cat, "azure");
+    assert!(
+        !d.iter().any(|x| x.message.contains("beginning with sg-")),
+        "{d:?}"
+    );
 }
 
 #[test]
