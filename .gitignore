@@ -9,3 +9,7 @@
 **/*.rs.bk
 debug
 target
+# Local tool state (agent worktrees, editor caches) and the user's own project files
+/.claude/
+/.continue/
+/callscope_cloud.ttg.json
