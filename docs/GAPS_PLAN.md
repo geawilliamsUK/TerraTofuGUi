@@ -25,6 +25,29 @@ in parallel and merged; each package lands as one commit.
 | **WP4 Internet edge** | `tls_certificate` type and an HTTPS listener; `web_application_firewall` type; `cdn` type; `user_identity` (Cognito / Identity Platform); DNS alias records to a load balancer or CDN | 2.4, 2.7, 2.8, 2.18 |
 | **WP5 Operational rest** | dead-letter relation with max receives; `file_system` type with mount targets; `budget` type; AWS interface endpoints without a target, per zone, gateway for S3; repositories on a registry; alarm presets and more watch targets; topic subscriptions; flow logs; `audit_trail` type | 2.3, 2.9–2.13, 2.16, 2.17 |
 
+## Status (2026-09-14)
+
+All six packages are merged on `master`, each verified with clippy for both feature sets,
+the full suite with `tofu validate` on all three providers, and the strict catalog check.
+The catalog grew from 31 to 41 curated types (`encryption_key`, `kubernetes_node_pool`,
+`kubernetes_workload`, `tls_certificate`, `web_application_firewall`, `cdn`,
+`user_identity`, `file_system`, `budget`, `audit_trail`), the IR gained the
+`encrypted_with` and `dead_letters_to` relations, view notes / logical nodes / flow
+steps / legends / exports, project-wide tags, and the mapping language gained relation
+conditions on incoming edges and target fields, `target_shares_ancestor` over a relation,
+`starts_with` with a transform, `wrap = "map"`, `column`, raw expressions with spliced
+`refs`, several declarations of one relation kind, helper providers, default tags, and
+manual steps on logical mappings. Details per package are in `docs/PHASE2_PLAN.md`.
+
+Against the CallScope design the report was written from (111 nodes, 46 AWS-only natives,
+21 `$raw` uses): the curated types now cover every one of the 46 natives — the 15 S3
+sub-resources and the KMS pair (WP3), the EKS node group, the seven pod-identity
+associations and the six role policies (WP2), the ACM certificate, the WAF pair and the
+Cognito trio (WP4), and the EFS trio, the budget and the five VPC endpoints (WP5) — and
+`$raw` is no longer needed anywhere the report listed (the roles' KMS statements are the
+one remaining `extra`). The design file itself is unchanged: rebuilding it on
+the curated types is the next thing to do with the MCP.
+
 ## Then
 
 Integrate: full suite with `tofu validate` on all three providers, clippy for both
