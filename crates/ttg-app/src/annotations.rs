@@ -565,17 +565,40 @@ fn bezier_points(a: Pos2, c1: Pos2, c2: Pos2, b: Pos2, n: usize) -> Vec<Pos2> {
         .collect()
 }
 
-/// How far along the arrow a label sits, so flows sharing an endpoint do not print on
-/// top of each other: the first keeps the middle, the next ones step either side.
+/// Range of the 25 points along a flow's curve that a label may sit at: never so close
+/// to an end that it covers the node or the arrowhead.
+const LABEL_MIN: usize = 3;
+const LABEL_MAX: usize = 21;
+
+/// How far along the arrow a label starts, so flows sharing an endpoint do not print on
+/// top of each other: the first keeps the middle, the next ones step either side. The
+/// steps are wide enough that consecutive labels clear each other on their own; where
+/// they cannot (a short arrow, a long label), [`label_slots`] slides them further.
 fn label_index(crowding: usize) -> usize {
-    let step = crowding.div_ceil(2) * 3;
+    let step = crowding.div_ceil(2) * 4;
     let mid = 12_i32;
     let pos = if crowding % 2 == 1 {
         mid - step as i32
     } else {
         mid + step as i32
     };
-    pos.clamp(4, 20) as usize
+    pos.clamp(LABEL_MIN as i32, LABEL_MAX as i32) as usize
+}
+
+/// Points to try for a label, the chosen one first and then alternately further along
+/// and further back, so a collision slides the box along its own curve rather than
+/// jumping somewhere unrelated. Deterministic: the same diagram draws the same way.
+fn label_slots(start: usize) -> Vec<usize> {
+    let mut out = vec![start.clamp(LABEL_MIN, LABEL_MAX)];
+    for d in 1..=(LABEL_MAX - LABEL_MIN) {
+        if start + d <= LABEL_MAX {
+            out.push(start + d);
+        }
+        if start >= LABEL_MIN + d {
+            out.push(start - d);
+        }
+    }
+    out
 }
 
 /// For each flow, how many earlier flows already touch one of its endpoints.
@@ -597,6 +620,17 @@ fn crowding(flows: &[Flow]) -> Vec<usize> {
         .collect()
 }
 
+/// The box for one flow's label: the first slot along its own curve that clears every
+/// label already placed this frame, or the slot it wanted when none of them does.
+fn place_label(pts: &[Pos2], base: usize, size: Vec2, placed: &[Rect]) -> Rect {
+    label_slots(base)
+        .into_iter()
+        .filter(|i| *i < pts.len())
+        .map(|i| Rect::from_center_size(pts[i], size))
+        .find(|r| !placed.iter().any(|p| p.intersects(*r)))
+        .unwrap_or_else(|| Rect::from_center_size(pts[base.min(pts.len() - 1)], size))
+}
+
 /// Draw the active view's data-flow arrows (above nodes) and handle selection.
 pub fn draw_flows(app: &mut TtgApp, ui: &mut Ui, origin: Pos2) {
     let Some(view) = app.active_view() else { return };
@@ -605,6 +639,9 @@ pub fn draw_flows(app: &mut TtgApp, ui: &mut Ui, origin: Pos2) {
     let zoom = app.camera.zoom;
     let painter = ui.painter_at(app.canvas_rect);
     let ink = Color32::from_rgb(45, 55, 75);
+    // Label boxes already drawn this frame; the next one slides along its curve until
+    // it clears them, so arrows meeting at one node stay readable.
+    let mut placed: Vec<Rect> = Vec::new();
     for (fi, f) in flows.iter().enumerate() {
         let (Some(ar), Some(br)) = (app.end_rect(&f.from), app.end_rect(&f.to)) else {
             continue;
@@ -656,7 +693,6 @@ pub fn draw_flows(app: &mut TtgApp, ui: &mut Ui, origin: Pos2) {
                 Color32::WHITE,
             );
         }
-        let mid = pts[label_index(crowd[fi])];
         let label = if f.label.is_empty() {
             "flow".to_string()
         } else {
@@ -664,7 +700,9 @@ pub fn draw_flows(app: &mut TtgApp, ui: &mut Ui, origin: Pos2) {
         };
         let font = FontId::proportional((12.0 * zoom).max(7.0));
         let galley = painter.layout_no_wrap(label, font, Color32::WHITE);
-        let lr = Rect::from_center_size(mid, galley.size() + Vec2::new(12.0, 6.0));
+        let box_size = galley.size() + Vec2::new(12.0, 6.0);
+        let lr = place_label(&pts, label_index(crowd[fi]), box_size, &placed);
+        placed.push(lr);
         let resp = ui.interact(lr, ui.id().with(("flow", &f.id)), Sense::click());
         painter.rect_filled(lr, CornerRadius::same(6), color);
         painter.galley(lr.min + Vec2::new(6.0, 3.0), galley, Color32::WHITE);
@@ -1473,5 +1511,48 @@ fn track_edit(app: &mut TtgApp, r: &egui::Response) {
         if let Some(before) = app.edit_snapshot.take() {
             app.finish(before);
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// 25 points in a straight line: the shape `bezier_points` hands the label code.
+    fn curve() -> Vec<Pos2> {
+        (0..=24).map(|i| Pos2::new(i as f32 * 20.0, 0.0)).collect()
+    }
+
+    #[test]
+    fn label_slots_stay_on_the_arrow_and_start_where_asked() {
+        for crowd in 0..12 {
+            let base = label_index(crowd);
+            assert!((LABEL_MIN..=LABEL_MAX).contains(&base), "{crowd} -> {base}");
+            let slots = label_slots(base);
+            assert_eq!(slots[0], base, "the wanted slot is tried first");
+            assert!(slots.iter().all(|i| (LABEL_MIN..=LABEL_MAX).contains(i)));
+            // Deterministic: the same input gives the same order every time.
+            assert_eq!(slots, label_slots(base));
+        }
+        // Flows meeting at one node no longer start their labels in the same place.
+        assert_ne!(label_index(0), label_index(1));
+        assert_ne!(label_index(1), label_index(2));
+    }
+
+    #[test]
+    fn a_label_slides_along_its_curve_until_it_clears_the_others() {
+        let pts = curve();
+        let size = Vec2::new(70.0, 20.0);
+        // A whole band of the curve is already covered by earlier labels.
+        let placed: Vec<Rect> = (8..=14).map(|i| Rect::from_center_size(pts[i], size)).collect();
+        let r = place_label(&pts, 12, size, &placed);
+        assert!(
+            placed.iter().all(|p| !p.intersects(r)),
+            "the label still overlaps: {r:?}"
+        );
+        // It slid along this arrow rather than jumping somewhere unrelated.
+        assert!(pts.iter().any(|p| (p.x - r.center().x).abs() < 0.01), "{r:?}");
+        // With nothing in the way it keeps the spot it asked for.
+        assert_eq!(place_label(&pts, 12, size, &[]).center(), pts[12]);
     }
 }

@@ -50,7 +50,7 @@ definition, unknown fields rejected with the list of valid ones), `entity_move`,
 `entity_resize`, `entity_set_parent` (allowed-parent check, moves the entity inside the
 container visually), `entity_delete`, `link_add` (relation must be allowed by the
 definition; redundant containment links refused with the same message as the UI),
-`link_remove`, `selection_set`, `view_set`, `view_save`, `view_activate`,
+`link_remove`, `selection_set`, `view_set`, `view_save`, `view_delete`, `view_activate`,
 `view_group_add`, `view_flow_add`, `view_annotation_remove` (architecture-map
 annotations in the active view; `entity_move` lands in the active view's own layout
 when it has one), `schema_search`, `schema_show` (the provider schema index; `depth` and
@@ -75,6 +75,45 @@ previous one back, so a batch can draw a whole map without interleaving `view_ac
 `hide_panels`; the options are applied when the command is dequeued and the capture is
 asked for two frames later, so the view has settled, with the panels restored when the
 image arrives (the asynchronous contract is unchanged).
+
+Added 2026-09-17 (round-2 gaps): `view_delete` (removes a saved view and everything it
+holds as one undo step; the canvas falls back to All when it was active).
+`view_save` now takes `replace`: a name already in use (compared case-insensitively,
+like `resolve_view`) is refused, and with `replace: true` only that view's filter is
+rewritten — its layout, groups, flows, notes and logical nodes stay. `view_update` takes
+a `filter` of its own, resolved exactly as `view_set` resolves names in
+`focus` / `hidden` / `only`, so a saved filter is no longer frozen; the canvas follows
+when that view is active. `view_set` while a saved view is active now writes the filter
+into that view — what `TtgApp::set_filter` has always done for the filter menu in the
+app — instead of silently detaching the canvas; the reply names the view it changed, and
+`view_activate All` first is the way to filter without touching one. `entity_move` and
+`entity_resize` also take a view's annotations (note title, logical node name, grouping
+box label or any of their ids) and answer with `kind: "entity" | "note" | "logical" |
+"group"`; a moved box does not drag its members, because membership is geometric. An
+anchored `view_note_add` with no `x`/`y` lands beside its anchor — the first of right,
+below, left, above that is clear of everything the view draws — rather than off the
+right-hand edge of the whole diagram. `screenshot` takes `width`/`height`: egui cannot
+render off-screen here, so the window is resized with `ViewportCommand::InnerSize`, the
+fit happens at the new size, the capture follows and the old size is put back; the reply
+reports both the size asked for and the size captured, since the OS may clamp to the
+display. `TTG_WINDOW_SIZE=WxH` does the same for the `--screenshot` CLI path.
+`ViewFilter::hide_edges` accepts `hide_links` as a serde alias and is named in the
+`view_set` / `view_update` filter descriptions; it round-trips through `view_save`,
+`view_update { filter }` and `view_get` like every other key.
+
+Not applying a command twice (2026-09-17): a tool call that timed out used to leave its
+command in the channel, so it ran later, beside whatever the agent retried. Three things
+stop that. `TtgApp::run_validate` runs `<tool> init && validate` on a background thread
+and `poll_validate` collects the outcomes each frame, so the export panel no longer
+freezes the UI (and the command queue) for minutes. `drain_agent_commands`, the deferred
+queue and the pending approval all skip a command whose `AgentReply` sender
+`is_closed()` — the caller's oneshot receiver was dropped — logging "dropped: caller
+gone". And `mcp::Heartbeat` (an `Arc<Mutex<(Instant, Option<String>)>>` beaten once per
+drain) lets `TtgServer::exec` refuse before queuing anything: if the UI has not drained
+for three seconds it is woken and given 600 ms to prove it is merely idle, and otherwise
+the call comes back "the app is busy: <what>; nothing was queued, retry in a moment".
+`TtgApp::busy_while` publishes what the app is stuck on around the modal file dialogs
+and the exports. rmcp's `sse_keep_alive` default (15 s) is left as it is.
 
 Added 2026-09-09: `project_apply` (a list of `{tool, args}` diagram writes executed as
 one undo step; `AgentCommand::Batch` snapshots first, runs each sub-command through the
@@ -138,7 +177,16 @@ second test drives the job-pipeline example: `view_get`, drawing notes, logical 
 and flows into a named view while no view is active, `entity_move` landing in that
 view's layout and not the shared one, `view_update`, both `view_export` formats,
 `view_fit` answering without a window, removal by title, and a three-command batch undone
-in one step. Both run in CI on the same job as the rest of the workspace.
+in one step. A third, `headless_view_editing`, covers the round-2 gaps: the duplicate and
+`replace` paths of `view_save`, `hide_links` arriving as `hide_edges` and surviving a
+round trip, `view_update { filter }`, `view_set` writing into the active view, two boxes
+drawn nested in one `project_apply` and reported as such by `view_get` and the Markdown
+"Inside" column, moving and resizing a note, a logical node and a box (and a box not
+dragging its members), an anchored note landing beside its anchor, the documented
+headless refusal for a sized `screenshot`, and `view_delete` with its undo. The unit
+tests beside `mcp/mod.rs` cover the dropped-caller rule (fresh and deferred), the
+heartbeat, and the screenshot size clamp. All run in CI on the same job as the rest of
+the workspace.
 
 ## 5. Open ideas
 

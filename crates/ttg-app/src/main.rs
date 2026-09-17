@@ -64,11 +64,18 @@ fn main() -> eframe::Result {
         }
     }
 
+    let asked = app::window_size_env();
+    let size = asked.unwrap_or([1440.0, 900.0]);
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
-            .with_inner_size([1440.0, 900.0])
-            .with_min_inner_size([960.0, 600.0])
+            .with_inner_size(size)
+            // Never larger than the size asked for, or the window could not honour it.
+            .with_min_inner_size([size[0].min(960.0), size[1].min(600.0)])
             .with_title("TerraTofu GUI"),
+        // eframe otherwise restores (and then re-saves) the geometry of the last run,
+        // which would both ignore TTG_WINDOW_SIZE and leave the user's window at
+        // whatever size a documentation screenshot wanted.
+        persist_window: asked.is_none(),
         ..Default::default()
     };
     eframe::run_native(

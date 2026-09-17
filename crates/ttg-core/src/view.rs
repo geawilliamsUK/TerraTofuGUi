@@ -54,6 +54,11 @@ impl Rect {
     pub fn area(&self) -> f32 {
         self.w * self.h
     }
+    /// Do the two rectangles share any area? Touching edges do not count, so a box
+    /// placed exactly beside another is free.
+    pub fn intersects(&self, o: Rect) -> bool {
+        self.x < o.x + o.w && o.x < self.x + self.w && self.y < o.y + o.h && o.y < self.y + self.h
+    }
 }
 
 /// Position of an entity as `view` sees it (a view-owned layout wins).
@@ -409,6 +414,34 @@ mod tests {
         assert_eq!(group_children(&v, "outer"), vec!["inner".to_string()]);
         // Largest first, so the inner box is drawn (and clicked) on top.
         assert_eq!(groups_by_area(&v), vec!["outer".to_string(), "inner".to_string()]);
+    }
+
+    #[test]
+    fn rects_only_intersect_when_they_share_area() {
+        let a = Rect {
+            x: 0.0,
+            y: 0.0,
+            w: 100.0,
+            h: 50.0,
+        };
+        assert!(a.intersects(Rect {
+            x: 90.0,
+            y: 40.0,
+            ..a
+        }));
+        // Touching edges are free: a box placed exactly beside another fits.
+        assert!(!a.intersects(Rect {
+            x: 100.0,
+            y: 0.0,
+            ..a
+        }));
+        assert!(!a.intersects(Rect { x: 0.0, y: 50.0, ..a }));
+        assert!(!a.intersects(Rect {
+            x: 200.0,
+            y: 200.0,
+            ..a
+        }));
+        assert!(a.intersects(a));
     }
 
     #[test]

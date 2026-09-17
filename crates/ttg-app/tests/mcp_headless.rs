@@ -627,3 +627,240 @@ fn headless_diagnostics_report_the_other_providers() {
     let (err, preview) = c.call("export_preview", json!({}));
     assert!(!err, "{preview}");
 }
+
+/// Round-2 gaps: saving over a view, deleting one, rewriting a saved filter, moving the
+/// annotations, placing an anchored note beside its anchor, and reporting nesting.
+#[test]
+fn headless_view_editing() {
+    let server = start("job-pipeline.ttg.json");
+    let mut c = Client::new(&server);
+    c.initialize();
+
+    let tools = c.request("tools/list", json!({}));
+    let names: Vec<&str> = tools["tools"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|t| t["name"].as_str().unwrap())
+        .collect();
+    for want in ["view_delete", "view_save", "view_update"] {
+        assert!(names.contains(&want), "missing tool {want}: {names:?}");
+    }
+
+    // --- view_save: a name already in use is refused, `replace` rewrites the filter.
+    let (err, msg) = c.call("view_save", json!({"name": "data flow"}));
+    assert!(err, "a duplicate name must be refused: {msg}");
+    let dup = msg.as_str().unwrap_or_default().to_string();
+    assert!(dup.contains("already exists") && dup.contains("replace"), "{dup}");
+
+    c.call("view_activate", json!({"name": "All"}));
+    let (err, applied) = c.call(
+        "view_set",
+        json!({"filter": {"hide_links": true, "containers": false}}),
+    );
+    assert!(!err, "{applied}");
+    let (err, replaced) = c.call("view_save", json!({"name": "DATA FLOW", "replace": true}));
+    assert!(!err, "{replaced}");
+    assert_eq!(replaced["status"], json!("view replaced"), "{replaced}");
+    // §2.3(a): `hide_links` is stored as the `hide_edges` flag and comes back in view_get.
+    let (_, v) = c.call("view_get", json!({"name": "Data flow"}));
+    assert_eq!(v["filter"]["hide_edges"], json!(true), "{}", v["filter"]);
+    assert_eq!(v["filter"]["containers"], json!(false), "{}", v["filter"]);
+    // Replacing kept everything else the view held.
+    assert!(!v["groups"].as_array().unwrap().is_empty(), "{v}");
+    assert!(!v["flows"].as_array().unwrap().is_empty(), "{v}");
+    assert_eq!(v["name"], json!("Data flow"), "the original name is kept: {v}");
+
+    // --- view_update { filter }: a saved filter is no longer frozen.
+    let (err, upd) = c.call(
+        "view_update",
+        json!({"view": "Data flow", "filter": {"only": ["JobRunner"], "hide_edges": true}}),
+    );
+    assert!(!err, "{upd}");
+    assert_eq!(upd["view"]["filter"]["only"], json!(["fn-runner"]), "{upd}");
+    assert_eq!(upd["view"]["filter"]["hide_edges"], json!(true), "{upd}");
+    let shown: Vec<&str> = upd["view"]["shown"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|e| e["name"].as_str().unwrap())
+        .collect();
+    assert!(shown.contains(&"JobRunner"), "{shown:?}");
+    // And back to something that shows everything again.
+    let (err, _) = c.call("view_update", json!({"view": "Data flow", "filter": {}}));
+    assert!(!err);
+
+    // --- view_set on an active view writes into that view rather than detaching.
+    c.call("view_activate", json!({"name": "Data flow"}));
+    let (err, set) = c.call("view_set", json!({"filter": {"name_glob": "job*"}}));
+    assert!(!err, "{set}");
+    assert_eq!(set["view"], json!("Data flow"), "{set}");
+    assert!(
+        set["note"].as_str().unwrap_or_default().contains("Data flow"),
+        "{set}"
+    );
+    let (_, v) = c.call("view_get", json!({"name": "Data flow"}));
+    assert_eq!(v["filter"]["name_glob"], json!("job*"), "{}", v["filter"]);
+    assert_eq!(v["active"], json!(true), "{v}");
+    c.call("view_update", json!({"view": "Data flow", "filter": {}}));
+
+    // --- R2.6: a box drawn fully inside another is reported as nested, in view_get
+    // and in the Markdown export's "Inside" column.
+    // Drawn the way an agent builds a map: both boxes in one project_apply.
+    let (err, drawn) = c.call(
+        "project_apply",
+        json!({"commands": [
+            {"tool": "view_group_add", "args": {"view": "Data flow", "label": "Platform", "x": 3000, "y": 3000, "w": 900, "h": 700}},
+            {"tool": "view_group_add", "args": {"view": "Data flow", "label": "Workers", "x": 3100, "y": 3100, "w": 300, "h": 200}}
+        ]}),
+    );
+    assert!(!err, "{drawn}");
+    let (_, v) = c.call("view_get", json!({"name": "Data flow"}));
+    let workers = v["groups"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|g| g["label"] == "Workers")
+        .unwrap_or_else(|| panic!("{v}"));
+    assert_eq!(workers["nested_in"], json!("Platform"), "{workers}");
+    assert_eq!(
+        workers["parent"],
+        json!("Platform"),
+        "both names answer: {workers}"
+    );
+    let platform = v["groups"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|g| g["label"] == "Platform")
+        .unwrap();
+    assert_eq!(platform["nested_in"], json!(null), "{platform}");
+    let (_, md) = c.call("view_export", json!({"view": "Data flow"}));
+    let text = md["text"].as_str().unwrap();
+    assert!(
+        text.lines().any(|l| l.starts_with("| Workers | Platform |")),
+        "the Inside column must name the outer box:\n{text}"
+    );
+
+    // --- R2.4: notes, logical nodes and boxes move and resize like entities.
+    let (err, moved) = c.call(
+        "entity_move",
+        json!({"view": "Data flow", "entity": "Workers", "x": 3150, "y": 3150}),
+    );
+    assert!(!err, "{moved}");
+    assert_eq!(moved["kind"], json!("group"), "{moved}");
+    let (err, moved) = c.call(
+        "entity_move",
+        json!({"view": "Data flow", "entity": "users' browser", "x": 4200, "y": 120}),
+    );
+    assert!(!err, "{moved}");
+    assert_eq!(moved["kind"], json!("logical"), "{moved}");
+    let (err, sized) = c.call(
+        "entity_resize",
+        json!({"view": "Data flow", "entity": "Workers", "w": 420, "h": 260}),
+    );
+    assert!(!err, "{sized}");
+    assert_eq!(sized["kind"], json!("group"), "{sized}");
+    let (_, v) = c.call("view_get", json!({"name": "Data flow"}));
+    let workers = v["groups"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|g| g["label"] == "Workers")
+        .unwrap();
+    assert_eq!(workers["position"], json!({"x": 3150, "y": 3150}), "{workers}");
+    assert_eq!(workers["size"], json!({"w": 420, "h": 260}), "{workers}");
+    let browser = v["logicals"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|l| l["name"] == "users' browser")
+        .unwrap();
+    assert_eq!(browser["position"], json!({"x": 4200, "y": 120}), "{browser}");
+    // A box does not carry its members: membership is geometric, so moving the box is
+    // exactly what changes who is inside it.
+    let proj = c.request("resources/read", json!({"uri": "ttg://project"}));
+    let project: Value = serde_json::from_str(proj["contents"][0]["text"].as_str().unwrap()).unwrap();
+    let runner = project["views"][0]["layout"]["positions"]["fn-runner"].clone();
+    assert!(runner.is_object(), "{}", project["views"][0]["layout"]);
+    let (rx, ry) = (runner["x"].as_i64().unwrap(), runner["y"].as_i64().unwrap());
+    let (err, around) = c.call(
+        "view_group_add",
+        json!({"view": "Data flow", "label": "Around the runner", "x": rx - 60, "y": ry - 60, "w": 400, "h": 300}),
+    );
+    assert!(!err, "{around}");
+    assert!(
+        around["members"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|m| m == "fn-runner"),
+        "{around}"
+    );
+    let (err, _) = c.call(
+        "entity_move",
+        json!({"view": "Data flow", "entity": "Around the runner", "x": rx + 2000, "y": ry}),
+    );
+    assert!(!err);
+    let proj = c.request("resources/read", json!({"uri": "ttg://project"}));
+    let project: Value = serde_json::from_str(proj["contents"][0]["text"].as_str().unwrap()).unwrap();
+    assert_eq!(
+        project["views"][0]["layout"]["positions"]["fn-runner"], runner,
+        "moving the box must not drag what was inside it"
+    );
+
+    // An unknown key names all four kinds it looked for.
+    let (err, msg) = c.call(
+        "entity_move",
+        json!({"view": "Data flow", "entity": "no such thing", "x": 0, "y": 0}),
+    );
+    assert!(err, "{msg}");
+    assert!(msg.as_str().unwrap_or_default().contains("grouping box"), "{msg}");
+
+    // --- R2.5: an anchored note with no position lands next to its anchor.
+    let (err, note) = c.call(
+        "view_note_add",
+        json!({"view": "Data flow", "title": "Beside me", "body": "Anchored, no x/y.", "anchor": "users' browser"}),
+    );
+    assert!(!err, "{note}");
+    let at = &note["at"];
+    let (nx, ny) = (at["x"].as_f64().unwrap(), at["y"].as_f64().unwrap());
+    // The browser is at (4200, 120); the note must be within a screen of it, not off
+    // the right-hand edge of the whole diagram.
+    assert!(
+        (nx - 4200.0).abs() < 900.0 && (ny - 120.0).abs() < 900.0,
+        "the note landed at ({nx}, {ny}), nowhere near its anchor: {note}"
+    );
+    // Moving a note by absolute position works even though it stores an offset.
+    let (err, moved) = c.call(
+        "entity_move",
+        json!({"view": "Data flow", "entity": "Beside me", "x": 4600, "y": 400}),
+    );
+    assert!(!err, "{moved}");
+    assert_eq!(moved["kind"], json!("note"), "{moved}");
+
+    // --- R2.9: a sized screenshot is refused headless with the documented message.
+    let (err, msg) = c.call("screenshot", json!({"width": 1920, "height": 1200, "fit": true}));
+    assert!(err, "{msg}");
+    assert_eq!(
+        msg.as_str().unwrap_or_default(),
+        "no display in --serve mode",
+        "{msg}"
+    );
+
+    // --- R2.2: view_delete, and the fall back to All when it was active.
+    let (err, msg) = c.call("view_delete", json!({"name": "nope"}));
+    assert!(err, "{msg}");
+    let (err, del) = c.call("view_delete", json!({"name": "data flow"}));
+    assert!(!err, "{del}");
+    assert_eq!(del["name"], json!("Data flow"), "{del}");
+    assert_eq!(del["active"], json!("All"), "{del}");
+    assert_eq!(del["views"], json!([]), "{del}");
+    let (_, summary) = c.call("project_summary", json!({}));
+    assert_eq!(summary["views"], json!([]), "{summary}");
+    // One undo step brings the whole view back.
+    let (err, _) = c.call("undo", json!({}));
+    assert!(!err);
+    let (_, back) = c.call("view_get", json!({"name": "Data flow"}));
+    assert!(!back["flows"].as_array().unwrap().is_empty(), "{back}");
+}

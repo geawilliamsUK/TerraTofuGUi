@@ -354,7 +354,9 @@ pub struct ViewFilter {
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub name_glob: String,
     /// Hide the structural links, so a view shows only its data-flow arrows.
-    #[serde(default, skip_serializing_if = "is_false")]
+    /// `hide_links` is accepted as a spelling of the same flag: agents reach for it,
+    /// and a filter that silently dropped the key would draw the wrong picture.
+    #[serde(default, alias = "hide_links", skip_serializing_if = "is_false")]
     pub hide_edges: bool,
 }
 

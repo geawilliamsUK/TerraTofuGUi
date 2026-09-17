@@ -412,7 +412,11 @@ tool. Registry lookups for schema reference default to the OpenTofu registry.
 `ttg-codegen::validate` looks for `terraform` / `tofu` on `PATH`. If found it runs
 `init -backend=false -input=false` then `validate` in the export directory and returns the output.
 If not found it returns `BinaryNotFound` and the GUI shows the exact command to run. The app has
-no runtime dependency on either binary.
+no runtime dependency on either binary. `init` can take minutes, so the GUI never runs this on the
+UI thread: `TtgApp::run_validate` starts one background thread for the exported providers and
+`poll_validate` collects the outcomes through an `mpsc` channel once a frame, showing "validating…"
+per provider meanwhile. A frozen UI is not just an unresponsive window — it also stops the MCP
+command queue draining, which is what made an agent's timed-out call get applied late.
 
 ## 7. GUI architecture (`ttg-app`)
 

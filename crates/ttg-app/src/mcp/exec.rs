@@ -12,6 +12,36 @@ use ttg_core::{Id, Relation, Tool, Value};
 
 type R = Result<J, String>;
 
+/// What `entity_move` / `entity_resize` were pointed at. Resources live in the project;
+/// notes, logical nodes and grouping boxes live in one view, so they are only movable
+/// while that view is the one being worked on.
+#[derive(Debug, Clone)]
+enum Movable {
+    Entity(Id),
+    Note(Id),
+    Logical(Id),
+    Group(Id),
+}
+
+impl Movable {
+    fn kind(&self) -> &'static str {
+        match self {
+            Movable::Entity(_) => "entity",
+            Movable::Note(_) => "note",
+            Movable::Logical(_) => "logical",
+            Movable::Group(_) => "group",
+        }
+    }
+    fn id(&self) -> &str {
+        match self {
+            Movable::Entity(id) | Movable::Note(id) | Movable::Logical(id) | Movable::Group(id) => id,
+        }
+    }
+}
+
+/// Gap left between an anchored note and the thing it explains.
+const NOTE_GAP: f32 = 24.0;
+
 impl TtgApp {
     /// Resolve an id or (case-insensitive) display name to an entity id.
     fn resolve(&self, key: &str) -> Result<Id, String> {
@@ -135,6 +165,146 @@ impl TtgApp {
         }
     }
 
+    /// Everything the active view already draws, as world rects: the entities it shows,
+    /// its grouping boxes, its logical nodes and its notes. Used to find a free spot.
+    fn view_obstacles(&self) -> Vec<ttg_core::view::Rect> {
+        let Some(v) = self.active_view() else {
+            return Vec::new();
+        };
+        let visible = |id: &str| self.is_visible(id);
+        let mut out: Vec<ttg_core::view::Rect> = self
+            .project
+            .entities()
+            .iter()
+            .filter(|e| visible(e.id))
+            .filter_map(|e| ttg_core::view::entity_rect(&self.project, Some(v), e.id, &visible))
+            .collect();
+        out.extend(v.groups.iter().map(ttg_core::view::group_rect));
+        out.extend(v.logicals.iter().map(ttg_core::view::logical_rect));
+        out.extend(
+            v.notes
+                .iter()
+                .map(|n| ttg_core::view::note_rect(&self.project, v, n, &visible)),
+        );
+        out
+    }
+
+    /// Where an anchored note goes when the agent gives no position: the first side of
+    /// its anchor — right, below, left, above — that is clear of everything the view
+    /// already draws. The answer is an offset from the anchor's box, which is what
+    /// `Note::position` means once a note has an anchor, so the note keeps travelling
+    /// with the thing it explains.
+    ///
+    /// Before this, an anchored note landed to the right of the whole diagram, miles
+    /// from its anchor, and stretched every fitted view to reach it.
+    fn note_spot_beside(&self, anchor: &ttg_core::NoteAnchor, size: ttg_core::Size) -> ttg_core::Position {
+        let fallback = ttg_core::view::NOTE_OFFSET;
+        let Some(v) = self.active_view() else {
+            return fallback;
+        };
+        let visible = |id: &str| self.is_visible(id);
+        let Some(a) = ttg_core::view::anchor_rect(&self.project, v, anchor, &visible) else {
+            return fallback;
+        };
+        let (w, h) = (size.w as f32, size.h as f32);
+        let sides = [
+            (a.x + a.w + NOTE_GAP, a.y),
+            (a.x, a.y + a.h + NOTE_GAP),
+            (a.x - w - NOTE_GAP, a.y),
+            (a.x, a.y - h - NOTE_GAP),
+        ];
+        let taken = self.view_obstacles();
+        let offset = |(x, y): (f32, f32)| ttg_core::Position {
+            x: (x - (a.x + a.w)).round() as i32,
+            y: (y - a.y).round() as i32,
+        };
+        for side in sides {
+            let r = ttg_core::view::Rect {
+                x: side.0,
+                y: side.1,
+                w,
+                h,
+            };
+            if !taken.iter().any(|o| o.intersects(r)) {
+                return offset(side);
+            }
+        }
+        offset(sides[0])
+    }
+
+    /// What to store in a note's `position` so that it is *drawn* with its top-left
+    /// corner at `(x, y)`. A free note stores that outright; an anchored one stores an
+    /// offset from its anchor, so the absolute position asked for is turned back into
+    /// one and the note still follows what it explains.
+    fn note_position_for(&self, id: &str, x: i32, y: i32) -> ttg_core::Position {
+        let free = ttg_core::Position { x, y };
+        let Some(v) = self.active_view() else {
+            return free;
+        };
+        let visible = |e: &str| self.is_visible(e);
+        let Some(a) = v
+            .note(id)
+            .and_then(|n| n.anchor.as_ref())
+            .and_then(|a| ttg_core::view::anchor_rect(&self.project, v, a, &visible))
+        else {
+            return free;
+        };
+        ttg_core::Position {
+            x: x - (a.x + a.w).round() as i32,
+            y: y - a.y.round() as i32,
+        }
+    }
+
+    /// A filter from the JSON an agent sent, with entity names resolved to ids
+    /// wherever one is expected (`focus`, `hidden`, `only`).
+    fn parse_filter(&self, filter: J) -> Result<ttg_core::ViewFilter, String> {
+        let mut f: ttg_core::ViewFilter =
+            serde_json::from_value(filter).map_err(|e| format!("bad filter: {e}"))?;
+        if let Some(x) = f.focus.take() {
+            f.focus = Some(self.resolve(&x)?);
+        }
+        f.hidden = f
+            .hidden
+            .iter()
+            .map(|x| self.resolve(x))
+            .collect::<Result<_, _>>()?;
+        f.only = f.only.iter().map(|x| self.resolve(x)).collect::<Result<_, _>>()?;
+        Ok(f)
+    }
+
+    /// Resolve what `entity_move` / `entity_resize` should act on: a resource by id or
+    /// name, or one of the active view's annotations by id, title, name or label.
+    fn resolve_movable(&self, key: &str) -> Result<Movable, String> {
+        let is_entity = self.project.entity(key).is_some()
+            || self
+                .project
+                .entities()
+                .iter()
+                .any(|e| e.name.eq_ignore_ascii_case(key));
+        if is_entity {
+            return Ok(Movable::Entity(self.resolve(key)?));
+        }
+        let named =
+            |id: &str, label: &str| id == key || (!label.is_empty() && label.eq_ignore_ascii_case(key));
+        if let Some(v) = self.active_view() {
+            if let Some(g) = v.groups.iter().find(|g| named(&g.id, &g.label)) {
+                return Ok(Movable::Group(g.id.clone()));
+            }
+            if let Some(l) = v.logicals.iter().find(|l| named(&l.id, &l.name)) {
+                return Ok(Movable::Logical(l.id.clone()));
+            }
+            if let Some(n) = v.notes.iter().find(|n| named(&n.id, &n.title)) {
+                return Ok(Movable::Note(n.id.clone()));
+            }
+        }
+        Err(format!(
+            "no entity with id or name \"{key}\", and no note, logical node or grouping box called that in {}",
+            self.view_name()
+                .map(|n| format!("the view \"{n}\""))
+                .unwrap_or_else(|| "the current view (All holds no annotations; pass `view`)".into())
+        ))
+    }
+
     /// One view in full: what it shows, where it puts things, and its annotations.
     fn view_json(&self, i: usize) -> J {
         let v = &self.project.views[i];
@@ -164,7 +334,9 @@ impl TtgApp {
             "shown": shown,
             "groups": v.groups.iter().map(|g| json!({
                 "id": g.id, "label": g.label, "position": g.position, "size": g.size, "color": g.color,
+                // The same answer under both names: agents reach for `parent`.
                 "nested_in": ttg_core::view::group_parent(v, &g.id).map(|p| p.label.clone()),
+                "parent": ttg_core::view::group_parent(v, &g.id).map(|p| p.label.clone()),
                 "members": ttg_core::view::group_members(&self.project, v, &g.id, &visible)
                     .iter().map(|m| name_of(m)).collect::<Vec<_>>(),
                 "logicals": ttg_core::view::group_logicals(v, &g.id).iter()
@@ -342,43 +514,102 @@ impl TtgApp {
                 }
                 Ok(r)
             }
-            AgentCommand::EntityMove { entity, x, y, view } => {
-                let id = self.resolve(&entity)?;
-                self.with_view(view, |app| {
-                    let before = app.snapshot();
-                    let cur = app.entity_rect(&id).unwrap().min;
-                    let (dx, dy) = (x - cur.x as i32, y - cur.y as i32);
-                    // Moving a container takes its contents with it, in this view only
-                    // when the view owns its layout.
-                    let mut ids = vec![id.clone()];
-                    ids.extend(app.project.descendants_of(&id));
-                    app.shift_entities(&ids, dx, dy);
-                    app.finish(before);
-                    app.flash(&id);
-                    Ok(json!({"status": "moved", "id": id, "in_view": app.view_name()}))
-                })
-            }
-            AgentCommand::EntityResize { entity, w, h } => {
-                let id = self.resolve(&entity)?;
-                let before = self.snapshot();
-                let id2 = id.clone();
-                self.with_layout(|p| {
-                    if let Some(c) = p.containers.get_mut(&id2) {
-                        c.size = ttg_core::Size {
-                            w: w.max(220),
-                            h: h.max(140),
-                        };
-                    } else if let Some(n) = p.nodes.get_mut(&id2) {
-                        n.size = Some(ttg_core::Size {
-                            w: w.max(120),
-                            h: h.max(48),
-                        });
+            AgentCommand::EntityMove { entity, x, y, view } => self.with_view(view, |app| {
+                let target = app.resolve_movable(&entity)?;
+                let before = app.snapshot();
+                match &target {
+                    Movable::Entity(id) => {
+                        let cur = app.entity_rect(id).unwrap().min;
+                        let (dx, dy) = (x - cur.x as i32, y - cur.y as i32);
+                        // Moving a container takes its contents with it, in this view
+                        // only when the view owns its layout.
+                        let mut ids = vec![id.clone()];
+                        ids.extend(app.project.descendants_of(id));
+                        app.shift_entities(&ids, dx, dy);
+                        app.flash(id);
                     }
-                });
-                self.finish(before);
-                self.flash(&id);
-                Ok(json!({"status": "resized", "id": id}))
-            }
+                    // A box does not drag its members: membership is geometric, so the
+                    // move is exactly what changes who is inside it.
+                    Movable::Group(id) => {
+                        if let Some(g) = app.active_view_mut().and_then(|v| v.group_mut(id)) {
+                            g.position = ttg_core::Position { x, y };
+                        }
+                    }
+                    Movable::Logical(id) => {
+                        if let Some(l) = app.active_view_mut().and_then(|v| v.logical_mut(id)) {
+                            l.position = ttg_core::Position { x, y };
+                        }
+                    }
+                    Movable::Note(id) => {
+                        let pos = app.note_position_for(id, x, y);
+                        if let Some(n) = app.active_view_mut().and_then(|v| v.note_mut(id)) {
+                            n.position = pos;
+                        }
+                    }
+                }
+                app.finish(before);
+                Ok(json!({
+                    "status": "moved",
+                    "id": target.id(),
+                    "kind": target.kind(),
+                    "position": {"x": x, "y": y},
+                    "in_view": app.view_name(),
+                }))
+            }),
+            AgentCommand::EntityResize { entity, w, h, view } => self.with_view(view, |app| {
+                let target = app.resolve_movable(&entity)?;
+                let before = app.snapshot();
+                match &target {
+                    Movable::Entity(id) => {
+                        let id2 = id.clone();
+                        app.with_layout(|p| {
+                            if let Some(c) = p.containers.get_mut(&id2) {
+                                c.size = ttg_core::Size {
+                                    w: w.max(220),
+                                    h: h.max(140),
+                                };
+                            } else if let Some(n) = p.nodes.get_mut(&id2) {
+                                n.size = Some(ttg_core::Size {
+                                    w: w.max(120),
+                                    h: h.max(48),
+                                });
+                            }
+                        });
+                        app.flash(id);
+                    }
+                    Movable::Group(id) => {
+                        if let Some(g) = app.active_view_mut().and_then(|v| v.group_mut(id)) {
+                            g.size = ttg_core::Size {
+                                w: w.max(160),
+                                h: h.max(80),
+                            };
+                        }
+                    }
+                    Movable::Logical(id) => {
+                        if let Some(l) = app.active_view_mut().and_then(|v| v.logical_mut(id)) {
+                            l.size = ttg_core::Size {
+                                w: w.max(120),
+                                h: h.max(48),
+                            };
+                        }
+                    }
+                    Movable::Note(id) => {
+                        if let Some(n) = app.active_view_mut().and_then(|v| v.note_mut(id)) {
+                            n.size = ttg_core::Size {
+                                w: w.max(120),
+                                h: h.max(60),
+                            };
+                        }
+                    }
+                }
+                app.finish(before);
+                Ok(json!({
+                    "status": "resized",
+                    "id": target.id(),
+                    "kind": target.kind(),
+                    "in_view": app.view_name(),
+                }))
+            }),
             AgentCommand::EntitySetParent { entity, parent } => {
                 let id = self.resolve(&entity)?;
                 let pid = parent.map(|p| self.resolve(&p)).transpose()?;
@@ -506,21 +737,20 @@ impl TtgApp {
                 Ok(json!({"status": "selected", "ids": ids}))
             }
             AgentCommand::ViewSet { filter } => {
-                let mut f: ttg_core::ViewFilter =
-                    serde_json::from_value(filter).map_err(|e| format!("bad filter: {e}"))?;
-                // Names are allowed anywhere an id is expected.
-                if let Some(x) = f.focus.take() {
-                    f.focus = Some(self.resolve(&x)?);
-                }
-                f.hidden = f
-                    .hidden
-                    .iter()
-                    .map(|x| self.resolve(x))
-                    .collect::<Result<_, _>>()?;
-                f.only = f.only.iter().map(|x| self.resolve(x)).collect::<Result<_, _>>()?;
-                self.active_view = None;
+                let f = self.parse_filter(filter)?;
+                // A saved view keeps what you last set on it, exactly as the filter
+                // menu behaves in the app; it used to detach the canvas silently, so a
+                // view_set followed by view_get disagreed about what the view showed.
                 self.set_filter(f);
-                Ok(json!({"status": "view applied", "hidden": self.hidden_count()}))
+                let view = self.view_name();
+                Ok(json!({
+                    "status": "view applied",
+                    "hidden": self.hidden_count(),
+                    "view": view,
+                    "note": view.map(|n| format!(
+                        "the saved view \"{n}\" now stores this filter; activate All first to filter without changing a view"
+                    )),
+                }))
             }
             AgentCommand::SchemaSearch { provider, query } => {
                 let prov = provider.unwrap_or(self.project.settings.target_provider.clone());
@@ -590,6 +820,7 @@ impl TtgApp {
                 name,
                 description,
                 legend,
+                filter,
             } => {
                 let i = match view {
                     Some(n) => self.resolve_view(&n)?,
@@ -602,6 +833,8 @@ impl TtgApp {
                         return Err("a view needs a name".into());
                     }
                 }
+                // Parsed before anything is written, so a bad filter changes nothing.
+                let filter = filter.map(|f| self.parse_filter(f)).transpose()?;
                 let before = self.snapshot();
                 let v = &mut self.project.views[i];
                 if let Some(n) = name {
@@ -613,8 +846,18 @@ impl TtgApp {
                 if let Some(l) = legend {
                     v.legend = l;
                 }
+                if let Some(f) = &filter {
+                    v.filter = f.clone();
+                }
                 self.finish(before);
-                Ok(json!({"status": "view updated", "view": self.view_json(i)}))
+                // The canvas follows a filter written into the view it is showing.
+                if let Some(f) = filter {
+                    if self.active_view == Some(i) {
+                        self.filter = f;
+                    }
+                }
+                self.refresh_visibility();
+                Ok(json!({"status": "view updated", "hidden": self.hidden_count(), "view": self.view_json(i)}))
             }
             AgentCommand::ViewFit { view } => {
                 if let Some(n) = view {
@@ -705,20 +948,21 @@ impl TtgApp {
             } => self.with_view(view, |app| {
                 app.require_view("notes")?;
                 let anchor = anchor.map(|a| app.resolve_anchor(&a)).transpose()?;
-                let spot = app.annotation_spot(x, y);
+                let size = ttg_core::Size {
+                    w: w.unwrap_or(260).max(120),
+                    h: h.unwrap_or(120).max(60),
+                };
+                // An anchored note with no position of its own goes beside its anchor,
+                // not off the right-hand edge of the whole diagram.
+                let spot = match (&anchor, x, y) {
+                    (Some(a), None, None) => app.note_spot_beside(a, size),
+                    _ => app.annotation_spot(x, y),
+                };
                 let id = app
-                    .add_note(
-                        &title,
-                        &body,
-                        spot,
-                        ttg_core::Size {
-                            w: w.unwrap_or(260).max(120),
-                            h: h.unwrap_or(120).max(60),
-                        },
-                        anchor,
-                    )
+                    .add_note(&title, &body, spot, size, anchor)
                     .ok_or("could not add the note")?;
-                Ok(json!({"status": "note added", "id": id, "in_view": app.view_name()}))
+                let rect = app.note_rect(&id).map(|r| json!({"x": r.min.x, "y": r.min.y, "w": r.width(), "h": r.height()}));
+                Ok(json!({"status": "note added", "id": id, "at": rect, "in_view": app.view_name()}))
             }),
             AgentCommand::LogicalAdd {
                 view,
@@ -781,14 +1025,70 @@ impl TtgApp {
                 app.finish(before);
                 Ok(json!({"status": "removed", "in_view": app.view_name()}))
             }),
-            AgentCommand::ViewSave { name } => {
-                let before = self.snapshot();
-                self.project
+            AgentCommand::ViewSave { name, replace } => {
+                if name.trim().is_empty() {
+                    return Err("a view needs a name".into());
+                }
+                let existing = self
+                    .project
                     .views
-                    .push(ttg_core::View::new(&name, self.filter.clone()));
-                self.active_view = Some(self.project.views.len() - 1);
+                    .iter()
+                    .position(|v| v.name.eq_ignore_ascii_case(&name));
+                if existing.is_some() && !replace {
+                    return Err(format!(
+                        "a view named \"{name}\" already exists; pass replace: true to rewrite its \
+                         filter (its layout, groups, flows, notes and logical nodes are kept), or \
+                         choose another name"
+                    ));
+                }
+                let before = self.snapshot();
+                let i = match existing {
+                    Some(i) => {
+                        self.project.views[i].filter = self.filter.clone();
+                        i
+                    }
+                    None => {
+                        self.project
+                            .views
+                            .push(ttg_core::View::new(&name, self.filter.clone()));
+                        self.project.views.len() - 1
+                    }
+                };
+                self.active_view = Some(i);
                 self.finish(before);
-                Ok(json!({"status": "view saved", "name": name}))
+                self.refresh_visibility();
+                Ok(json!({
+                    "status": if existing.is_some() { "view replaced" } else { "view saved" },
+                    "name": self.project.views[i].name,
+                    "view": self.view_json(i),
+                }))
+            }
+            AgentCommand::ViewDelete { name } => {
+                let i = self.resolve_view(&name)?;
+                let before = self.snapshot();
+                let gone = self.project.views.remove(i);
+                let fell_back = match self.active_view {
+                    Some(a) if a == i => {
+                        self.active_view = None;
+                        self.filter = ttg_core::ViewFilter::default();
+                        true
+                    }
+                    // Everything after it shifted down by one.
+                    Some(a) if a > i => {
+                        self.active_view = Some(a - 1);
+                        false
+                    }
+                    _ => false,
+                };
+                self.finish(before);
+                self.refresh_visibility();
+                Ok(json!({
+                    "status": "view deleted",
+                    "name": gone.name,
+                    "active": self.view_name().unwrap_or_else(|| "All".into()),
+                    "fell_back_to_all": fell_back,
+                    "views": self.project.views.iter().map(|v| v.name.clone()).collect::<Vec<_>>(),
+                }))
             }
             AgentCommand::LayoutTidy { container } => {
                 let c = container.map(|x| self.resolve(&x)).transpose()?;

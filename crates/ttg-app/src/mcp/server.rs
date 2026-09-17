@@ -3,7 +3,7 @@
 //! Every tool forwards an [`AgentCommand`] to the UI thread and waits for the reply.
 //! The server itself holds no project state, so any number of sessions can share it.
 
-use super::{AgentCommand, AgentReply, ServerEvent, Started};
+use super::{AgentCommand, AgentReply, Heartbeat, ServerEvent, Started};
 use rmcp::{
     handler::server::{router::tool::ToolRouter, wrapper::Parameters},
     model::{
@@ -31,6 +31,9 @@ pub struct TtgServer {
     tx: mpsc::Sender<(AgentCommand, AgentReply)>,
     ctx: egui::Context,
     subs: Subscribers,
+    /// When the UI last drained the queue, so a blocked app is refused rather than
+    /// queued behind whatever is blocking it.
+    beat: Arc<Heartbeat>,
     /// One `TtgServer` per client session.
     session: u64,
     /// Read by the `#[tool_handler]`-generated `call_tool` / `list_tools`.
@@ -139,6 +142,7 @@ pub fn command_from_json(tool: &str, args: serde_json::Value) -> Result<AgentCom
                 entity: a.entity,
                 w: a.w,
                 h: a.h,
+                view: a.view,
             }
         }
         "entity_set_parent" => {
@@ -178,8 +182,15 @@ pub fn command_from_json(tool: &str, args: serde_json::Value) -> Result<AgentCom
             AgentCommand::ViewSet { filter: a.filter }
         }
         "view_save" => {
+            let a: ViewSaveArgs = parse(args)?;
+            AgentCommand::ViewSave {
+                name: a.name,
+                replace: a.replace.unwrap_or(false),
+            }
+        }
+        "view_delete" => {
             let a: NameArgs = parse(args)?;
-            AgentCommand::ViewSave { name: a.name }
+            AgentCommand::ViewDelete { name: a.name }
         }
         "view_activate" => {
             let a: NameArgs = parse(args)?;
@@ -242,6 +253,7 @@ pub fn command_from_json(tool: &str, args: serde_json::Value) -> Result<AgentCom
                 name: a.name,
                 description: a.description,
                 legend: a.legend,
+                filter: a.filter,
             }
         }
         "view_annotation_remove" => {
@@ -380,6 +392,9 @@ pub struct SchemaShowArgs {
 
 #[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
 pub struct MoveArgs {
+    #[schemars(
+        description = "Entity id or name, or — in the view — a note title, logical node name or group label"
+    )]
     pub entity: String,
     pub x: i32,
     pub y: i32,
@@ -391,9 +406,14 @@ pub struct MoveArgs {
 
 #[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
 pub struct ResizeArgs {
+    #[schemars(
+        description = "Entity id or name, or — in the view — a note title, logical node name or group label"
+    )]
     pub entity: String,
     pub w: i32,
     pub h: i32,
+    #[schemars(description = "View the annotation lives in; defaults to the active view")]
+    pub view: Option<String>,
 }
 
 #[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
@@ -432,7 +452,7 @@ pub struct LinkRemoveArgs {
 #[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
 pub struct ViewSetArgs {
     #[schemars(
-        description = "Filter object: { categories: [..], relations: [..], focus: entity, depth: n, hidden: [..], only: [..], containers: bool, providers: [\"aws\"], origin: \"all\"|\"curated\"|\"native\", types: [\"subnet\"], name_glob: \"jobs*\" (case-insensitive, `*` and `?`), hide_edges: bool (draw no structural links, for a pure data-flow view) }. Empty object shows everything"
+        description = "Filter object: { categories: [..], relations: [..], focus: entity, depth: n, hidden: [..], only: [..], containers: bool, providers: [\"aws\"], origin: \"all\"|\"curated\"|\"native\", types: [\"subnet\"], name_glob: \"jobs*\" (case-insensitive, `*` and `?`), hide_edges: bool, spelt `hide_links` too (draw no structural links, for a pure data-flow view) }. Empty object shows everything"
     )]
     pub filter: serde_json::Value,
 }
@@ -440,6 +460,15 @@ pub struct ViewSetArgs {
 #[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
 pub struct NameArgs {
     pub name: String,
+}
+
+#[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
+pub struct ViewSaveArgs {
+    pub name: String,
+    #[schemars(
+        description = "Overwrite the filter of the view that already has this name, keeping its layout, groups, flows, notes and logical nodes. Without it a name already in use is refused"
+    )]
+    pub replace: Option<bool>,
 }
 
 /// The view a drawing command lands in; the active one when omitted.
@@ -465,6 +494,10 @@ pub struct ViewUpdateArgs {
     pub description: Option<String>,
     #[schemars(description = "Show the legend panel on this view")]
     pub legend: Option<bool>,
+    #[schemars(
+        description = "Replace the view's saved filter (same object as view_set, names allowed in focus/hidden/only). The canvas follows when this view is active"
+    )]
+    pub filter: Option<serde_json::Value>,
 }
 
 #[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
@@ -560,6 +593,12 @@ pub struct ScreenshotArgs {
         description = "Hide the palette, inspector and agent window for the frame so the canvas fills the image"
     )]
     pub hide_panels: Option<bool>,
+    #[schemars(
+        description = "Resize the window to this width in points for the capture, then put it back. 320-4096; the OS may clamp it to the display, so the reply reports the size actually captured. Use it when a fitted view is too small to read"
+    )]
+    pub width: Option<u32>,
+    #[schemars(description = "Window height for the capture; see `width`")]
+    pub height: Option<u32>,
 }
 
 #[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
@@ -622,20 +661,60 @@ pub struct ExportArgs {
 
 // ------------------------------------------------------------------ tools
 
+/// How long the UI may go without draining before a command is refused instead of
+/// queued, and how long we then give it to prove it is merely idle.
+const STALE: Duration = Duration::from_secs(3);
+const WAKE: Duration = Duration::from_millis(600);
+
 impl TtgServer {
-    pub fn new(tx: mpsc::Sender<(AgentCommand, AgentReply)>, ctx: egui::Context, subs: Subscribers) -> Self {
+    pub fn new(
+        tx: mpsc::Sender<(AgentCommand, AgentReply)>,
+        ctx: egui::Context,
+        subs: Subscribers,
+        beat: Arc<Heartbeat>,
+    ) -> Self {
         TtgServer {
             tx,
             ctx,
             subs,
+            beat,
             session: SESSIONS.fetch_add(1, Ordering::Relaxed),
             tool_router: Self::tool_router(),
         }
     }
 
+    /// Refuse up front when the UI thread is stuck inside something long, so the
+    /// command is never queued behind it: a queued command outlives the call that
+    /// asked for it, and the retry that follows applies the work a second time.
+    ///
+    /// An idle app has not drained either — it only wakes on `request_repaint` — so a
+    /// stale heartbeat first buys it [`WAKE`] to answer before we believe it.
+    async fn refuse_if_busy(&self) -> Result<(), String> {
+        let Some((_, busy)) = self.beat.stalled(STALE) else {
+            return Ok(());
+        };
+        if busy.is_none() {
+            self.ctx.request_repaint();
+            let deadline = tokio::time::Instant::now() + WAKE;
+            while tokio::time::Instant::now() < deadline {
+                if self.beat.stalled(STALE).is_none() {
+                    return Ok(());
+                }
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+        }
+        let (since, busy) = self.beat.since_drain();
+        Err(format!(
+            "the app is busy{}; nothing was queued, retry in a moment (it last answered {:.0}s ago)",
+            busy.map(|b| format!(": {b}")).unwrap_or_default(),
+            since.as_secs_f32()
+        ))
+    }
+
     /// Queue a command for the UI thread and wait for its answer. Writes get a long
     /// timeout because the user may be looking at an Allow / Deny prompt.
     async fn exec(&self, cmd: AgentCommand) -> Result<serde_json::Value, String> {
+        self.refuse_if_busy().await?;
         let secs = if cmd.is_write() { 600 } else { 60 };
         let (reply_tx, reply_rx) = tokio::sync::oneshot::channel();
         if self.tx.send((cmd, reply_tx)).is_err() {
@@ -645,7 +724,11 @@ impl TtgServer {
         match tokio::time::timeout(Duration::from_secs(secs), reply_rx).await {
             Ok(Ok(r)) => r,
             Ok(Err(_)) => Err("the app dropped the request".into()),
-            Err(_) => Err("timed out waiting for the app (is a dialog or an approval prompt open?)".into()),
+            Err(_) => Err(
+                "timed out waiting for the app (is a dialog or an approval prompt open?); \
+                 the queued command is dropped rather than applied late, so it is safe to retry"
+                    .into(),
+            ),
         }
     }
 
@@ -771,23 +854,35 @@ impl TtgServer {
     }
 
     #[tool(
-        description = "A PNG screenshot of the app window (base64 in `data`). With `view` it switches to that view first, `fit` frames its content, and `hide_panels` drops the side panels so the canvas fills the image. Use it to look at what you have drawn."
+        description = "A PNG screenshot of the app window (base64 in `data`). With `view` it switches to that view first, `fit` frames its content, and `hide_panels` drops the side panels so the canvas fills the image. `width`/`height` resize the window for the capture and put it back afterwards (the fit happens at the new size, so a big view stays readable); the OS may clamp the request to the display, so the reply's metadata reports the size actually captured alongside the one asked for. Use it to look at what you have drawn."
     )]
     async fn screenshot(&self, Parameters(a): Parameters<ScreenshotArgs>) -> CallToolResult {
+        if let Err(e) = self.refuse_if_busy().await {
+            return fail(e);
+        }
         let (reply_tx, reply_rx) = tokio::sync::oneshot::channel();
+        let resized = a.width.is_some() || a.height.is_some();
         let cmd = AgentCommand::Screenshot {
             fit: a.fit.unwrap_or(false),
             view: a.view,
             hide_panels: a.hide_panels.unwrap_or(false),
+            width: a.width,
+            height: a.height,
         };
         if self.tx.send((cmd, reply_tx)).is_err() {
             return fail("the app is shutting down");
         }
         self.ctx.request_repaint();
-        match tokio::time::timeout(Duration::from_secs(15), reply_rx).await {
+        // A resize needs a few more frames (and a window manager round trip).
+        let wait = if resized { 30 } else { 15 };
+        match tokio::time::timeout(Duration::from_secs(wait), reply_rx).await {
             Ok(Ok(Ok(v))) => {
                 let data = v.get("data").and_then(|d| d.as_str()).unwrap_or("").to_string();
-                let meta = serde_json::json!({"width": v["width"], "height": v["height"]});
+                let meta = serde_json::json!({
+                    "width": v["width"],
+                    "height": v["height"],
+                    "asked_for": v["asked_for"],
+                });
                 CallToolResult::success(vec![
                     Content::image(data, "image/png"),
                     Content::text(meta.to_string()),
@@ -832,7 +927,7 @@ impl TtgServer {
     }
 
     #[tool(
-        description = "Move an entity to a canvas position (containers move with their contents). Lands in the view's own layout when one is active; pass `view` to arrange a named view without switching to it."
+        description = "Move an entity to a canvas position (containers move with their contents). Lands in the view's own layout when one is active; pass `view` to arrange a named view without switching to it. It also moves a view's annotations — a note, a logical node or a grouping box, addressed by id, title, name or label — to that position; a group keeps its membership geometric, so moving the box does not drag what was inside it. The reply says which `kind` it moved."
     )]
     async fn entity_move(&self, Parameters(a): Parameters<MoveArgs>) -> CallToolResult {
         self.run(AgentCommand::EntityMove {
@@ -844,12 +939,15 @@ impl TtgServer {
         .await
     }
 
-    #[tool(description = "Resize a node or container.")]
+    #[tool(
+        description = "Resize a node or container, or one of a view's annotations (note, logical node, grouping box). The reply says which `kind` it resized."
+    )]
     async fn entity_resize(&self, Parameters(a): Parameters<ResizeArgs>) -> CallToolResult {
         self.run(AgentCommand::EntityResize {
             entity: a.entity,
             w: a.w,
             h: a.h,
+            view: a.view,
         })
         .await
     }
@@ -904,16 +1002,29 @@ impl TtgServer {
             .await
     }
 
-    #[tool(description = "Apply a canvas filter (what is shown); does not affect what is generated.")]
+    #[tool(
+        description = "Apply a canvas filter (what is shown); does not affect what is generated. While a saved view is active this writes the filter into that view — the same thing the filter menu does in the app — so the view keeps showing what you last set; the reply names the view it changed. To filter without touching a saved view, switch to All (view_activate) first."
+    )]
     async fn view_set(&self, Parameters(a): Parameters<ViewSetArgs>) -> CallToolResult {
         self.run(AgentCommand::ViewSet { filter: a.filter }).await
     }
 
     #[tool(
-        description = "Save the current filter as a named view tab in the project. New views own their layout: moves made while the view is active do not affect other views."
+        description = "Save the current filter as a named view tab in the project. New views own their layout: moves made while the view is active do not affect other views. A name that is already taken (case-insensitively) is refused unless `replace` is true, which rewrites that view's filter and leaves its layout, groups, flows, notes and logical nodes alone."
     )]
-    async fn view_save(&self, Parameters(a): Parameters<NameArgs>) -> CallToolResult {
-        self.run(AgentCommand::ViewSave { name: a.name }).await
+    async fn view_save(&self, Parameters(a): Parameters<ViewSaveArgs>) -> CallToolResult {
+        self.run(AgentCommand::ViewSave {
+            name: a.name,
+            replace: a.replace.unwrap_or(false),
+        })
+        .await
+    }
+
+    #[tool(
+        description = "Delete a saved view and everything it holds (layout, groups, flows, notes, logical nodes) as one undo step. The canvas falls back to All when it was the active view."
+    )]
+    async fn view_delete(&self, Parameters(a): Parameters<NameArgs>) -> CallToolResult {
+        self.run(AgentCommand::ViewDelete { name: a.name }).await
     }
 
     #[tool(
@@ -931,7 +1042,7 @@ impl TtgServer {
     }
 
     #[tool(
-        description = "Rename a view, set the description shown under the view bar (and at the top of its export), or turn its legend panel on."
+        description = "Rename a view, set the description shown under the view bar (and at the top of its export), turn its legend panel on, or replace its saved filter. `filter` takes the same object as view_set and replaces the view's stored one outright; the canvas follows when that view is active."
     )]
     async fn view_update(&self, Parameters(a): Parameters<ViewUpdateArgs>) -> CallToolResult {
         self.run(AgentCommand::ViewUpdate {
@@ -939,6 +1050,7 @@ impl TtgServer {
             name: a.name,
             description: a.description,
             legend: a.legend,
+            filter: a.filter,
         })
         .await
     }
@@ -962,7 +1074,7 @@ impl TtgServer {
     }
 
     #[tool(
-        description = "Add a grouping box to a view: an architecture-map annotation, never exported. Resources whose centre is inside it count as members and move with it; a box drawn inside another nests."
+        description = "Add a grouping box to a view: an architecture-map annotation, never exported. Membership is geometric: a resource, logical node or box whose CENTRE falls inside this one belongs to it, and for one box to nest inside another its centre must be inside and its area smaller (view_get reports that as `nested_in` / `parent`, and the Markdown export as the Inside column). Members move when you drag the box on the canvas."
     )]
     async fn view_group_add(&self, Parameters(a): Parameters<GroupAddArgs>) -> CallToolResult {
         self.run(AgentCommand::GroupAdd {
@@ -1303,7 +1415,7 @@ impl ServerHandler for TtgServer {
              you make it and every write is one undo step. Start with project_summary and \
              catalog_types. Entities can be addressed by id or by display name. Never call \
              project_save without the user asking. Prefer entity_set_parent over explicit \
-             network_membership links to containers: containment implies membership. One              diagram serves every provider: tag an entity or link with `providers` to keep it              out of the other provider's export (provider-only types are tagged automatically).              Curated types cover the portable concepts; for anything else use schema_search and add              a native resource (`native:<provider>:<type>`), setting its arguments via              entity_update.extra. Extra arguments on curated types add or override provider              arguments and are validated against the schema. Use project_apply to make several              writes as one undo step, project_changes (or a subscription to ttg://project) to notice              the user's own edits, and export_diff before export_run to show what would change. Some              writes (saving, opening, exporting, deleting) may wait for the user's approval; while a              prompt is open, reads keep answering (writes queue up behind it in arrival order).              `terratofu-gui --serve --port N --token T [project]` runs the same server headless, with              no window and no approval prompts, for scripting and CI.",
+             network_membership links to containers: containment implies membership. One              diagram serves every provider: tag an entity or link with `providers` to keep it              out of the other provider's export (provider-only types are tagged automatically).              Curated types cover the portable concepts; for anything else use schema_search and add              a native resource (`native:<provider>:<type>`), setting its arguments via              entity_update.extra. Extra arguments on curated types add or override provider              arguments and are validated against the schema. Use project_apply to make several              writes as one undo step, project_changes (or a subscription to ttg://project) to notice              the user's own edits, and export_diff before export_run to show what would change. Some              writes (saving, opening, exporting, deleting) may wait for the user's approval; while a              prompt is open, reads keep answering (writes queue up behind it in arrival order).              A call that comes back \"the app is busy\" was never queued and a call that times out              is dropped rather than applied late, so either is safe to retry once; nothing is ever              applied twice.              Views: view_set while a saved view is active rewrites that view's filter (use              view_activate All first to filter without touching it), view_update takes a filter of              its own, view_save refuses a name already in use unless replace is true, and              view_delete removes one.              `terratofu-gui --serve --port N --token T [project]` runs the same server headless, with              no window and no approval prompts, for scripting and CI.",
         )
     }
 }
@@ -1316,6 +1428,7 @@ pub fn run(
     token: String,
     tx: mpsc::Sender<(AgentCommand, AgentReply)>,
     ctx: egui::Context,
+    beat: Arc<Heartbeat>,
     started: mpsc::Sender<Result<Started, String>>,
 ) {
     use rmcp::transport::streamable_http_server::{
@@ -1352,7 +1465,14 @@ pub fn run(
         let subs: Subscribers = Arc::new(Mutex::new(Vec::new()));
         let subs_for_service = subs.clone();
         let service = StreamableHttpService::new(
-            move || Ok(TtgServer::new(tx.clone(), ctx.clone(), subs_for_service.clone())),
+            move || {
+                Ok(TtgServer::new(
+                    tx.clone(),
+                    ctx.clone(),
+                    subs_for_service.clone(),
+                    beat.clone(),
+                ))
+            },
             std::sync::Arc::new(LocalSessionManager::default()),
             config,
         );

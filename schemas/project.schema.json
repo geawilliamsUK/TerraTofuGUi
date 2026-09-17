@@ -627,7 +627,7 @@
           "type": "string"
         },
         "hide_edges": {
-          "description": "Hide the structural links, so a view shows only its data-flow arrows.",
+          "description": "Hide the structural links, so a view shows only its data-flow arrows.\n`hide_links` is accepted as a spelling of the same flag: agents reach for it,\nand a filter that silently dropped the key would draw the wrong picture.",
           "type": "boolean"
         }
       }

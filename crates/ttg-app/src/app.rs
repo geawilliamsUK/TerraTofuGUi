@@ -69,6 +69,12 @@ pub struct ExportUi {
     pub root: bool,
     pub results: Vec<(String, Result<ttg_codegen::ExportReport, String>)>,
     pub validate: Vec<(String, String)>,
+    /// Providers whose `init && validate` is running on the background thread, in the
+    /// order they were started. `init` alone can take minutes, so it never runs on the
+    /// UI thread: that froze egui, and with it the agent command queue.
+    pub validating: Vec<String>,
+    /// Outcomes coming back from that thread, polled once a frame.
+    pub validate_rx: Option<std::sync::mpsc::Receiver<(String, String)>>,
     /// Last "preview changes" result: provider and per-file diffs.
     pub diff: Option<(String, Vec<ttg_codegen::diff::FileDiff>)>,
     pub diff_open: bool,
@@ -805,11 +811,28 @@ impl TtgApp {
         self.status = "New project".into();
     }
 
+    /// Run something long that keeps the UI thread out of `update` — a modal file
+    /// dialog, an export — telling the MCP server what it is stuck on. A tool call
+    /// that arrives meanwhile is refused with that reason instead of queued behind it,
+    /// where it would be applied long after its caller had given up and retried.
+    pub fn busy_while<T>(&self, what: &str, f: impl FnOnce() -> T) -> T {
+        // Nobody is listening in a build without the server.
+        let _ = what;
+        #[cfg(feature = "mcp")]
+        self.mcp.heartbeat.set_busy(Some(what));
+        let out = f();
+        #[cfg(feature = "mcp")]
+        self.mcp.heartbeat.set_busy(None);
+        out
+    }
+
     pub fn open_dialog(&mut self) {
-        if let Some(p) = rfd::FileDialog::new()
-            .add_filter("TerraTofu project", &["json"])
-            .pick_file()
-        {
+        let picked = self.busy_while("a file-picker dialog is open", || {
+            rfd::FileDialog::new()
+                .add_filter("TerraTofu project", &["json"])
+                .pick_file()
+        });
+        if let Some(p) = picked {
             self.open_path(p);
         }
     }
@@ -849,7 +872,7 @@ impl TtgApp {
         if let Some(dir) = self.path.as_ref().and_then(|p| p.parent()) {
             d = d.set_directory(dir);
         }
-        if let Some(p) = d.save_file() {
+        if let Some(p) = self.busy_while("a save dialog is open", || d.save_file()) {
             self.save_to(p);
         }
     }
@@ -870,37 +893,41 @@ impl TtgApp {
 
     pub fn export_single(&mut self) {
         let provider = self.project.settings.target_provider.clone();
-        let Some(dir) = rfd::FileDialog::new()
-            .set_title(format!("Export {provider} project to folder"))
-            .pick_folder()
-        else {
+        let Some(dir) = self.busy_while("a folder-picker dialog is open", || {
+            rfd::FileDialog::new()
+                .set_title(format!("Export {provider} project to folder"))
+                .pick_folder()
+        }) else {
             return;
         };
         let tool = self.project.settings.tool;
-        let r = ttg_codegen::export(&self.project, &self.catalog, &provider, tool, &dir)
-            .map_err(|e| e.to_string());
+        let r = self.busy_while(&format!("writing the {provider} export"), || {
+            ttg_codegen::export(&self.project, &self.catalog, &provider, tool, &dir)
+                .map_err(|e| e.to_string())
+        });
         self.export = ExportUi {
             open: true,
             dir: Some(dir),
             results: vec![(provider, r)],
-            validate: Vec::new(),
             root: false,
-            diff: None,
-            diff_open: false,
-            diff_show_unchanged: false,
+            ..Default::default()
         };
     }
 
     pub fn export_all(&mut self) {
-        let Some(dir) = rfd::FileDialog::new()
-            .set_title("Export one project per provider into folder")
-            .pick_folder()
-        else {
+        let Some(dir) = self.busy_while("a folder-picker dialog is open", || {
+            rfd::FileDialog::new()
+                .set_title("Export one project per provider into folder")
+                .pick_folder()
+        }) else {
             return;
         };
         let tool = self.project.settings.tool;
-        let results = ttg_codegen::export_all(&self.project, &self.catalog, tool, &dir);
-        let _ = ttg_codegen::bundle::write_bundle_readme(&dir, &self.project.name, &results);
+        let results = self.busy_while("writing one export per provider", || {
+            let results = ttg_codegen::export_all(&self.project, &self.catalog, tool, &dir);
+            let _ = ttg_codegen::bundle::write_bundle_readme(&dir, &self.project.name, &results);
+            results
+        });
         self.export = ExportUi {
             open: true,
             dir: Some(dir),
@@ -908,11 +935,8 @@ impl TtgApp {
                 .into_iter()
                 .map(|(p, r)| (p, r.map_err(|e| e.to_string())))
                 .collect(),
-            validate: Vec::new(),
             root: true,
-            diff: None,
-            diff_open: false,
-            diff_show_unchanged: false,
+            ..Default::default()
         };
     }
 
@@ -923,10 +947,11 @@ impl TtgApp {
         let dir = match self.export.dir.clone() {
             Some(d) if d.is_dir() => d,
             _ => {
-                let Some(d) = rfd::FileDialog::new()
-                    .set_title(format!("Folder of a previous {provider} export to compare with"))
-                    .pick_folder()
-                else {
+                let Some(d) = self.busy_while("a folder-picker dialog is open", || {
+                    rfd::FileDialog::new()
+                        .set_title(format!("Folder of a previous {provider} export to compare with"))
+                        .pick_folder()
+                }) else {
                     return;
                 };
                 self.export.root = false;
@@ -959,17 +984,74 @@ impl TtgApp {
         }
     }
 
+    /// Start `<tool> init && validate` for every exported provider on a background
+    /// thread. The panel shows "validating…" per provider and [`poll_validate`] picks
+    /// the outcomes up a frame at a time, so the UI (and the agent command queue it
+    /// drains) keeps running through the minutes this can take.
     pub fn run_validate(&mut self) {
+        if self.export.validate_rx.is_some() {
+            return;
+        }
         let tool = self.project.settings.tool;
+        let jobs: Vec<(String, std::path::PathBuf)> = self
+            .export
+            .results
+            .iter()
+            .filter_map(|(pid, r)| r.as_ref().ok().map(|rep| (pid.clone(), rep.out_dir.clone())))
+            .collect();
+        if jobs.is_empty() {
+            return;
+        }
         self.export.validate.clear();
-        let mut outcomes = Vec::new();
-        for (pid, r) in &self.export.results {
-            if let Ok(rep) = r {
-                let o = ttg_codegen::validate::run(&rep.out_dir, tool);
-                outcomes.push((pid.clone(), o.summary()));
+        self.export.validating = jobs.iter().map(|(pid, _)| pid.clone()).collect();
+        let (tx, rx) = std::sync::mpsc::channel();
+        self.export.validate_rx = Some(rx);
+        let started = std::thread::Builder::new()
+            .name("ttg-validate".into())
+            .spawn(move || {
+                for (pid, dir) in jobs {
+                    let out = ttg_codegen::validate::run(&dir, tool).summary();
+                    if tx.send((pid, out)).is_err() {
+                        return;
+                    }
+                }
+            });
+        if let Err(e) = started {
+            self.export.validating.clear();
+            self.export.validate_rx = None;
+            self.error = Some(format!("Could not start validation: {e}"));
+            return;
+        }
+        self.status = "Validating the export in the background…".into();
+    }
+
+    /// Collect whatever the validate thread has finished. Called once a frame.
+    pub fn poll_validate(&mut self, ctx: &egui::Context) {
+        let Some(rx) = &self.export.validate_rx else {
+            return;
+        };
+        let mut done = Vec::new();
+        loop {
+            match rx.try_recv() {
+                Ok(v) => done.push(v),
+                Err(std::sync::mpsc::TryRecvError::Empty) => break,
+                Err(std::sync::mpsc::TryRecvError::Disconnected) => {
+                    self.export.validate_rx = None;
+                    self.export.validating.clear();
+                    break;
+                }
             }
         }
-        self.export.validate = outcomes;
+        for (pid, out) in done {
+            self.export.validating.retain(|p| p != &pid);
+            self.export.validate.push((pid, out));
+        }
+        if self.export.validate_rx.is_some() {
+            // Keep asking until the thread is done, even with no input to wake us.
+            ctx.request_repaint_after(std::time::Duration::from_millis(200));
+        } else if !self.export.validate.is_empty() {
+            self.status = "Validation finished".into();
+        }
     }
 
     pub fn tool_binary_available(&self) -> bool {
@@ -1311,13 +1393,34 @@ impl TtgApp {
     }
 }
 
+/// `TTG_WINDOW_SIZE=WxH`: the inner size the window should take, clamped the way the
+/// `screenshot` tool clamps its `width`/`height`. Documentation shots use it so a
+/// `--screenshot` run is not stuck with whatever size the window happens to open at.
+/// The window manager may still clamp the request to the display.
+pub fn window_size_env() -> Option<[f32; 2]> {
+    let raw = std::env::var("TTG_WINDOW_SIZE").ok()?;
+    let (w, h) = raw.split_once(['x', 'X'])?;
+    let pick = |s: &str| s.trim().parse::<f32>().ok().map(|v| v.clamp(320.0, 4096.0));
+    Some([pick(w)?, pick(h)?])
+}
+
 impl TtgApp {
     fn screenshot_mode(&mut self, ctx: &egui::Context) {
         let Some(path) = self.screenshot.clone() else {
             return;
         };
         self.frame_no += 1;
-        if self.frame_no == 3 {
+        // Some window managers ignore the size a window asks for when it is created,
+        // so `--screenshot` resizes at runtime exactly as the `screenshot` tool does,
+        // and everything after it waits for the new size before framing the content.
+        let resized = window_size_env();
+        if self.frame_no == 1 {
+            if let Some([w, h]) = resized {
+                ctx.send_viewport_cmd(egui::ViewportCommand::InnerSize(egui::vec2(w, h)));
+            }
+        }
+        let settle = if resized.is_some() { 6 } else { 0 };
+        if self.frame_no == 3 + settle {
             // Select something so the inspector is populated: TTG_SELECT_NAME=<name>,
             // TTG_SELECT=<resource type> (default compute_instance), or TTG_SELECT=none.
             let by_name = std::env::var("TTG_SELECT_NAME").ok();
@@ -1356,7 +1459,7 @@ impl TtgApp {
             self.hide_panels = std::env::var("TTG_HIDE_PANELS").is_ok();
             self.fit_requested = true;
         }
-        if self.frame_no == 8 {
+        if self.frame_no == 8 + settle {
             ctx.send_viewport_cmd(egui::ViewportCommand::Screenshot(Default::default()));
         }
         let image = ctx.input(|i| {
@@ -1381,6 +1484,7 @@ impl TtgApp {
 impl eframe::App for TtgApp {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         self.refresh_diagnostics();
+        self.poll_validate(ctx);
         self.screenshot_mode(ctx);
         #[cfg(feature = "mcp")]
         self.drain_agent_commands(ctx);

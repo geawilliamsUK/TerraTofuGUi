@@ -280,14 +280,19 @@ watch it happen. It is off until you switch it on:
    shows what the agent did. Saving to disk only happens when a tool is explicitly asked
    to, and opening another file goes through the same unsaved-changes prompt as the menu.
 
-The 46 tools cover reading (project, catalog, diagnostics, reachability, export preview,
+The 47 tools cover reading (project, catalog, diagnostics, reachability, export preview,
 export diff, `view_get`, `view_export`, screenshot) and editing (add/update/move/resize/
 reparent/delete entities, links, selection, views, tidy/align/distribute, settings,
 save/open/new, export with optional validate, undo/redo). An agent documents a view the
 way you would: `view_group_add`, `view_flow_add` (with `step` and `color`),
 `view_note_add`, `view_logical_add` and `view_annotation_remove` all take an optional
 `view`, so a whole map can be drawn in one `project_apply` without switching tabs, and
-`view_fit` plus `screenshot { view, fit, hide_panels }` let it look at what it drew.
+`entity_move` / `entity_resize` arrange the annotations as well as the resources. Views
+themselves are editable: `view_save { replace }` rewrites a saved filter without
+disturbing the drawing on it, `view_update { filter }` does the same by name, and
+`view_delete` removes one. `view_fit` plus `screenshot { view, fit, hide_panels, width,
+height }` let it look at what it drew — the window is resized for the capture and put
+back, so a big view is readable however small the window was.
 `project_apply` runs a list of diagram writes as **one**
 undo step and rolls all of them back if any fails; `project_changes` (or a subscription
 to the `ttg://project` resource) tells the agent when *you* changed something. The
@@ -298,7 +303,11 @@ default saving, opening, starting a new project and writing an export pop an
 Allow / Deny prompt; deleting entities or links can be added (removing an annotation
 never needs approval - groups and flows are never exported). A prompt does not stall the
 agent: reads keep answering while one is open, and further writes queue up behind it in
-order rather than jumping ahead. Only localhost can connect and every request needs the
+order rather than jumping ahead. Nothing is ever applied twice: a call that comes back
+"the app is busy" was never queued, and a call that times out has its command dropped
+rather than applied minutes later, so a retry is always safe. Long jobs stay off the UI
+thread - `Run validate` in the export panel shows "validating…" per provider while
+`init` runs in the background. Only localhost can connect and every request needs the
 bearer token. `terratofu-gui --serve --port N --token T [project]` runs the same server
 without a window (no screenshots, no prompts) for CI and scripted editing; the headless
 integration test in `crates/ttg-app/tests` drives it that way. The feature is the `mcp`

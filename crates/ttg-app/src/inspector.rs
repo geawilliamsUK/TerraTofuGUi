@@ -1360,9 +1360,14 @@ pub fn export_ui(app: &mut TtgApp, ui: &mut Ui) {
     ui.horizontal(|ui| {
         let bin = ttg_codegen::Profile::new(app.project.settings.tool).binary();
         let available = app.tool_binary_available();
+        let running = app.export.validate_rx.is_some();
         if ui
-            .add_enabled(available, egui::Button::new(format!("Run `{bin} validate`")))
-            .on_disabled_hover_text(format!("`{bin}` was not found on PATH. Run `{bin} init -backend=false && {bin} validate` in the export folder."))
+            .add_enabled(available && !running, egui::Button::new(format!("Run `{bin} validate`")))
+            .on_disabled_hover_text(if running {
+                format!("`{bin} init && validate` is already running in the background.")
+            } else {
+                format!("`{bin}` was not found on PATH. Run `{bin} init -backend=false && {bin} validate` in the export folder.")
+            })
             .clicked()
         {
             app.run_validate();
@@ -1380,6 +1385,19 @@ pub fn export_ui(app: &mut TtgApp, ui: &mut Ui) {
     });
     for (pid, out) in &app.export.validate {
         ui.label(RichText::new(format!("[{pid}] {out}")).monospace().small());
+    }
+    // Validation runs off the UI thread, so the window keeps painting (and the agent
+    // command queue keeps draining) while `init` downloads providers.
+    for pid in &app.export.validating {
+        ui.horizontal(|ui| {
+            ui.add(egui::Spinner::new().size(12.0));
+            ui.label(
+                RichText::new(format!("[{pid}] validating…"))
+                    .monospace()
+                    .small()
+                    .color(Color32::from_gray(120)),
+            );
+        });
     }
 }
 
