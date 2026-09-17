@@ -44,7 +44,7 @@ type = "cidr"                 # string | bool | int | cidr | enum | string_list
 required = true
 default = "10.0.1.0/24"       # optional; must itself pass validation
 description = "…"             # tooltip
-options = ["a", "b"]          # enum only
+options = ["a", "b"]          # enum: the only allowed values
 pattern = "^[a-z0-9-]+$"      # optional regex (string only); no look-around
 pattern_hint = "lowercase…"   # shown when the pattern fails
 ```
@@ -230,6 +230,12 @@ name = "port"
 type = "int"
 ```
 
+**Restricted list values.** `options = [ "GET", "HEAD", "PUT" ]` on a `type = "string_list"`
+field restricts every entry to that set, the same way it restricts an `enum`'s single
+value; an empty `options` (the default) still means "any string". Object Storage's
+`cors_methods` uses it to keep a CORS rule to the HTTP methods a bucket can actually
+answer.
+
 **Repeated blocks.** `for_each_field = "rules"` on a `[[…blocks]]`, `[[…data]]` or
 `[[…nested]]` entry emits one block per row (or per entry of a `string_list`, whose row has
 a single item `value`). Top-level repeated resources are named `<slug>_<key>_<n>`. Inside:
@@ -347,12 +353,16 @@ them on any block.
 Terraform and OpenTofu) to hold a value other resources reference, e.g. the network tag
 a GCP security group hands to its members; the schema check skips it.
 
-**String-prefix conditions.** `{ field = "x", starts_with = "sg-" }` /
+**String-prefix / suffix conditions.** `{ field = "x", starts_with = "sg-" }` /
 `not_starts_with = "…"` test the resolved value's prefix (ignored when `equals` /
 `not_equals` is also given). Add `transform = "slug" | "kebab" | "lower" | "alnum"` to
 normalise the value first, e.g. to the kebab-cased form the mapping actually emits before
 checking it against a provider naming rule. `field = "name"` is the entity's display name,
-same as in an argument source or a template.
+same as in an argument source or a template. `ends_with` / `not_ends_with` test the
+suffix the same way, and both are also available on `provider_field` conditions (which
+have no `starts_with`/`transform`) — a database's Performance Insights check uses
+`{ provider_field = "instance_class", ends_with = ".micro" }` to catch an instance-class
+override that still lands on a size with no Performance Insights support.
 
 **Provider layers.** Every node, container and link in a project may carry
 `providers = ["azure"]` (empty = all). Codegen, diagnostics and reachability run on the

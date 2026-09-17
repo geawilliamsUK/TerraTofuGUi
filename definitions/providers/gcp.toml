@@ -31,6 +31,11 @@ type = "string"
 description = "Default zone for zonal resources (instances, disks)."
 default = "europe-west2-a"
 
+[[variables]]
+name = "billing_account"
+type = "string"
+description = "Billing account id a Budget watches by default (e.g. 012345-6789AB-CDEF01). Only needed when the project has a Budget node; a Budget's own Billing account id field overrides it. No default: leave it unset if nothing uses it."
+
 [provider_block.args]
 project = { var = "project" }
 region  = { var = "region" }

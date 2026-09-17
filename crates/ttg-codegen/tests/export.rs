@@ -2593,3 +2593,283 @@ fn other_providers_errors_are_reported_as_warnings() {
         "{others:?}"
     );
 }
+
+/// R2.11: a bucket receiving pre-signed browser uploads needs PUT (and often POST) on
+/// its CORS rule, not just the GET/HEAD every other bucket wants.
+#[test]
+fn object_storage_cors_methods_allow_a_put_upload() {
+    let cat = Catalog::builtin();
+    let mut p = example("hardened.ttg.json");
+    p.nodes.get_mut("obj-data").unwrap().config.insert(
+        "cors_methods".into(),
+        ttg_core::Value::List(vec!["GET".into(), "PUT".into()]),
+    );
+
+    let aws = norm(&generate(&p, &cat, "aws", Tool::OpenTofu).unwrap().files["storage.tf"]);
+    assert!(aws.contains("allowed_methods = [ \"GET\", \"PUT\" ]"), "{aws}");
+
+    let az = norm(&generate(&p, &cat, "azure", Tool::Terraform).unwrap().files["storage.tf"]);
+    assert!(az.contains("allowed_methods = [ \"GET\", \"PUT\" ]"), "{az}");
+
+    let gcp = norm(&generate(&p, &cat, "gcp", Tool::OpenTofu).unwrap().files["storage.tf"]);
+    assert!(gcp.contains("method = [ \"GET\", \"PUT\" ]"), "{gcp}");
+
+    // Cors_origins is set, so setting cors_methods raises no warning...
+    for provider in ["aws", "azure", "gcp"] {
+        let d = ttg_codegen::diagnostics::run(&p, &cat, provider);
+        assert!(
+            !d.iter().any(|x| x.message.contains("CORS allowed methods")),
+            "{provider}: {d:?}"
+        );
+    }
+
+    // ...but setting it on a bucket with no CORS allowed origins does, on every provider.
+    p.nodes
+        .get_mut("obj-audit")
+        .unwrap()
+        .config
+        .insert("cors_methods".into(), ttg_core::Value::List(vec!["PUT".into()]));
+    for provider in ["aws", "azure", "gcp"] {
+        let d = ttg_codegen::diagnostics::run(&p, &cat, provider);
+        assert!(
+            d.iter().any(|x| x
+                .message
+                .contains("sets CORS allowed methods with no CORS allowed origins")),
+            "{provider}: {d:?}"
+        );
+    }
+
+    // Without an override the default stays GET/HEAD, unaffected by the new field.
+    let default_bucket = example("hardened.ttg.json");
+    let aws = norm(
+        &generate(&default_bucket, &cat, "aws", Tool::OpenTofu)
+            .unwrap()
+            .files["storage.tf"],
+    );
+    assert!(aws.contains("allowed_methods = [ \"GET\", \"HEAD\" ]"), "{aws}");
+}
+
+/// R2.15: a Budget's 'Notifies topic' link (`bud-monthly` -> `tp-alerts` in
+/// operations.ttg.json) reaches a topic on every provider, each in its own idiom.
+#[test]
+fn budget_notifies_a_linked_topic() {
+    let cat = Catalog::builtin();
+    let p = example("operations.ttg.json");
+
+    // AWS: the topic arn joins the notification, and the topic's own policy grows a
+    // statement letting Budgets publish to it.
+    let aws = generate(&p, &cat, "aws", Tool::OpenTofu).unwrap();
+    let mon = squash(&aws.files["monitoring.tf"]);
+    assert!(
+        mon.contains("subscriber_sns_topic_arns = [ aws_sns_topic.ops_alerts.arn ]"),
+        "{mon}"
+    );
+    assert!(
+        mon.contains("subscriber_email_addresses = [ \"finance@example.com\" ]"),
+        "{mon}"
+    );
+    let srv = squash(&aws.files["serverless.tf"]);
+    assert!(
+        srv.contains("resource \"aws_sns_topic_policy\" \"ops_alerts_budget_policy\""),
+        "{srv}"
+    );
+    assert!(srv.contains("Sid = \"AllowBudgetsPublish\""), "{srv}");
+    assert!(srv.contains("Service = \"budgets.amazonaws.com\""), "{srv}");
+
+    // Azure: the topic maps to a Service Bus topic, which the budget cannot notify, so a
+    // manual step explains the Action Group route instead; the email notification is
+    // unaffected.
+    let az = generate(&p, &cat, "azure", Tool::OpenTofu).unwrap();
+    let mon = squash(&az.files["monitoring.tf"]);
+    assert!(
+        mon.contains("contact_emails = [ \"finance@example.com\" ]"),
+        "{mon}"
+    );
+    assert!(
+        az.manual_steps
+            .iter()
+            .any(|s| s.title.contains("does not notify an Azure budget")),
+        "{:?}",
+        az.manual_steps
+    );
+
+    // GCP: a second, `pubsub` notification channel joins the email one.
+    let gcp = generate(&p, &cat, "gcp", Tool::OpenTofu).unwrap();
+    let mon = squash(&gcp.files["monitoring.tf"]);
+    assert!(
+        mon.contains("resource \"google_monitoring_notification_channel\" \"monthly_spend_topic_channel\""),
+        "{mon}"
+    );
+    assert!(mon.contains("type = \"pubsub\""), "{mon}");
+    assert!(
+        mon.contains("labels = { topic = google_pubsub_topic.ops_alerts.id }"),
+        "{mon}"
+    );
+    assert!(
+        mon.contains(
+            "monitoring_notification_channels = [ google_monitoring_notification_channel.monthly_spend_channel.id, google_monitoring_notification_channel.monthly_spend_topic_channel.id ]"
+        ),
+        "{mon}"
+    );
+    assert!(
+        gcp.manual_steps.iter().any(|s| s
+            .title
+            .contains("Let Cloud Billing publish into the linked topic")),
+        "{:?}",
+        gcp.manual_steps
+    );
+
+    // Without notify_email, Azure has no way left to notify (email required unless a
+    // Topic link exists, which is not enough here), so it is now a hard error.
+    let mut p2 = p.clone();
+    p2.nodes
+        .get_mut("bud-monthly")
+        .unwrap()
+        .config
+        .remove("notify_email");
+    let err = generate(&p2, &cat, "azure", Tool::OpenTofu).unwrap_err();
+    assert!(
+        format!("{err:?}").contains("Azure budgets cannot notify"),
+        "{err:?}"
+    );
+    // AWS and GCP are unaffected: the topic alone is enough.
+    generate(&p2, &cat, "aws", Tool::OpenTofu).unwrap();
+    generate(&p2, &cat, "gcp", Tool::OpenTofu).unwrap();
+
+    // With neither an email nor a topic link, every provider refuses (required_unless).
+    let mut p3 = p2.clone();
+    p3.edges
+        .retain(|e| !(e.source == "bud-monthly" && e.relation == ttg_core::Relation::SendsTo));
+    let err = generate(&p3, &cat, "aws", Tool::OpenTofu).unwrap_err();
+    assert!(
+        format!("{err:?}").contains("required unless a 'Notifies topic' link exists"),
+        "{err:?}"
+    );
+}
+
+/// R2.15(b): the GCP billing account moves from a per-budget required field to a
+/// project-wide provider variable, with the per-budget field kept as an override so
+/// existing projects (like `operations.ttg.json`, which sets it per-node) still load and
+/// export unchanged.
+#[test]
+fn gcp_billing_account_is_a_provider_variable_with_a_per_budget_override() {
+    let cat = Catalog::builtin();
+
+    // Old projects: the per-node field still wins, unchanged. The provider variable is a
+    // top-level one (like Azure's `subscription_id`), so it is always declared in
+    // variables.tf regardless of whether any budget falls back to it — just with no
+    // `default` line here, since neither the field nor a project setting supplies one.
+    let p = example("operations.ttg.json");
+    let gcp = generate(&p, &cat, "gcp", Tool::OpenTofu).unwrap();
+    assert!(
+        squash(&gcp.files["monitoring.tf"]).contains("billing_account = \"012345-6789AB-CDEF01\""),
+        "{}",
+        gcp.files["monitoring.tf"]
+    );
+    let vars_tf = &gcp.files["variables.tf"];
+    assert!(vars_tf.contains("variable \"billing_account\""), "{vars_tf}");
+    let start = vars_tf.find("variable \"billing_account\"").unwrap();
+    let block = &vars_tf[start..start + vars_tf[start..].find("\n}").unwrap()];
+    assert!(
+        !block.lines().any(|l| l.trim_start().starts_with("default")),
+        "no project setting or field-level default is available here: {block}"
+    );
+
+    // New projects: no per-node override, just the project-wide variable, settable the
+    // same way `settings_set.provider_settings` sets it over MCP.
+    let mut p2 = p.clone();
+    p2.nodes
+        .get_mut("bud-monthly")
+        .unwrap()
+        .provider_config
+        .get_mut("gcp")
+        .unwrap()
+        .remove("billing_account");
+    p2.settings
+        .provider_settings
+        .entry("gcp".into())
+        .or_default()
+        .insert("billing_account".into(), "543210-BA9876-10FEDC".into());
+    let gcp2 = generate(&p2, &cat, "gcp", Tool::OpenTofu).unwrap();
+    assert!(
+        squash(&gcp2.files["monitoring.tf"]).contains("billing_account = var.billing_account"),
+        "{}",
+        gcp2.files["monitoring.tf"]
+    );
+    assert!(
+        gcp2.files["variables.tf"].contains("variable \"billing_account\""),
+        "{}",
+        gcp2.files["variables.tf"]
+    );
+    assert!(
+        gcp2.files["variables.tf"].contains("default     = \"543210-BA9876-10FEDC\"")
+            || gcp2.files["variables.tf"].contains("default = \"543210-BA9876-10FEDC\""),
+        "{}",
+        gcp2.files["variables.tf"]
+    );
+}
+
+/// R2.8: the "Performance Insights on the 'small' class" check only looks at the
+/// abstract `size`, so an `instance_class` override that picks a larger class still
+/// warns; the override might just as well be another `.micro` class with no PI support,
+/// which needs its own suffix-based check.
+#[test]
+fn relational_database_instance_class_override_affects_performance_insights_check() {
+    let cat = Catalog::builtin();
+    let mut p = example("three-tier.ttg.json");
+    let db = p.nodes.get_mut("db-3c4d5e6f").unwrap();
+    db.provider_config
+        .entry("aws".into())
+        .or_default()
+        .insert("performance_insights".into(), ttg_core::Value::Bool(true));
+
+    // Baseline: 'small' + Performance Insights, no override -> the size-based warning.
+    let d = ttg_codegen::diagnostics::run(&p, &cat, "aws");
+    assert!(
+        d.iter()
+            .any(|x| x.message.contains("Performance Insights on the 'small' class")),
+        "{d:?}"
+    );
+
+    // An instance class override that is not a `.micro` silences the size-based check
+    // and does not trigger the suffix-based one.
+    let mut large = p.clone();
+    large
+        .nodes
+        .get_mut("db-3c4d5e6f")
+        .unwrap()
+        .provider_config
+        .get_mut("aws")
+        .unwrap()
+        .insert(
+            "instance_class".into(),
+            ttg_core::Value::Str("db.m6g.large".into()),
+        );
+    let d = ttg_codegen::diagnostics::run(&large, &cat, "aws");
+    assert!(
+        !d.iter().any(|x| x.message.contains("Performance Insights")),
+        "{d:?}"
+    );
+
+    // An instance class override that is itself a `.micro` class re-raises the warning,
+    // this time from the suffix-based check.
+    let mut micro = p.clone();
+    micro
+        .nodes
+        .get_mut("db-3c4d5e6f")
+        .unwrap()
+        .provider_config
+        .get_mut("aws")
+        .unwrap()
+        .insert(
+            "instance_class".into(),
+            ttg_core::Value::Str("db.t4g.micro".into()),
+        );
+    let d = ttg_codegen::diagnostics::run(&micro, &cat, "aws");
+    assert!(
+        d.iter().any(|x| x
+            .message
+            .contains("Performance Insights on a .micro instance class override")),
+        "{d:?}"
+    );
+}

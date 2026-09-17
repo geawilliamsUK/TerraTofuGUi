@@ -36,13 +36,16 @@ dead-letter policy with the IAM the service agent needs); an **Alarm** picks its
 from a portable preset (queue depth, dead letters, 5xx, free storage, …) and refuses a
 preset the watched resource has no metric for rather than guessing; a **Virtual Network**
 can turn on flow logs; a **Container Registry** can hold several repositories; a **Topic**
-can subscribe a mailbox or a webhook; and **Budget** and **Audit Trail** put the monthly
-spend alert and the account's activity record on the canvas. See
+can subscribe a mailbox or a webhook, or receive a **Budget**'s threshold alert instead of
+(or alongside) an email; and **Budget** and **Audit Trail** put the monthly spend alert
+and the account's activity record on the canvas. See
 `examples/operations.ttg.json`.
 
 Security posture is part of the curated vocabulary rather than something to bolt on
 afterwards: buckets block public access and refuse plain HTTP by default, expire objects
-and unfinished uploads, and can log access to a second bucket; databases encrypt their
+and unfinished uploads, can log access to a second bucket, and restrict which HTTP
+methods a CORS rule answers (GET/HEAD by default, extendable to PUT for a pre-signed
+browser upload); databases encrypt their
 storage, keep backups and take a final snapshot before a destroy; queues, secrets, log
 groups and topics can all be linked to an **Encryption Key** with the *Encrypted with*
 relation, which becomes a KMS key with a usable key policy on AWS, a Key Vault key on

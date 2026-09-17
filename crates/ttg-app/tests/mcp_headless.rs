@@ -326,6 +326,25 @@ fn headless_server_tools_resources_and_batch() {
     assert_ne!(stored_id, "REF SG A", "the name must be resolved to an id: {upd}");
     assert!(!stored_id.is_empty(), "{upd}");
 
+    // R2.7: an empty string in a bare `entity_ref` clears the field, and inside a
+    // `struct_list` row it means "no reference" and is left as "" rather than being
+    // rejected as an unknown entity name — every example file stores rows this way.
+    let (err, upd) = c.call(
+        "entity_update",
+        json!({
+            "entity": "ref sg b",
+            "config": {"rules": [
+                {"name": "from-anywhere", "direction": "ingress", "protocol": "tcp", "from_port": 80, "to_port": 80, "cidr": "0.0.0.0/0", "source_group": ""}
+            ]},
+        }),
+    );
+    assert!(!err, "{upd}");
+    assert_eq!(
+        upd["entity"]["config"]["rules"][0]["source_group"],
+        json!(""),
+        "{upd}"
+    );
+
     // export_diff against an empty directory: everything is added, nothing written.
     let dir = std::env::temp_dir().join(format!("ttg-diff-{}", std::process::id()));
     let (err, diff) = c.call("export_diff", json!({"dir": dir.to_string_lossy()}));

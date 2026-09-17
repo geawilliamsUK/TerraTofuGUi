@@ -1,10 +1,12 @@
 # Abstract type: Topic (publish / subscribe fan-out)  (schema_version 2)
 #
 # A message published to the topic is delivered to every linked subscriber
-# ('Delivers to'): Event Queues (queue fan-out) and Functions (push delivery).
+# ('Delivers to'): Event Queues (queue fan-out) and Functions (push delivery). A Budget
+# may also publish here (its 'Notifies topic' link) instead of, or alongside, an email.
 #
 # AWS:   aws_sns_topic + one aws_sns_topic_subscription per subscriber, plus the
-#        aws_sqs_queue_policy / aws_lambda_permission that lets SNS deliver.
+#        aws_sqs_queue_policy / aws_lambda_permission that lets SNS deliver. A linked
+#        Budget grows an aws_sns_topic_policy statement letting Budgets publish.
 # Azure: azurerm_servicebus_namespace (Standard: topics need it) + azurerm_servicebus_topic
 #        + one azurerm_servicebus_subscription per subscriber. Service Bus can only
 #        auto-forward into a queue of the same namespace and a function consumes a
@@ -142,6 +144,30 @@ for_each_field = "subscriptions"
 topic_arn = { self_block = "main", attr = "arn" }
 protocol  = { item = "protocol" }
 endpoint  = { item = "endpoint" }
+
+# A linked Budget needs Budgets to be allowed to publish here; nothing else grants that.
+[[providers.aws.blocks]]
+key = "budget_policy"
+resource = "aws_sns_topic_policy"
+when = { relation = "sends_to", incoming = true, target_type = "budget" }
+
+[providers.aws.blocks.args]
+arn = { self_block = "main", attr = "arn" }
+
+[providers.aws.blocks.args.policy]
+func = "jsonencode"
+
+[[providers.aws.blocks.args.policy.args]]
+[providers.aws.blocks.args.policy.args.object]
+Version = { value = "2012-10-17" }
+
+[[providers.aws.blocks.args.policy.args.object.Statement.list]]
+[providers.aws.blocks.args.policy.args.object.Statement.list.object]
+Sid       = { value = "AllowBudgetsPublish" }
+Effect    = { value = "Allow" }
+Principal = { object = { Service = { value = "budgets.amazonaws.com" } } }
+Action    = { value = "sns:Publish" }
+Resource  = { self_block = "main", attr = "arn" }
 
 [providers.aws.outputs]
 arn = { attr = "arn", description = "Topic ARN (publish here)" }

@@ -523,6 +523,26 @@ export. Both are now answered without loosening a single message.
   resources — so the app computes them only while the panel is open and caches until the
   project changes.
 
+## Round 2: small fixes (gap report R2.7, R2.8, R2.11, R2.15)
+
+A follow-up pass on a design built through the MCP, fixing four rough edges the first
+gap report left behind: an `entity_ref` field (a security-group rule's `source_group`)
+rejected the empty string every example file uses for "no reference"; a Relational
+Database's Performance Insights check only read the abstract `size`, so an
+`instance_class` override neither silenced it nor caught the override itself landing on
+a `.micro` class; Object Storage's CORS rule always answered `GET`/`HEAD` only, which
+breaks a pre-signed `PUT` upload; and Budget could only notify an email, with GCP's
+billing account id typed by hand on every node. Two small mapping-language additions
+carry the lot: `ends_with` / `not_ends_with` join `starts_with` on field and (now also)
+provider-field conditions, and a `string_list` field may declare `options` the same way
+an `enum` does. Budget gains a `sends_to` → Topic link ("Notifies topic"), which becomes
+an `aws_sns_topic_policy` statement on AWS, an explained gap on Azure (Service Bus, not
+an Action Group), and a second `pubsub` notification channel on GCP; `notify_email` is
+now required only when no Topic is linked. GCP's billing account moves to a project-wide
+`billing_account` provider variable, with the per-budget field kept as a fallback
+override for projects that already set it. `examples/operations.ttg.json` links its
+Budget to its Topic to exercise the lot.
+
 ## Explicitly still out of scope
 
 Running `plan`/`apply`, live-account access, multi-user collaboration, cost estimation,

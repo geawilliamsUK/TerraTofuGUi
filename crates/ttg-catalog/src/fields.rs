@@ -45,11 +45,22 @@ pub fn check_value(def: &FieldDef, value: Option<&Value>) -> Result<(), String> 
                 Err(format!("must be one of: {}", def.options.join(", ")))
             }
         }
-        FieldType::StringList => match v {
-            Value::List(_) => Ok(()),
-            Value::Str(_) => Ok(()),
-            _ => Err("expected a list of strings".into()),
-        },
+        FieldType::StringList => {
+            let items: Vec<&str> = match v {
+                Value::List(items) => items.iter().map(|s| s.as_str()).collect(),
+                Value::Str(s) => vec![s.as_str()],
+                _ => return Err("expected a list of strings".into()),
+            };
+            // `options` restricts a string_list's allowed values the same way it does an
+            // enum's, e.g. Object Storage's `cors_methods` (empty `options` means "any
+            // string", the historical behaviour every other string_list keeps).
+            if !def.options.is_empty() {
+                if let Some(bad) = items.iter().find(|s| !def.options.iter().any(|o| o == *s)) {
+                    return Err(format!("\"{bad}\" is not one of: {}", def.options.join(", ")));
+                }
+            }
+            Ok(())
+        }
         FieldType::EntityRef => v
             .as_str()
             .map(|_| ())

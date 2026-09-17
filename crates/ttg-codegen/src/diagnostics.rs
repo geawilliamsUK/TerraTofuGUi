@@ -933,15 +933,22 @@ pub fn condition_holds_for(
                 Some(t) => v.map(|v| Value::Str(t.apply(&v.display()))),
                 None => v,
             };
-            // Equality wins when given; otherwise a prefix test; otherwise truthiness.
+            // Equality wins when given; otherwise a prefix or suffix test; otherwise
+            // truthiness.
             let prefix = f.starts_with.as_deref().or(f.not_starts_with.as_deref());
-            match prefix {
-                Some(p) if f.equals.is_none() && f.not_equals.is_none() => {
-                    let s = v.as_ref().map(|v| v.display()).unwrap_or_default();
-                    s.starts_with(p) == f.starts_with.is_some()
-                }
-                _ => cond_value(v.as_ref(), &f.equals, &f.not_equals),
+            let suffix = f.ends_with.as_deref().or(f.not_ends_with.as_deref());
+            if f.equals.is_some() || f.not_equals.is_some() {
+                return cond_value(v.as_ref(), &f.equals, &f.not_equals);
             }
+            if let Some(p) = prefix {
+                let s = v.as_ref().map(|v| v.display()).unwrap_or_default();
+                return s.starts_with(p) == f.starts_with.is_some();
+            }
+            if let Some(p) = suffix {
+                let s = v.as_ref().map(|v| v.display()).unwrap_or_default();
+                return s.ends_with(p) == f.ends_with.is_some();
+            }
+            cond_value(v.as_ref(), &f.equals, &f.not_equals)
         }
         Condition::ProviderField(f) => {
             if f.absent {
@@ -950,6 +957,12 @@ pub fn condition_holds_for(
                     .is_none_or(|v| v.is_empty());
             }
             let v = field_or_default(cat, provider, e, &f.provider_field, true);
+            if f.equals.is_none() && f.not_equals.is_none() {
+                if let Some(p) = f.ends_with.as_deref().or(f.not_ends_with.as_deref()) {
+                    let s = v.as_ref().map(|v| v.display()).unwrap_or_default();
+                    return s.ends_with(p) == f.ends_with.is_some();
+                }
+            }
             cond_value(v.as_ref(), &f.equals, &f.not_equals)
         }
         Condition::Ancestor(a) => p.ancestor_of_type(e.id, &a.ancestor).is_some() != a.absent,

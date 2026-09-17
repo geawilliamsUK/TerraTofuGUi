@@ -504,6 +504,11 @@
       "source": "trail-account",
       "relation": "attachment",
       "target": "obj-audit"
+    },
+    {
+      "source": "bud-monthly",
+      "relation": "sends_to",
+      "target": "tp-alerts"
     }
   ],
   "views": []

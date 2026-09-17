@@ -1154,9 +1154,13 @@ impl TtgApp {
     /// JSON -> IR value for a field, validated against the definition, with `entity_ref`
     /// values (bare, or inside a `struct_list` row) resolved from an id or display name
     /// to the entity id the same way every other tool addresses entities. `null` clears
-    /// the field.
+    /// the field, and so does `""` on a bare `entity_ref` — every example file stores "no
+    /// source group" that way, and there is no id or name that would ever resolve to it.
     fn convert_value(&self, f: &FieldDef, v: &J) -> Result<Option<Value>, String> {
         if v.is_null() {
+            return Ok(None);
+        }
+        if f.field_type == FieldType::EntityRef && v.as_str() == Some("") {
             return Ok(None);
         }
         let mut val: Value =
@@ -1170,11 +1174,15 @@ impl TtgApp {
     /// Resolve `entity_ref` values to entity ids, case-insensitively by display name,
     /// erroring on an ambiguous name (same rule as `resolve`). Recurses into
     /// `struct_list` rows so e.g. a security-group rule's `source_group` accepts a name.
+    /// An empty string inside a row means "no reference" (the examples store it that way)
+    /// and is left untouched rather than resolved.
     fn resolve_entity_refs(&self, f: &FieldDef, val: &mut Value) -> Result<(), String> {
         match f.field_type {
             FieldType::EntityRef => {
                 if let Value::Str(s) = val {
-                    *s = self.resolve(s)?;
+                    if !s.is_empty() {
+                        *s = self.resolve(s)?;
+                    }
                 }
             }
             FieldType::StructList => {

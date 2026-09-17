@@ -131,8 +131,12 @@ when = { relation = "attribute_reference", target_type = "security_group", absen
 message = "\"{name}\" has no security group; it will use the VPC default group"
 
 [[providers.aws.checks]]
-when = { all = [ { field = "size", equals = "small" }, { provider_field = "performance_insights" } ] }
+when = { all = [ { field = "size", equals = "small" }, { provider_field = "performance_insights" }, { provider_field = "instance_class", absent = true } ] }
 message = "\"{name}\" enables Performance Insights on the 'small' class (db.t3.micro), which does not support it; choose a larger size or an instance class override"
+
+[[providers.aws.checks]]
+when = { all = [ { provider_field = "instance_class", ends_with = ".micro" }, { provider_field = "performance_insights" } ] }
+message = "\"{name}\" enables Performance Insights on a .micro instance class override, which does not support it; choose a larger instance class"
 
 [[providers.aws.checks]]
 when = { field = "backup_retention_days", equals = "0" }

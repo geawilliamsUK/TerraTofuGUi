@@ -66,7 +66,14 @@ description = "Clean up multipart uploads that were never completed (they are bi
 name = "cors_origins"
 label = "CORS allowed origins"
 type = "string_list"
-description = "Browser origins allowed to read objects (GET and HEAD). Empty means no CORS configuration."
+description = "Browser origins allowed to reach the bucket over CORS. Empty means no CORS configuration."
+
+[[fields]]
+name = "cors_methods"
+label = "CORS allowed methods"
+type = "string_list"
+options = ["GET", "HEAD", "PUT", "POST", "DELETE"]
+description = "HTTP methods a CORS request may use; defaults to GET and HEAD. Add PUT for a browser uploading straight to the bucket with a pre-signed URL. Only takes effect with CORS allowed origins set."
 
 [[relations]]
 kind = "encrypted_with"
@@ -99,6 +106,10 @@ unique_scope = "bucket"
 [[providers.aws.checks]]
 when = { all = [ { relation = "encrypted_with" }, { relation = "logs_to", incoming = true } ] }
 message = "\"{name}\" receives access logs, so it keeps SSE-S3 encryption: S3 cannot deliver server access logs into a bucket encrypted with a customer-managed KMS key, and the linked key is ignored for it"
+
+[[providers.aws.checks]]
+when = { all = [ { field = "cors_methods" }, { field = "cors_origins", absent = true } ] }
+message = "\"{name}\" sets CORS allowed methods with no CORS allowed origins: no CORS configuration is generated until an origin is set"
 
 [[providers.aws.blocks]]
 key = "main"
@@ -247,7 +258,7 @@ block = "cors_rule"
 
 [providers.aws.blocks.nested.args]
 allowed_origins = { field = "cors_origins" }
-allowed_methods = { value = ["GET", "HEAD"] }
+allowed_methods = { field = "cors_methods", fallback = { value = ["GET", "HEAD"] } }
 allowed_headers = { value = ["*"] }
 max_age_seconds = { value = 3600 }
 
@@ -307,6 +318,10 @@ message = "\"{name}\" logs access to another bucket, which has no Azure counterp
 when = { field = "abort_multipart_days" }
 message = "\"{name}\" sets an abort-unfinished-uploads age, which Azure has no setting for: uncommitted blocks expire after seven days on their own"
 
+[[providers.azure.checks]]
+when = { all = [ { field = "cors_methods" }, { field = "cors_origins", absent = true } ] }
+message = "\"{name}\" sets CORS allowed methods with no CORS allowed origins: no CORS configuration is generated until an origin is set"
+
 [[providers.azure.blocks]]
 key = "main"
 resource = "azurerm_storage_account"
@@ -335,7 +350,7 @@ when = { field = "cors_origins" }
 
 [providers.azure.blocks.nested.nested.args]
 allowed_origins    = { field = "cors_origins" }
-allowed_methods    = { value = ["GET", "HEAD"] }
+allowed_methods    = { field = "cors_methods", fallback = { value = ["GET", "HEAD"] } }
 allowed_headers    = { value = ["*"] }
 exposed_headers    = { value = ["*"] }
 max_age_in_seconds = { value = 3600 }
@@ -408,6 +423,10 @@ unique_scope = "gcs_bucket"
 when = { provider_field = "bucket_name", absent = true }
 message = "\"{name}\": set a Google Cloud bucket name; bucket names are global and the node name is unlikely to be free"
 
+[[providers.gcp.checks]]
+when = { all = [ { field = "cors_methods" }, { field = "cors_origins", absent = true } ] }
+message = "\"{name}\" sets CORS allowed methods with no CORS allowed origins: no CORS configuration is generated until an origin is set"
+
 [[providers.gcp.blocks]]
 key = "main"
 resource = "google_storage_bucket"
@@ -448,7 +467,7 @@ when = { field = "cors_origins" }
 
 [providers.gcp.blocks.nested.args]
 origin          = { field = "cors_origins" }
-method          = { value = ["GET", "HEAD"] }
+method          = { field = "cors_methods", fallback = { value = ["GET", "HEAD"] } }
 response_header = { value = ["*"] }
 max_age_seconds = { value = 3600 }
 

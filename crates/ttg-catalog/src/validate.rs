@@ -328,6 +328,9 @@ fn check_field(cat: &Catalog, where_: &str, f: &FieldDef, errs: &mut Vec<String>
     if f.unique_scope.is_some() || f.required_unless_relation.is_some() {
         v2 = true;
     }
+    if f.field_type == FieldType::StringList && !f.options.is_empty() {
+        v2 = true;
+    }
     if f.field_type == FieldType::Enum && f.options.is_empty() {
         errs.push(format!("{where_}: enum field has no options"));
     }
@@ -519,7 +522,13 @@ fn check_condition(ctx: &mut SourceCtx, c: &Condition, errs: &mut Vec<String>) {
             }
         }
         Condition::Field(f) => {
-            if f.absent || f.starts_with.is_some() || f.not_starts_with.is_some() || f.transform.is_some() {
+            if f.absent
+                || f.starts_with.is_some()
+                || f.not_starts_with.is_some()
+                || f.ends_with.is_some()
+                || f.not_ends_with.is_some()
+                || f.transform.is_some()
+            {
                 ctx.v2 = true;
             }
             // "name" is the implicit display-name field: never declared in `fields`,
@@ -532,7 +541,7 @@ fn check_condition(ctx: &mut SourceCtx, c: &Condition, errs: &mut Vec<String>) {
             }
         }
         Condition::ProviderField(f) => {
-            if f.absent {
+            if f.absent || f.ends_with.is_some() || f.not_ends_with.is_some() {
                 ctx.v2 = true;
             }
             if !ctx.provider_fields.iter().any(|x| x.name == f.provider_field) {

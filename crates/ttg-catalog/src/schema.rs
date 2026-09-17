@@ -77,7 +77,8 @@ pub struct FieldDef {
     pub description: String,
     #[serde(default)]
     pub default: Option<toml::Value>,
-    /// For `enum` fields.
+    /// For `enum` fields, the only values allowed. For `string_list` fields, an optional
+    /// restriction on each entry (empty means any string, as before) (v2).
     #[serde(default)]
     pub options: Vec<String>,
     /// Optional regex the (string) value must match.
@@ -435,6 +436,13 @@ pub struct CondField {
     pub starts_with: Option<String>,
     #[serde(default)]
     pub not_starts_with: Option<String>,
+    /// The resolved value must end / not end with this string (v2). Ignored when
+    /// `equals` / `not_equals` is also given; takes priority over `starts_with` /
+    /// `not_starts_with` if both are somehow given.
+    #[serde(default)]
+    pub ends_with: Option<String>,
+    #[serde(default)]
+    pub not_ends_with: Option<String>,
     /// Normalise the resolved string value (e.g. to the kebab-cased form the mapping
     /// actually emits) before comparing (v2).
     #[serde(default)]
@@ -451,6 +459,12 @@ pub struct CondProviderField {
     pub equals: Option<String>,
     #[serde(default)]
     pub not_equals: Option<String>,
+    /// The resolved value must end / not end with this string (v2), e.g. an instance
+    /// class override ending `.micro`. Ignored when `equals` / `not_equals` is also given.
+    #[serde(default)]
+    pub ends_with: Option<String>,
+    #[serde(default)]
+    pub not_ends_with: Option<String>,
     /// Holds when the entity has no value for the field (defaults do not count) (v2).
     #[serde(default)]
     pub absent: bool,
