@@ -59,3 +59,17 @@ Deferred, with the reason: a `tier` on subnets so route tables attach themselves
 (changes the modelling of routing that the reachability engine depends on; revisit with
 the auto-layout work); SVG export of a view (egui has no vector back end; PNG via the
 fitted screenshot and Mermaid cover the document use).
+
+## Round 2 (report of 2026-09-17)
+
+The design was rebuilt on the curated types (84 resources, no natives, no `extra`, no
+`$raw`, six saved views). The second report lists what that rebuild ran into. Same
+method: disjoint packages, one commit each, merged onto `master` after review.
+
+| Package | Scope | Report items |
+|---|---|---|
+| **WP7 MCP and views** | a command whose client has gone is never run (no double apply); the GUI validate runs off the UI thread; a busy app answers "queued behind" instead of silence; `view_save` refuses a duplicate name unless asked to replace; `view_delete`; `view_update { filter }`; `entity_move` on notes, logical nodes and groups; anchored notes placed beside their anchor; nesting surfaced and tested; `screenshot { width, height }`; `hide_edges` on saved views; flow labels that do not overprint | R2.1–R2.6, R2.9, §2.3 |
+| **WP8 Kubernetes** | `kubernetes_workload`: `logs_to`, `mounts` file system, `reads` / `writes` on buckets, `calls` workload; IAM database authentication on `relational_database` so a workload link grants `rds-db:connect`; the cluster's log group named `/aws/eks/<cluster>/cluster` (incoming relation sources in the mapping language); `cluster_autoscaler` add-on with its tags and IAM; `container_insights` | R2.12, R2.14, R2.18, R2.19 |
+| **WP9 Diagnostics** | a per-provider check may *omit* the entity from that provider's export with a warning instead of blocking the export; cross-provider diagnostics ("would block the Azure export") while another provider is the target | R2.10, R2.17 |
+| **WP10 Internet edge** | provider aliases in the mapping language (`us-east-1` for CloudFront); `scope` on `web_application_firewall` and a global ACL for the CDN; the CDN's certificate in the right region; the CDN alias honoured by `dns_record` on Azure and GCP | R2.13, R2.16 |
+| **WP11 Small fixes** | `""` / `null` in an `entity_ref` means none; the Performance Insights check reads the effective instance class; `cors_methods` on object storage; `budget` notifies a topic and GCP's billing account is a provider variable | R2.7, R2.8, R2.11, R2.15 |
