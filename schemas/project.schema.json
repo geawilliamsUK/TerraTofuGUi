@@ -443,6 +443,11 @@
           "description": "Messages the source could not deliver go to target (queue -> dead-letter queue).",
           "type": "string",
           "const": "dead_letters_to"
+        },
+        {
+          "description": "Source makes requests of target (service to service). Documentation only: no\nmapping generates anything for it, it adds no `depends_on` and no manual step,\nand it stays out of the dependency graph so two services may call each other.",
+          "type": "string",
+          "const": "calls"
         }
       ]
     },

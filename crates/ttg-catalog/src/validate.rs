@@ -458,8 +458,18 @@ fn for_each_items(ctx: &SourceCtx, field: &str) -> Result<Vec<String>, String> {
 fn check_condition(ctx: &mut SourceCtx, c: &Condition, errs: &mut Vec<String>) {
     match c {
         Condition::Relation(r) => {
-            if r.absent || r.target_field.is_some() || r.target_provider_field.is_some() {
+            if r.absent
+                || r.target_field.is_some()
+                || r.target_provider_field.is_some()
+                || r.min_count.is_some()
+            {
                 ctx.v2 = true;
+            }
+            if r.min_count == Some(0) {
+                errs.push(format!(
+                    "{}when: min_count must be at least 1 (use absent = true for \"none\")",
+                    ctx.what
+                ));
             }
             if r.incoming {
                 // The relation belongs to whoever links *here*, so it is not one of this
@@ -817,7 +827,49 @@ fn check_source(ctx: &mut SourceCtx, at: &str, src: &ArgSource, errs: &mut Vec<S
             }
         }
         ArgSource::Relation(r) => {
-            check_relation_ref(ctx, at, &r.relation, r.target_type.as_deref(), errs);
+            if r.incoming {
+                // The edge belongs to whoever drew it, so it is not one of this type's
+                // own declarations: only the kind and the other end's type can be checked.
+                ctx.v2 = true;
+                if Relation::from_key(&r.relation).is_none() {
+                    errs.push(e(format!("incoming: unknown relation kind '{}'", r.relation)));
+                }
+                if let Some(tt) = &r.target_type {
+                    if !ctx.cat.resources.contains_key(tt) {
+                        errs.push(e(format!("incoming: target_type '{tt}' is not a known type")));
+                    }
+                }
+            } else {
+                check_relation_ref(ctx, at, &r.relation, r.target_type.as_deref(), errs);
+            }
+            if let Some(f) = &r.field {
+                ctx.v2 = true;
+                if !r.attr.is_empty() {
+                    errs.push(e("field and attr cannot be combined on a relation source".into()));
+                }
+                if r.block.is_some() {
+                    errs.push(e(
+                        "block addresses a resource, so it cannot be combined with field".into(),
+                    ));
+                }
+                if f.trim().is_empty() {
+                    errs.push(e("field name is empty".into()));
+                }
+                // The field belongs to the entity at the other end, so it can only be
+                // checked when the mapping says which type that is.
+                if let (Some(tt), Some(other)) = (
+                    &r.target_type,
+                    r.target_type.as_ref().and_then(|t| ctx.cat.resources.get(t)),
+                ) {
+                    if f != "name" && !other.fields.iter().any(|x| &x.name == f) {
+                        errs.push(e(format!("'{tt}' has no field '{f}'")));
+                    }
+                }
+            } else if r.transform.is_some() {
+                errs.push(e(
+                    "transform on a relation source only applies together with field".into(),
+                ));
+            }
             check_no_map_wrap(ctx, at, r.wrap, errs);
             if let Some(anc) = &r.ancestor {
                 ctx.v2 = true;

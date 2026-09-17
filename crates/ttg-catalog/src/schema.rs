@@ -400,6 +400,11 @@ pub struct CondRelation {
     /// Invert: holds when there is NO such target (v2).
     #[serde(default)]
     pub absent: bool,
+    /// How many matching targets (or sources, with `incoming`) are needed for the
+    /// condition to hold. Defaults to 1; `min_count = 2` is how a check says "more than
+    /// one cluster logs to this group" (v2).
+    #[serde(default)]
+    pub min_count: Option<usize>,
     /// Only count targets whose abstract field / provider field matches `equals` /
     /// `not_equals` (v2). With neither, the field must be set and truthy.
     #[serde(default)]
@@ -626,7 +631,23 @@ pub struct SrcMap {
 #[serde(deny_unknown_fields)]
 pub struct SrcRelation {
     pub relation: String,
+    /// Attribute of the related resource. Empty (or absent, with `field` instead) means
+    /// the block itself, which is what a `depends_on` list wants.
+    #[serde(default)]
     pub attr: String,
+    /// Follow the edges that point *at* this entity instead of away from it (v2): "the
+    /// cluster that logs to me". `target_type` filters the *other* end's type, and
+    /// containment never stands in for an incoming edge.
+    #[serde(default)]
+    pub incoming: bool,
+    /// Read an abstract field of the related entity as a literal instead of referencing
+    /// an attribute of its resource (v2). Alternative to `attr`; `transform` applies.
+    /// This is how a name can be built from a neighbour without referring to its
+    /// resource, and so without creating a dependency on it.
+    #[serde(default)]
+    pub field: Option<String>,
+    #[serde(default)]
+    pub transform: Option<Transform>,
     #[serde(default)]
     pub block: Option<String>,
     #[serde(default)]

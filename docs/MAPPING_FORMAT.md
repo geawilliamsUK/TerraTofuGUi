@@ -58,7 +58,7 @@ Which edges this type may be the *source* of. Direction is always
 [[relations]]
 kind = "network_membership"   # network_membership | attribute_reference | iam_binding |
                               # attachment | sends_to | reads | logs_to | encrypted_with |
-                              # dead_letters_to | depends_on
+                              # dead_letters_to | calls | depends_on
 label = "Belongs to network"
 targets = ["virtual_network"]
 cardinality = "one"           # one (required, exactly one) | optional | many
@@ -66,12 +66,17 @@ via_parent = true             # containment in a target container satisfies it
 providers = ["aws"]           # v2, optional: only this provider's mapping uses the link
 ```
 
-`depends_on` edges are always allowed and never need declaring. A relation scoped with
+`depends_on` edges are always allowed and never need declaring. `calls` is documentation
+only: it records that one service makes requests of another, and the engine generates
+nothing from it — no `depends_on`, no manual step, no "cannot express" diagnostic, and it
+is left out of the dependency graph, so two services calling each other is not a cycle.
+Declare it (`targets`, `cardinality`) so the inspector offers it and the "not a declared
+target" check still applies; no mapping is expected to consume it. A relation scoped with
 `providers` (a load balancer's security group, a peering's route tables) is simply not
 the other providers' business: their mappings neither consume it nor warn that they
 cannot, and the inspector labels it accordingly.
 
-There are only eight relation kinds, so a type may declare the **same kind more than
+There are only ten usable relation kinds, so a type may declare the **same kind more than
 once**, one entry per group of target types — a DNS Record's `attribute_reference` is both
 "In zone" (a `dns_zone`) and "Alias of" (a `load_balancer` or `cdn`). The declarations must
 have disjoint `targets`; each then owns only links to its own targets, so cardinality,
@@ -164,7 +169,7 @@ simply omitted from the block.
 | `{ var = "x" }` | `var.x`. Must be a provider-level or mapping-level variable. |
 | `{ template = "{name}-nic" }` | String with `{field}`, `{provider.field}` or `{settings.key}` placeholders. |
 | `{ map = "size", table = { small = "t3.micro" } }` | Look the field's value up in a table. Missing key is an error unless `optional = true`. |
-| `{ relation = "kind", attr = "id" }` | Traversal to the related resource's primary block, e.g. `aws_vpc.main.id`. Add `block = "profile"` to target another block. |
+| `{ relation = "kind", attr = "id" }` | Traversal to the related resource's primary block, e.g. `aws_vpc.main.id`. Add `block = "profile"` to target another block. `attr = ""` is the block itself, which is what a `depends_on` list wants. |
 | `{ ancestor = "resource_group", attr = "name" }` | Traversal to the nearest enclosing container of that type. Missing ancestor is an export error unless `optional = true`. |
 | `{ self_block = "nic", attr = "id" }` | Traversal to another block of the same entity. Omitted if that block was not emitted. |
 | `{ object = { K = <source>, … } }` | An object whose members are sources. |
@@ -300,11 +305,46 @@ adds `sensitive = true` to the output, which Terraform requires when the attribu
 **Incoming links.** `{ relation = "logs_to", incoming = true }` looks at the edges that
 point *at* this entity rather than away from it — "somebody logs to me". `target_type`
 then filters the *other* end's type, and `absent = true` still inverts. Containment never
-stands in for an incoming edge, so `via_parent` plays no part. Only a condition can be
-`incoming` (there is nothing single to reference: any number of entities may point here),
-and an incoming condition does not count as *consuming* the relation, because the edge
-belongs to whoever drew it. Object Storage uses it for the log-delivery statement a
-bucket needs in its own policy when other buckets send their access logs to it.
+stands in for an incoming edge, so `via_parent` plays no part. An incoming condition or
+source does not count as *consuming* the relation, because the edge belongs to whoever drew
+it, and neither is checked against this type's own `[[relations]]` — only the kind and the
+other end's type exist to check. Object Storage uses the condition for the log-delivery
+statement a bucket needs in its own policy when other buckets send their access logs to it.
+
+`incoming` also works as an **argument source**, so an entity can reference or read the
+entities that point at it. Several sources give several values, so `wrap = "list"` applies
+as usual and a plain reference takes the first (write a check with `min_count` when more
+than one would be wrong).
+
+```toml
+# aws_cloudwatch_log_group: the group an EKS cluster logs to must carry the name EKS
+# would give it, or EKS creates a second one and owns it.
+name = { if = { relation = "logs_to", incoming = true, target_type = "kubernetes_cluster" }, then = { func = "format", args = [ { value = "/aws/eks/%s/cluster" }, { relation = "logs_to", incoming = true, target_type = "kubernetes_cluster", field = "name", transform = "kebab" } ] }, else = { field = "name", transform = "kebab" } }
+```
+
+**A linked entity's field, not its attribute.** `field = "name"` on a relation source (with
+or without `incoming`) reads that *abstract field* off the other entity and renders it as a
+literal, where `attr` would render a traversal to its resource. `transform` applies; the two
+cannot be combined, and neither can `field` and `block`. The point is that a literal creates
+no dependency: the log group above is named after its cluster while the cluster
+`depends_on` the log group, which an `attr` reference would turn into a cycle. When
+`target_type` is given the field name is checked against that type.
+
+**Counting targets.** `min_count = 2` on a relation condition holds when at least that many
+targets (or sources, with `incoming`) match, rather than "at least one". It is how a check
+says *more than one*: a Log Group with two incoming clusters cannot be named after both, so
+`log_group.toml` reports it as an error. `min_count = 0` is rejected — `absent = true` is
+what "none" means.
+
+**Comparing against a list field.** `equals` / `not_equals` on a `string_list` field (or on
+`target_field` when the target's field is one) test **membership**: `{ field = "addons",
+equals = "cluster_autoscaler" }` holds when that entry is in the list, and a Kubernetes
+Node Pool asks the same question of its cluster with `{ relation = "attachment",
+target_type = "kubernetes_cluster", target_field = "addons", equals = "cluster_autoscaler" }`.
+A single-entry list compares as its one entry either way, so nothing that used to match
+stops matching. Bools compare as `"true"` / `"false"`, and an unset field falls back to its
+declared default, so `{ target_field = "iam_authentication", not_equals = "true" }` is the
+honest way to write "unless the database has it switched on".
 
 **Conditions, extended.** `{ relation = "…", absent = true }` holds when there is *no*
 such target; `{ all = [ … ] }` and `{ any = [ … ] }` combine conditions. When a field or

@@ -202,11 +202,15 @@ pub enum Relation {
     EncryptedWith,
     /// Messages the source could not deliver go to target (queue -> dead-letter queue).
     DeadLettersTo,
+    /// Source makes requests of target (service to service). Documentation only: no
+    /// mapping generates anything for it, it adds no `depends_on` and no manual step,
+    /// and it stays out of the dependency graph so two services may call each other.
+    Calls,
     DependsOn,
 }
 
 impl Relation {
-    pub const ALL: [Relation; 10] = [
+    pub const ALL: [Relation; 11] = [
         Relation::NetworkMembership,
         Relation::AttributeReference,
         Relation::IamBinding,
@@ -216,6 +220,7 @@ impl Relation {
         Relation::LogsTo,
         Relation::EncryptedWith,
         Relation::DeadLettersTo,
+        Relation::Calls,
         Relation::DependsOn,
     ];
     /// The identifier used in definition files.
@@ -230,6 +235,7 @@ impl Relation {
             Relation::LogsTo => "logs_to",
             Relation::EncryptedWith => "encrypted_with",
             Relation::DeadLettersTo => "dead_letters_to",
+            Relation::Calls => "calls",
             Relation::DependsOn => "depends_on",
         }
     }
@@ -244,6 +250,7 @@ impl Relation {
             Relation::LogsTo => "Logs to",
             Relation::EncryptedWith => "Encrypted with",
             Relation::DeadLettersTo => "Dead-letters to",
+            Relation::Calls => "Calls (documentation only)",
             Relation::DependsOn => "Depends on (ordering only)",
         }
     }

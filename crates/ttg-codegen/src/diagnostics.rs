@@ -617,7 +617,9 @@ pub fn run(full: &Project, cat: &Catalog, provider: &str) -> Vec<Diagnostic> {
         // Edges the mapping does not consume (by kind, and by target type when filtered).
         let consumed = consumed_relations(m);
         for edge in p.edges_from(e.id) {
-            if edge.relation == Relation::DependsOn {
+            // `calls` is documentation only: no mapping is expected to express it, so
+            // "cannot express" would be noise on every service-to-service edge.
+            if edge.relation == Relation::DependsOn || edge.relation == Relation::Calls {
                 continue;
             }
             if !def.relations.iter().any(|r| r.kind == edge.relation.key()) {
@@ -786,10 +788,16 @@ fn truthy(v: Option<&Value>) -> bool {
 }
 
 fn cond_value(v: Option<&Value>, equals: &Option<String>, not_equals: &Option<String>) -> bool {
-    let s = v.map(|v| v.display()).unwrap_or_default();
+    // A list-valued field (a cluster's add-ons) is compared entry by entry, so `equals`
+    // reads as "contains" and `not_equals` as "does not contain". A one-entry list
+    // displays as its single entry, so this only widens what used to be unmatchable.
+    let holds = |want: &str| match v {
+        Some(Value::List(items)) => items.iter().any(|x| x == want),
+        other => other.map(|v| v.display()).unwrap_or_default() == want,
+    };
     match (equals, not_equals) {
-        (Some(eq), _) => &s == eq,
-        (None, Some(ne)) => &s != ne,
+        (Some(eq), _) => holds(eq),
+        (None, Some(ne)) => !holds(ne),
         (None, None) => truthy(v),
     }
 }
@@ -888,18 +896,21 @@ pub fn condition_holds_for(
                     }
                 })
                 .unwrap_or_default();
-            let present = targets.iter().any(|t| {
-                let Some(te) = p.entity(t) else { return false };
-                let v = if let Some(f) = &r.target_field {
-                    field_or_default(cat, provider, &te, f, false)
-                } else if let Some(f) = &r.target_provider_field {
-                    field_or_default(cat, provider, &te, f, true)
-                } else {
-                    return true;
-                };
-                cond_value(v.as_ref(), &r.equals, &r.not_equals)
-            });
-            present != r.absent
+            let matching = targets
+                .iter()
+                .filter(|t| {
+                    let Some(te) = p.entity(t) else { return false };
+                    let v = if let Some(f) = &r.target_field {
+                        field_or_default(cat, provider, &te, f, false)
+                    } else if let Some(f) = &r.target_provider_field {
+                        field_or_default(cat, provider, &te, f, true)
+                    } else {
+                        return true;
+                    };
+                    cond_value(v.as_ref(), &r.equals, &r.not_equals)
+                })
+                .count();
+            (matching >= r.min_count.unwrap_or(1)) != r.absent
         }
         Condition::Target(t) => {
             // Without `relation` the subject is the current for_each_relation row; with
@@ -1200,10 +1211,14 @@ fn scan_cond(c: &Condition, rel: &mut HashSet<Consumed>) {
 fn scan_source(s: &ArgSource, rel: &mut HashSet<Consumed>, anc: &mut HashSet<String>) {
     match s {
         ArgSource::Relation(r) => {
-            rel.insert(Consumed {
-                relation: r.relation.clone(),
-                target_type: r.target_type.clone(),
-            });
+            // An `incoming` source reads the *other* end's edge; it says nothing about
+            // what this entity does with its own outgoing links (same rule as `when`).
+            if !r.incoming {
+                rel.insert(Consumed {
+                    relation: r.relation.clone(),
+                    target_type: r.target_type.clone(),
+                });
+            }
             if let Some(fb) = &r.fallback {
                 scan_source(fb, rel, anc);
             }

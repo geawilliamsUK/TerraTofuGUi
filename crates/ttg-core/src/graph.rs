@@ -31,6 +31,11 @@ pub fn build(p: &Project) -> DepGraph {
         }
     }
     for edge in &p.edges {
+        // `calls` is documentation only: nothing is generated from it, so it must not
+        // order anything either — two services calling each other is not a cycle.
+        if edge.relation == crate::ir::Relation::Calls {
+            continue;
+        }
         if let (Some(&a), Some(&b)) = (index.get(&edge.target), index.get(&edge.source)) {
             if a != b {
                 graph.add_edge(a, b, ());

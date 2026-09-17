@@ -240,7 +240,11 @@ Direction: **source depends on / references target**. Relation kinds:
 | `logs_to` | source writes its logs to target | function → log group |
 | `encrypted_with` | source is encrypted at rest with target's key | bucket → encryption key |
 | `dead_letters_to` | messages the source could not deliver go to target | queue → dead-letter queue |
+| `calls` | source makes requests of target; documentation only | workload → workload |
 | `depends_on` | pure ordering, no attribute | anything → anything |
+
+`calls` generates nothing: no mapping consumes it, it adds neither `depends_on` nor a manual step,
+and it is left out of the dependency graph, so two services calling each other is not a cycle.
 
 Containment creates an *implicit* `network_membership` edge from child to container when the
 definition marks the relation `via_parent = true`. Explicit edges are still allowed for the cases

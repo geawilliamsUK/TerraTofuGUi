@@ -1323,7 +1323,14 @@ impl<'a> Emitter<'a> {
             ArgSource::Relation(r) => {
                 let kind = Relation::from_key(&r.relation)
                     .ok_or_else(|| err(format!("unknown relation '{}'", r.relation)))?;
-                let targets = self.relation_targets_filtered(e, kind, r.target_type.as_deref());
+                // `incoming = true` walks the edges that point *at* this entity: the log
+                // group asking which cluster logs to it. Containment never stands in for
+                // an incoming edge, so there is no `via_parent` fallback.
+                let targets = if r.incoming {
+                    diagnostics::relation_sources_of_type(self.p, e, kind, r.target_type.as_deref())
+                } else {
+                    self.relation_targets_filtered(e, kind, r.target_type.as_deref())
+                };
                 let mut exprs = Vec::new();
                 for t in targets {
                     // `ancestor = "..."`: reference the target's enclosing container instead.
@@ -1334,7 +1341,21 @@ impl<'a> Emitter<'a> {
                         },
                         None => t,
                     };
-                    if let Some(x) = self.reference(&subject, r.block.as_deref(), &r.attr, at)? {
+                    // `field = "..."` reads a field off the other entity as a literal, so
+                    // the value carries no reference to its resource and cannot create a
+                    // cycle. `attr` is the usual traversal.
+                    if let Some(name) = &r.field {
+                        let Some(te) = self.p.entity(&subject) else {
+                            continue;
+                        };
+                        let Some(v) =
+                            diagnostics::field_or_default(self.cat, self.provider, &te, name, false)
+                                .filter(|v| !v.is_empty())
+                        else {
+                            continue;
+                        };
+                        exprs.push(value_expr(&transformed(&v, r.transform)));
+                    } else if let Some(x) = self.reference(&subject, r.block.as_deref(), &r.attr, at)? {
                         exprs.push(x);
                     }
                 }
@@ -1578,6 +1599,11 @@ impl<'a> Emitter<'a> {
             let Some(t) = self.p.entity(&edge.target) else {
                 continue;
             };
+            // `calls` documents who talks to whom. No mapping generates anything for it,
+            // so it earns neither a `depends_on` nor a "link by hand" step.
+            if edge.relation == Relation::Calls {
+                continue;
+            }
             let is_consumed = covers(consumed, edge.relation.key(), t.resource_type);
             if edge.relation != Relation::DependsOn && is_consumed {
                 continue;

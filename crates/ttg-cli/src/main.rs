@@ -728,7 +728,9 @@ fn strict_findings(cat: &ttg_catalog::Catalog) -> Vec<String> {
                     .iter()
                     .any(|c| c.relation == rel.kind)
             });
-            if !consumed && !applicable.is_empty() && rel.kind != "depends_on" {
+            // `calls` and `depends_on` are never consumed: the first documents who talks
+            // to whom, the second only orders. Neither is a mapping's business.
+            if !consumed && !applicable.is_empty() && rel.kind != "depends_on" && rel.kind != "calls" {
                 out.push(format!(
                     "{id}: relation '{}' ({}) is consumed by no provider mapping",
                     rel.kind,

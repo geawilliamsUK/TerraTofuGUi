@@ -37,6 +37,7 @@ fn relation_color(r: Relation) -> Color32 {
         Relation::LogsTo => Color32::from_rgb(110, 110, 60),
         Relation::EncryptedWith => Color32::from_rgb(90, 150, 90),
         Relation::DeadLettersTo => Color32::from_rgb(190, 100, 40),
+        Relation::Calls => Color32::from_rgb(60, 170, 190),
         Relation::DependsOn => Color32::from_rgb(130, 130, 130),
     }
 }
@@ -1400,6 +1401,7 @@ fn short_label(r: Relation) -> &'static str {
         Relation::LogsTo => "logs to",
         Relation::EncryptedWith => "encrypted with",
         Relation::DeadLettersTo => "dead-letters to",
+        Relation::Calls => "calls",
         Relation::DependsOn => "depends on",
     }
 }
