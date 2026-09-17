@@ -125,8 +125,8 @@ when = { field = "metric", equals = "bucket_size" }
 message = "\"{name}\" watches bucket size, which S3 reports once a day: use a period of 900 seconds or more and expect the alarm to sit in INSUFFICIENT_DATA between daily reports"
 
 [[providers.aws.checks]]
-when = { field = "metric", equals = "node_count" }
-message = "\"{name}\" watches the cluster's node count, which only exists once CloudWatch Container Insights is enabled on the EKS cluster"
+when = { all = [ { field = "metric", equals = "node_count" }, { relation = "attribute_reference", target_type = "kubernetes_cluster", target_field = "container_insights", not_equals = "true" } ] }
+message = "\"{name}\" watches the cluster's node count, which only exists once Container Insights is on: tick it on the linked Kubernetes Cluster"
 
 [[providers.aws.blocks]]
 key = "main"

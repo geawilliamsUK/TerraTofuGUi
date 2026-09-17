@@ -1,6 +1,12 @@
 # Abstract type: Log Group
 #
 # AWS: aws_cloudwatch_log_group. Azure: azurerm_log_analytics_workspace (PerGB2018).
+#
+# One special case: EKS writes its control-plane logs to a group it names itself,
+# `/aws/eks/<cluster>/cluster`, and creates it if it is absent. A group a Kubernetes
+# Cluster logs to therefore takes that name, so Terraform owns it (and its retention)
+# instead of racing EKS for it. The name is built from the cluster's *display name*, not
+# from the cluster resource, so nothing here refers to a resource that depends on it.
 
 schema_version = 2
 
@@ -35,12 +41,17 @@ cardinality = "optional"
 status = "full"
 notes = "Log groups are encrypted with an AWS-managed key by default; a linked Encryption Key replaces it. Its key policy already lets the CloudWatch Logs service principal of the region use it."
 
+[[providers.aws.checks]]
+when = { relation = "logs_to", incoming = true, target_type = "kubernetes_cluster", min_count = 2 }
+severity = "error"
+message = "\"{name}\" receives the control-plane logs of more than one Kubernetes Cluster, and EKS names that group after the cluster: give each cluster a Log Group of its own"
+
 [[providers.aws.blocks]]
 key = "main"
 resource = "aws_cloudwatch_log_group"
 
 [providers.aws.blocks.args]
-name              = { field = "name", transform = "kebab" }
+name              = { if = { relation = "logs_to", incoming = true, target_type = "kubernetes_cluster" }, then = { func = "format", args = [ { value = "/aws/eks/%s/cluster" }, { relation = "logs_to", incoming = true, target_type = "kubernetes_cluster", field = "name", transform = "kebab" } ] }, else = { field = "name", transform = "kebab" } }
 retention_in_days = { map = "retention_days", table = { "30" = 30, "90" = 90, "365" = 365 } }
 kms_key_id        = { relation = "encrypted_with", attr = "arn", optional = true }
 tags              = { object = { Name = { field = "name" } } }

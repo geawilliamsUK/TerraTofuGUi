@@ -90,6 +90,13 @@ type = "bool"
 default = true
 description = "Keep a snapshot when the server is destroyed, named after it. Turning this off means a destroy takes the data with it."
 
+[[fields]]
+name = "iam_authentication"
+label = "IAM / directory authentication"
+type = "bool"
+default = false
+description = "Let a cloud identity connect without a password: RDS IAM database authentication, Microsoft Entra on a PostgreSQL flexible server, Cloud SQL IAM authentication. A workload linked with 'Uses' then gets a connect grant instead of a password. The database user still has to be created inside the server and mapped to the identity."
+
 [[relations]]
 kind = "encrypted_with"
 label = "Encrypted with"
@@ -201,6 +208,10 @@ skip_final_snapshot          = { if = { field = "final_snapshot" }, then = { val
 final_snapshot_identifier    = { if = { field = "final_snapshot" }, then = { template = "{name}-final", transform = "kebab" } }
 performance_insights_enabled = { if = { provider_field = "performance_insights" }, then = { value = true }, else = { value = false } }
 storage_encrypted            = { value = true }
+# With this on, a pod or function holding `rds-db:connect` on the instance's resource id
+# authenticates with a token instead of a password; the password above stays as the
+# fallback for the admin user, which IAM authentication does not replace.
+iam_database_authentication_enabled = { if = { field = "iam_authentication" }, then = { value = true }, else = { value = false } }
 kms_key_id                   = { relation = "encrypted_with", attr = "arn", optional = true }
 tags                         = { object = { Name = { field = "name" } } }
 
@@ -244,6 +255,12 @@ name = "db_password"
 type = "string"
 description = "Administrator password for database servers that are not linked to a Secret."
 sensitive = true
+
+# The Entra tenant the directory administrator lives in, read rather than configured.
+[[providers.azure.data]]
+key = "entra"
+resource = "azurerm_client_config"
+when = { all = [ { field = "engine", equals = "postgres" }, { field = "iam_authentication" } ] }
 
 # Private DNS zone + VNet link, only when the server is VNet-integrated.
 [[providers.azure.blocks]]
@@ -296,6 +313,17 @@ delegated_subnet_id           = { relation = "network_membership", attr = "id", 
 private_dns_zone_id           = { self_block = "dns", attr = "id" }
 public_network_access_enabled = { if = { relation = "network_membership" }, then = { value = false }, else = { value = true } }
 depends_on                    = { list = [ { self_block = "dns_link", attr = "" } ] }
+
+# Microsoft Entra authentication alongside the password login, so a workload's managed
+# identity can connect once it has been added as a database role (see the manual step).
+[[providers.azure.blocks.nested]]
+block = "authentication"
+when = { field = "iam_authentication" }
+
+[providers.azure.blocks.nested.args]
+active_directory_auth_enabled = { value = true }
+password_auth_enabled         = { value = true }
+tenant_id                     = { self_data = "entra", attr = "tenant_id" }
 
 [[providers.azure.blocks.nested]]
 block = "high_availability"
@@ -399,12 +427,28 @@ when = { relation = "encrypted_with" }
 message = "\"{name}\" is linked to an Encryption Key, which the Azure mapping cannot use: a flexible server's customer-managed key needs a user-assigned identity holding Key Vault rights, which the diagram does not model. Storage stays encrypted with Microsoft-managed keys"
 
 [[providers.azure.checks]]
+when = { all = [ { field = "engine", equals = "mysql" }, { field = "iam_authentication" } ] }
+message = "\"{name}\" asks for directory authentication, which a MySQL flexible server does not have as a server setting: it needs a user-assigned identity on the server plus an `azurerm_mysql_flexible_server_active_directory_administrator` resource. Only PostgreSQL is generated; wire MySQL by hand or keep the password login"
+
+[[providers.azure.checks]]
 when = { field = "deletion_protection" }
 message = "\"{name}\" asks for deletion protection, which Azure flexible servers have no setting for; protect it with a management lock on the resource group instead"
 
 [providers.azure.outputs]
 postgres_fqdn = { block = "pg", attr = "fqdn", description = "PostgreSQL server host name" }
 mysql_fqdn    = { block = "my", attr = "fqdn", description = "MySQL server host name" }
+
+[[providers.azure.manual_steps]]
+title = "Create the directory role inside the database"
+when = { all = [ { field = "engine", equals = "postgres" }, { field = "iam_authentication" } ] }
+body = """
+Entra authentication is switched on, but nothing can use it until the server has a
+**directory administrator** (`azurerm_postgresql_flexible_server_active_directory_administrator`
+for a user or group you choose) and that administrator has run
+`SELECT * FROM pgaadauth_create_principal('<identity name>', false, false);` for each
+managed identity that should connect. Clients then authenticate with an Entra access token
+in place of the password.
+"""
 
 [[providers.azure.manual_steps]]
 title = "Keep a copy before destroying the server"
@@ -518,6 +562,16 @@ block = "ip_configuration"
 ipv4_enabled    = { if = { relation = "network_membership" }, then = { value = false }, else = { value = true } }
 private_network = { if = { relation = "network_membership" }, then = { self_block = "psa", attr = "network" } }
 
+# Cloud SQL IAM authentication is a database flag, and the two engines spell it
+# differently: a dot for PostgreSQL, an underscore for MySQL.
+[[providers.gcp.blocks.nested.nested]]
+block = "database_flags"
+when = { field = "iam_authentication" }
+
+[providers.gcp.blocks.nested.nested.args]
+name  = { if = { field = "engine", equals = "postgres" }, then = { value = "cloudsql.iam_authentication" }, else = { value = "cloudsql_iam_authentication" } }
+value = { value = "on" }
+
 [[providers.gcp.blocks]]
 key = "db"
 resource = "google_sql_database"
@@ -548,6 +602,17 @@ A Cloud SQL instance can only be created with a customer-managed key once the Cl
 service agent holds `roles/cloudkms.cryptoKeyEncrypterDecrypter` on that key. Create the
 agent with `gcloud beta services identity create --service=sqladmin.googleapis.com` and
 grant it the role on the key before the first `apply`.
+"""
+
+[[providers.gcp.manual_steps]]
+title = "Add the service account as a database user"
+when = { field = "iam_authentication" }
+body = """
+The `cloudsql.iam_authentication` flag lets a service account log in with an OAuth token,
+but only once it exists as a user: add a `google_sql_user` with `type =
+"CLOUD_IAM_SERVICE_ACCOUNT"` and `name` set to the account's email without the
+`.gserviceaccount.com` suffix, and grant the account `roles/cloudsql.instanceUser` (plus
+`roles/cloudsql.client` for the Auth Proxy).
 """
 
 [[providers.gcp.manual_steps]]

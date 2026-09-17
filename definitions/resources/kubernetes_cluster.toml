@@ -70,7 +70,14 @@ description = "CIDR ranges allowed to reach the public API endpoint. Empty means
 name = "addons"
 label = "Add-ons"
 type = "string_list"
-description = "Cluster add-ons to install: ebs_csi, efs_csi, pod_identity_agent, metrics_server, coredns, kube_proxy, vpc_cni. Only AWS installs them as resources; the others say what applies in MANUAL_STEPS."
+description = "Cluster add-ons to install: ebs_csi, efs_csi, pod_identity_agent, metrics_server, coredns, kube_proxy, vpc_cni, cluster_autoscaler. Only AWS installs them as resources; the others say what applies in MANUAL_STEPS. cluster_autoscaler is not an EKS add-on: on AWS it generates the discovery tags, a role and a pod identity for the Helm chart, and on AKS / GKE it is already built in."
+
+[[fields]]
+name = "container_insights"
+label = "Container Insights"
+type = "bool"
+default = false
+description = "Collect cluster, node and pod metrics (and on AWS container logs) so that node_count and pod-level alarms have something to watch. AWS installs the amazon-cloudwatch-observability add-on and grants the nodes CloudWatchAgentServerPolicy; AKS runs the OMS agent against the linked Log Analytics workspace; GKE switches on the system metric components and managed Prometheus."
 
 [[relations]]
 kind = "network_membership"
@@ -99,8 +106,8 @@ description = "Leave empty to take the EKS default for the region. Pinning a ver
 [[providers.aws.checks]]
 for_each_field = "addons"
 severity = "error"
-when = { all = [ { item = "value", not_equals = "ebs_csi" }, { item = "value", not_equals = "efs_csi" }, { item = "value", not_equals = "pod_identity_agent" }, { item = "value", not_equals = "metrics_server" }, { item = "value", not_equals = "coredns" }, { item = "value", not_equals = "kube_proxy" }, { item = "value", not_equals = "vpc_cni" } ] }
-message = "\"{name}\": unknown add-on '{item.value}'; use ebs_csi, efs_csi, pod_identity_agent, metrics_server, coredns, kube_proxy or vpc_cni"
+when = { all = [ { item = "value", not_equals = "ebs_csi" }, { item = "value", not_equals = "efs_csi" }, { item = "value", not_equals = "pod_identity_agent" }, { item = "value", not_equals = "metrics_server" }, { item = "value", not_equals = "coredns" }, { item = "value", not_equals = "kube_proxy" }, { item = "value", not_equals = "vpc_cni" }, { item = "value", not_equals = "cluster_autoscaler" } ] }
+message = "\"{name}\": unknown add-on '{item.value}'; use ebs_csi, efs_csi, pod_identity_agent, metrics_server, coredns, kube_proxy, vpc_cni or cluster_autoscaler"
 
 [[providers.aws.blocks]]
 key = "cluster_role"
@@ -136,10 +143,13 @@ resource = "aws_eks_cluster"
 name       = { field = "name", transform = "kebab" }
 role_arn   = { self_block = "cluster_role", attr = "arn" }
 version    = { provider_field = "version", optional = true }
-# EKS writes control-plane logs to its own log group, so the linked Log Group only decides
-# which streams are switched on (see the manual step).
+# Which control-plane streams are switched on. Where they land is the linked Log Group's
+# business: it renames itself to the name EKS would use.
 enabled_cluster_log_types = { if = { relation = "logs_to" }, then = { value = ["api", "audit", "authenticator", "controllerManager", "scheduler"] } }
-depends_on = { list = [ { self_block = "cluster_policy", attr = "" } ] }
+# EKS creates `/aws/eks/<cluster>/cluster` itself when logging starts and the group is
+# missing, and then owns it. The linked Log Group takes that name (see log_group.toml), so
+# the cluster waits for it instead of referring to it — a reference would be a cycle.
+depends_on = { list = [ { self_block = "cluster_policy", attr = "" }, { relation = "logs_to", attr = "" } ] }
 
 # Access to the API server. These belong in the vpc_config block the mapping already writes.
 [[providers.aws.blocks.nested]]
@@ -210,6 +220,10 @@ node_group_name = { value = "default" }
 node_role_arn   = { self_block = "node_role", attr = "arn" }
 subnet_ids      = { relation = "network_membership", attr = "id", wrap = "list" }
 instance_types  = { map = "node_size", table = { small = ["t3.medium"], medium = ["t3.large"], large = ["m5.xlarge"], xlarge = ["m5.2xlarge"] } }
+# Cluster Autoscaler finds the groups it may resize by two tags, the second of which
+# carries the cluster name. An object literal cannot have a computed key, so the map is
+# built with zipmap.
+tags            = { if = { field = "addons", equals = "cluster_autoscaler" }, then = { func = "zipmap", args = [ { list = [ { value = "Name" }, { value = "k8s.io/cluster-autoscaler/enabled" }, { func = "format", args = [ { value = "k8s.io/cluster-autoscaler/%s" }, { self_block = "main", attr = "name" } ] } ] }, { list = [ { field = "name" }, { value = "true" }, { value = "owned" } ] } ] }, else = { object = { Name = { field = "name" } } } }
 depends_on      = { list = [ { self_block = "node_policy_worker", attr = "" }, { self_block = "node_policy_cni", attr = "" }, { self_block = "node_policy_ecr", attr = "" } ] }
 
 [[providers.aws.blocks.nested]]
@@ -220,38 +234,138 @@ desired_size = { field = "node_count" }
 min_size     = { field = "min_nodes" }
 max_size     = { field = "max_nodes" }
 
-# One add-on resource per entry of the abstract list.
+# One add-on resource per entry of the abstract list. `cluster_autoscaler` is not an EKS
+# add-on at all — it is a Helm chart with an IAM identity, generated below.
 [[providers.aws.blocks]]
 key = "addon"
 resource = "aws_eks_addon"
 for_each_field = "addons"
+when = { item = "value", not_equals = "cluster_autoscaler" }
 
 [providers.aws.blocks.args]
 cluster_name  = { self_block = "main", attr = "name" }
 addon_name    = { map = "value", table = { ebs_csi = "aws-ebs-csi-driver", efs_csi = "aws-efs-csi-driver", pod_identity_agent = "eks-pod-identity-agent", metrics_server = "metrics-server", coredns = "coredns", kube_proxy = "kube-proxy", vpc_cni = "vpc-cni" } }
 depends_on    = { list = [ { self_block = "nodes", attr = "" } ] }
 
+# Container Insights: the CloudWatch agent and Fluent Bit, installed as an add-on, plus the
+# policy the nodes need before either can publish anything.
+[[providers.aws.blocks]]
+key = "insights"
+resource = "aws_eks_addon"
+when = { field = "container_insights" }
+
+[providers.aws.blocks.args]
+cluster_name = { self_block = "main", attr = "name" }
+addon_name   = { value = "amazon-cloudwatch-observability" }
+depends_on   = { list = [ { self_block = "nodes", attr = "" } ] }
+
+[[providers.aws.blocks]]
+key = "node_policy_cloudwatch"
+resource = "aws_iam_role_policy_attachment"
+when = { field = "container_insights" }
+
+[providers.aws.blocks.args]
+role       = { self_block = "node_role", attr = "name" }
+policy_arn = { value = "arn:aws:iam::aws:policy/CloudWatchAgentServerPolicy" }
+
+# Cluster Autoscaler: a role the chart's pods assume through EKS Pod Identity, the standard
+# autoscaler policy, and the association that binds kube-system/cluster-autoscaler to it.
+# The chart itself is a manual step; everything it needs from AWS is here.
+[[providers.aws.blocks]]
+key = "autoscaler_role"
+resource = "aws_iam_role"
+when = { field = "addons", equals = "cluster_autoscaler" }
+
+[providers.aws.blocks.args]
+name = { template = "{name}-autoscaler", transform = "kebab" }
+
+[providers.aws.blocks.args.assume_role_policy]
+func = "jsonencode"
+[[providers.aws.blocks.args.assume_role_policy.args]]
+[providers.aws.blocks.args.assume_role_policy.args.object]
+Version = { value = "2012-10-17" }
+[[providers.aws.blocks.args.assume_role_policy.args.object.Statement.list]]
+[providers.aws.blocks.args.assume_role_policy.args.object.Statement.list.object]
+Effect    = { value = "Allow" }
+Action    = { value = ["sts:AssumeRole", "sts:TagSession"] }
+Principal = { object = { Service = { value = "pods.eks.amazonaws.com" } } }
+
+[[providers.aws.blocks]]
+key = "autoscaler_policy"
+resource = "aws_iam_role_policy"
+when = { field = "addons", equals = "cluster_autoscaler" }
+
+[providers.aws.blocks.args]
+name = { template = "{name}-autoscaler", transform = "kebab" }
+role = { self_block = "autoscaler_role", attr = "id" }
+
+[providers.aws.blocks.args.policy]
+func = "jsonencode"
+[[providers.aws.blocks.args.policy.args]]
+[providers.aws.blocks.args.policy.args.object]
+Version = { value = "2012-10-17" }
+[[providers.aws.blocks.args.policy.args.object.Statement.list]]
+[providers.aws.blocks.args.policy.args.object.Statement.list.object]
+Sid      = { value = "Autoscale" }
+Effect   = { value = "Allow" }
+# The Describe* calls are how the autoscaler discovers the tagged groups; the two write
+# calls are how it resizes them. Resource is "*" because the groups EKS creates for a node
+# group have no name the diagram knows in advance.
+Action   = { value = ["autoscaling:DescribeAutoScalingGroups", "autoscaling:DescribeAutoScalingInstances", "autoscaling:DescribeLaunchConfigurations", "autoscaling:DescribeScalingActivities", "autoscaling:DescribeTags", "autoscaling:SetDesiredCapacity", "autoscaling:TerminateInstanceInAutoScalingGroup", "ec2:DescribeLaunchTemplateVersions", "ec2:DescribeInstanceTypes", "eks:DescribeNodegroup"] }
+Resource = { value = "*" }
+
+[[providers.aws.blocks]]
+key = "autoscaler_identity"
+resource = "aws_eks_pod_identity_association"
+when = { field = "addons", equals = "cluster_autoscaler" }
+
+[providers.aws.blocks.args]
+cluster_name    = { self_block = "main", attr = "name" }
+namespace       = { value = "kube-system" }
+service_account = { value = "cluster-autoscaler" }
+role_arn        = { self_block = "autoscaler_role", attr = "arn" }
+
 [providers.aws.outputs]
 endpoint = { attr = "endpoint", description = "Kubernetes API endpoint" }
 name     = { attr = "name", description = "Cluster name (kubectl / aws eks update-kubeconfig)" }
 
 [[providers.aws.manual_steps]]
-title = "EKS names its own control-plane log group"
-when = { relation = "logs_to" }
+title = "Only the first Log Group becomes the control-plane group"
+when = { relation = "logs_to", min_count = 2 }
 body = """
-Switching on `enabled_cluster_log_types` makes EKS write to **`/aws/eks/<cluster
-name>/cluster`**, a log group it creates itself — not the Log Group drawn in the diagram.
-Either rename that Log Group to `/aws/eks/<cluster name>/cluster` so Terraform owns it (and
-its retention), or keep it for application logs shipped by Fluent Bit and accept that the
-control-plane streams live next to it.
+EKS writes its control-plane logs to a single group named after the cluster, so only the
+first linked Log Group is renamed to `/aws/eks/<cluster name>/cluster`. The others are
+created but receive nothing from the control plane; keep them for application logs shipped
+by Fluent Bit, or remove the extra links.
 """
 
 [[providers.aws.manual_steps]]
 title = "Node counts need the Cluster Autoscaler"
+when = { field = "addons", not_equals = "cluster_autoscaler" }
 body = """
 EKS never changes a node group's size by itself: the min / max in the diagram are limits,
-not a policy. Install the **Cluster Autoscaler** (or Karpenter) in the cluster and let it
-discover the node groups; AKS and GKE have this built in, AWS does not.
+not a policy. Add **cluster_autoscaler** to the cluster's Add-ons — the role, the policy
+and the pod identity are then generated and only the Helm chart is left to install — or
+install Karpenter instead. AKS and GKE have this built in, AWS does not.
+"""
+
+[[providers.aws.manual_steps]]
+title = "Install the Cluster Autoscaler chart"
+when = { field = "addons", equals = "cluster_autoscaler" }
+body = """
+Everything the autoscaler needs from AWS is generated: the discovery tags on every node
+group of this cluster, an IAM role with the autoscaler policy, and a pod identity
+association for `kube-system/cluster-autoscaler`. What is left is the workload itself:
+
+    helm repo add autoscaler https://kubernetes.github.io/autoscaler
+    helm upgrade --install cluster-autoscaler autoscaler/cluster-autoscaler \\
+      --namespace kube-system \\
+      --set autoDiscovery.clusterName=<cluster name> \\
+      --set awsRegion=<region> \\
+      --set rbac.serviceAccount.name=cluster-autoscaler
+
+The ServiceAccount name must stay `cluster-autoscaler` in `kube-system`: that is what the
+pod identity association binds. A pool may then scale to zero.
 """
 
 # ---------------------------------------------------------------- Azure
@@ -312,6 +426,15 @@ when = { field = "public_access_cidrs" }
 [providers.azure.blocks.nested.args]
 authorized_ip_ranges = { field = "public_access_cidrs" }
 
+# Container Insights is the OMS agent writing into the linked workspace with the cluster's
+# own identity — which is why it belongs here and not on each Kubernetes Workload.
+[[providers.azure.blocks.nested]]
+block = "oms_agent"
+when = { all = [ { field = "container_insights" }, { relation = "logs_to" } ] }
+
+[providers.azure.blocks.nested.args]
+log_analytics_workspace_id = { relation = "logs_to", attr = "id" }
+
 # Control-plane logs to the linked Log Analytics workspace.
 [[providers.azure.blocks]]
 key = "diag"
@@ -340,6 +463,11 @@ fqdn        = { attr = "fqdn", description = "Kubernetes API host name" }
 oidc_issuer = { attr = "oidc_issuer_url", description = "OIDC issuer URL used by workload identity" }
 kube_config = { attr = "kube_config_raw", description = "Raw kubeconfig for the cluster", sensitive = true }
 
+[[providers.azure.checks]]
+when = { all = [ { field = "container_insights" }, { relation = "logs_to", absent = true } ] }
+severity = "error"
+message = "\"{name}\" asks for Container Insights, which writes into a Log Analytics workspace: link a Log Group with 'Logs to'"
+
 [[providers.azure.manual_steps]]
 title = "Add-ons on AKS"
 when = { field = "addons" }
@@ -349,6 +477,8 @@ every cluster already; the CSI drivers are cluster arguments (`storage_profile` 
 `disk_driver_enabled` / `file_driver_enabled`) rather than separate resources, and
 `pod_identity_agent` / `vpc_cni` are AWS concepts with no AKS counterpart — workload
 identity (switched on here) and Azure CNI (the network profile) do the same jobs.
+`cluster_autoscaler` needs nothing at all: the default node pool is generated with
+`auto_scaling_enabled`, so AKS already scales it between the min and max in the diagram.
 """
 
 # ---------------------------------------------------------------- GCP
@@ -395,6 +525,20 @@ when = { relation = "logs_to" }
 
 [providers.gcp.blocks.nested.args]
 enable_components = { value = ["SYSTEM_COMPONENTS", "WORKLOADS", "APISERVER"] }
+
+# GKE's equivalent of Container Insights: per-object metrics plus managed Prometheus.
+[[providers.gcp.blocks.nested]]
+block = "monitoring_config"
+when = { field = "container_insights" }
+
+[providers.gcp.blocks.nested.args]
+enable_components = { value = ["SYSTEM_COMPONENTS", "POD", "DEPLOYMENT", "STATEFULSET", "DAEMONSET", "HPA", "CADVISOR", "KUBELET"] }
+
+[[providers.gcp.blocks.nested.nested]]
+block = "managed_prometheus"
+
+[providers.gcp.blocks.nested.nested.args]
+enabled = { value = true }
 
 [[providers.gcp.blocks.nested]]
 block = "private_cluster_config"
@@ -453,6 +597,8 @@ GKE has no per-add-on resource either. `coredns` (kube-dns), `kube_proxy` and
 cluster arguments (`addons_config` with `gcp_filestore_csi_driver_config` /
 `gcs_fuse_csi_driver_config`); `pod_identity_agent` and `vpc_cni` are AWS concepts —
 workload identity (switched on here) and the VPC-native networking mode do the same jobs.
+`cluster_autoscaler` needs nothing either: the generated node pool has an `autoscaling`
+block, so GKE scales it between the min and max in the diagram.
 """
 
 [[providers.gcp.manual_steps]]

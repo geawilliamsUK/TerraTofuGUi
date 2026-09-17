@@ -137,7 +137,7 @@
           "availability_zone": "eu-west-2a"
         },
         "azure": {
-          "delegation": "none"
+          "delegation": "postgres_flexible"
         }
       },
       "position": {
@@ -234,8 +234,11 @@
         "addons": [
           "pod_identity_agent",
           "ebs_csi",
-          "metrics_server"
-        ]
+          "efs_csi",
+          "metrics_server",
+          "cluster_autoscaler"
+        ],
+        "container_insights": true
       },
       "provider_config": {},
       "position": {
@@ -344,7 +347,8 @@
       "resource_type": "kubernetes_workload",
       "config": {
         "namespace": "platform",
-        "service_account": "api"
+        "service_account": "api",
+        "db_user": "api"
       },
       "provider_config": {},
       "position": {
@@ -360,7 +364,8 @@
       "resource_type": "kubernetes_workload",
       "config": {
         "namespace": "platform",
-        "service_account": "asr-worker"
+        "service_account": "asr-worker",
+        "delete_objects": true
       },
       "provider_config": {},
       "position": {
@@ -440,6 +445,97 @@
       "position": {
         "x": 1560,
         "y": 180
+      },
+      "parent": "rg-k8s",
+      "manual": false
+    },
+    "fs-models": {
+      "id": "fs-models",
+      "name": "models",
+      "resource_type": "file_system",
+      "config": {
+        "performance": "general_purpose",
+        "size_gb": 1024
+      },
+      "provider_config": {
+        "azure": {
+          "account_name": "k8smodelsx7q2"
+        }
+      },
+      "position": {
+        "x": 1560,
+        "y": 580
+      },
+      "parent": "vnet-core",
+      "manual": false
+    },
+    "log-apps": {
+      "id": "log-apps",
+      "name": "app logs",
+      "resource_type": "log_group",
+      "config": {
+        "retention_days": "90"
+      },
+      "provider_config": {},
+      "position": {
+        "x": 1560,
+        "y": 260
+      },
+      "parent": "rg-k8s",
+      "manual": false
+    },
+    "db-core": {
+      "id": "db-core",
+      "name": "core db",
+      "resource_type": "relational_database",
+      "config": {
+        "engine": "postgres",
+        "size": "small",
+        "storage": "32",
+        "database_name": "core",
+        "admin_username": "dbadmin",
+        "iam_authentication": true
+      },
+      "provider_config": {
+        "azure": {
+          "server_name": "k8s-core-x7q2"
+        }
+      },
+      "position": {
+        "x": 700,
+        "y": 700
+      },
+      "parent": "vnet-core",
+      "manual": false
+    },
+    "role-report": {
+      "id": "role-report",
+      "name": "report role",
+      "resource_type": "iam_role",
+      "config": {
+        "trusted_service": "kubernetes",
+        "permissions": "none"
+      },
+      "provider_config": {},
+      "position": {
+        "x": 1260,
+        "y": 580
+      },
+      "parent": "rg-k8s",
+      "manual": false
+    },
+    "wl-report": {
+      "id": "wl-report",
+      "name": "reporting",
+      "resource_type": "kubernetes_workload",
+      "config": {
+        "namespace": "platform",
+        "service_account": "reporting"
+      },
+      "provider_config": {},
+      "position": {
+        "x": 1260,
+        "y": 660
       },
       "parent": "rg-k8s",
       "manual": false
@@ -555,6 +651,81 @@
       "source": "wl-asr",
       "target": "obj-transcripts",
       "relation": "attribute_reference"
+    },
+    {
+      "source": "fs-models",
+      "target": "subnet-nodes-a",
+      "relation": "network_membership"
+    },
+    {
+      "source": "fs-models",
+      "target": "subnet-nodes-b",
+      "relation": "network_membership"
+    },
+    {
+      "source": "db-core",
+      "target": "subnet-nodes-a",
+      "relation": "network_membership"
+    },
+    {
+      "source": "db-core",
+      "target": "subnet-nodes-b",
+      "relation": "network_membership"
+    },
+    {
+      "source": "wl-api",
+      "target": "log-apps",
+      "relation": "logs_to"
+    },
+    {
+      "source": "wl-api",
+      "target": "db-core",
+      "relation": "attribute_reference"
+    },
+    {
+      "source": "wl-api",
+      "target": "obj-transcripts",
+      "relation": "attribute_reference"
+    },
+    {
+      "source": "wl-asr",
+      "target": "fs-models",
+      "relation": "attachment"
+    },
+    {
+      "source": "wl-asr",
+      "target": "log-apps",
+      "relation": "logs_to"
+    },
+    {
+      "source": "wl-api",
+      "target": "wl-asr",
+      "relation": "calls"
+    },
+    {
+      "source": "wl-report",
+      "target": "k8s-platform",
+      "relation": "attachment"
+    },
+    {
+      "source": "wl-report",
+      "target": "role-report",
+      "relation": "iam_binding"
+    },
+    {
+      "source": "wl-report",
+      "target": "obj-transcripts",
+      "relation": "reads"
+    },
+    {
+      "source": "wl-report",
+      "target": "log-apps",
+      "relation": "logs_to"
+    },
+    {
+      "source": "wl-report",
+      "target": "wl-api",
+      "relation": "calls"
     }
   ]
 }

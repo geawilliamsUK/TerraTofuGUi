@@ -16,6 +16,10 @@
 #
 # Every provider is `partial`: the Deployment and its ServiceAccount are yours to apply,
 # and each provider needs a specific annotation or label on them.
+#
+# The links are deliberately split by intent: 'Uses' is read *and* write, 'Reads' is
+# read-only, and deleting objects is a separate switch, so a bucket link cannot quietly
+# hand a service the right to erase what it wrote. 'Calls' is documentation only.
 
 schema_version = 2
 
@@ -46,11 +50,32 @@ pattern = "^[a-z0-9]([-a-z0-9.]*[a-z0-9])?$"
 pattern_hint = "a Kubernetes service account name: lowercase letters, digits, hyphens and dots"
 description = "Defaults to the display name in kebab case. This is the ServiceAccount the pods must use."
 
+[[fields]]
+name = "delete_objects"
+label = "May delete objects"
+type = "bool"
+default = false
+description = "Add delete permission to the read/write bucket grant. Off by default: a service that writes new objects rarely needs to erase the ones already there, and the difference is exactly what a compromised pod would use."
+
+[[fields]]
+name = "db_user"
+label = "Database user"
+type = "string"
+pattern = "^[A-Za-z0-9_@.-]{1,63}$"
+pattern_hint = "a database user name"
+description = "The user the pods authenticate as when a linked database has IAM / directory authentication switched on. Defaults to the service account name."
+
 [[relations]]
 kind = "attachment"
 label = "Runs on"
 targets = ["kubernetes_cluster"]
 cardinality = "one"
+
+[[relations]]
+kind = "attachment"
+label = "Mounts (file system)"
+targets = ["file_system"]
+cardinality = "many"
 
 [[relations]]
 kind = "iam_binding"
@@ -60,7 +85,7 @@ cardinality = "one"
 
 [[relations]]
 kind = "attribute_reference"
-label = "Uses (consumes queue, database, cache, bucket)"
+label = "Uses (read / write): queue, database, cache, bucket"
 targets = ["event_queue", "relational_database", "cache", "object_storage"]
 cardinality = "many"
 
@@ -76,6 +101,28 @@ label = "Reads secrets"
 targets = ["secret"]
 cardinality = "many"
 
+# The same kind, a second declaration with its own targets: a bucket reached through
+# 'Reads' is read-only, where an 'Uses' bucket is read and write.
+[[relations]]
+kind = "reads"
+label = "Reads (read-only bucket)"
+targets = ["object_storage"]
+cardinality = "many"
+
+[[relations]]
+kind = "logs_to"
+label = "Logs to"
+targets = ["log_group"]
+cardinality = "many"
+
+# Documentation only: nothing is generated, no depends_on, no manual step. It records
+# which service talks to which so the diagram answers "what breaks if this one does".
+[[relations]]
+kind = "calls"
+label = "Calls (documentation only)"
+targets = ["kubernetes_workload"]
+cardinality = "many"
+
 # ---------------------------------------------------------------- AWS
 [providers.aws]
 status = "partial"
@@ -85,6 +132,18 @@ file = "container"
 when = { relation = "iam_binding", target_field = "trusted_service", not_equals = "kubernetes" }
 severity = "error"
 message = "\"{name}\" runs as a role that pods cannot assume; set the linked Role's 'Assumable by' to kubernetes so its trust policy names pods.eks.amazonaws.com"
+
+# The account and region only matter for the rds-db:connect ARN, which cannot be built
+# from a resource attribute: it names the database user, not the instance.
+[[providers.aws.data]]
+key = "account"
+resource = "aws_caller_identity"
+when = { relation = "attribute_reference", target_type = "relational_database", target_field = "iam_authentication" }
+
+[[providers.aws.data]]
+key = "region"
+resource = "aws_region"
+when = { relation = "attribute_reference", target_type = "relational_database", target_field = "iam_authentication" }
 
 [[providers.aws.blocks]]
 key = "main"
@@ -101,7 +160,7 @@ tags            = { object = { Name = { field = "name" } } }
 [[providers.aws.blocks]]
 key = "policy"
 resource = "aws_iam_role_policy"
-when = { any = [ { relation = "attribute_reference", target_type = "event_queue" }, { relation = "attribute_reference", target_type = "object_storage" }, { relation = "sends_to", target_type = "event_queue" }, { relation = "sends_to", target_type = "topic" }, { relation = "reads" } ] }
+when = { any = [ { relation = "attribute_reference", target_type = "event_queue" }, { relation = "attribute_reference", target_type = "object_storage" }, { relation = "attribute_reference", target_type = "relational_database", target_field = "iam_authentication" }, { relation = "sends_to", target_type = "event_queue" }, { relation = "sends_to", target_type = "topic" }, { relation = "reads" }, { relation = "logs_to" }, { relation = "attachment", target_type = "file_system" } ] }
 
 [providers.aws.blocks.args]
 name = { template = "{name}-policy", transform = "kebab" }
@@ -131,13 +190,37 @@ then = { object = { Sid = { value = "TopicPublish" }, Effect = { value = "Allow"
 
 # Read the secrets it reads.
 [[providers.aws.blocks.args.policy.args.object.Statement.list]]
-if = { relation = "reads" }
-then = { object = { Sid = { value = "Secrets" }, Effect = { value = "Allow" }, Action = { value = ["secretsmanager:GetSecretValue", "secretsmanager:DescribeSecret"] }, Resource = { relation = "reads", attr = "arn", wrap = "list" } } }
+if = { relation = "reads", target_type = "secret" }
+then = { object = { Sid = { value = "Secrets" }, Effect = { value = "Allow" }, Action = { value = ["secretsmanager:GetSecretValue", "secretsmanager:DescribeSecret"] }, Resource = { relation = "reads", target_type = "secret", attr = "arn", wrap = "list" } } }
 
-# Read / write the bucket(s) it uses.
+# Read / write the bucket(s) it uses. `s3:DeleteObject` is only granted when the workload
+# says it deletes objects, so the common case cannot erase what it wrote.
 [[providers.aws.blocks.args.policy.args.object.Statement.list]]
 if = { relation = "attribute_reference", target_type = "object_storage" }
-then = { object = { Sid = { value = "Bucket" }, Effect = { value = "Allow" }, Action = { value = ["s3:GetObject", "s3:PutObject", "s3:DeleteObject", "s3:ListBucket"] }, Resource = { func = "concat", args = [ { relation = "attribute_reference", target_type = "object_storage", attr = "arn", wrap = "list" }, { func = "formatlist", args = [ { value = "%s/*" }, { relation = "attribute_reference", target_type = "object_storage", attr = "arn", wrap = "list" } ] } ] } } }
+then = { object = { Sid = { value = "Bucket" }, Effect = { value = "Allow" }, Action = { if = { field = "delete_objects" }, then = { value = ["s3:GetObject", "s3:PutObject", "s3:DeleteObject", "s3:ListBucket"] }, else = { value = ["s3:GetObject", "s3:PutObject", "s3:ListBucket"] } }, Resource = { func = "concat", args = [ { relation = "attribute_reference", target_type = "object_storage", attr = "arn", wrap = "list" }, { func = "formatlist", args = [ { value = "%s/*" }, { relation = "attribute_reference", target_type = "object_storage", attr = "arn", wrap = "list" } ] } ] } } }
+
+# Read-only bucket(s): the 'Reads' link says this workload must not change them.
+[[providers.aws.blocks.args.policy.args.object.Statement.list]]
+if = { relation = "reads", target_type = "object_storage" }
+then = { object = { Sid = { value = "BucketRead" }, Effect = { value = "Allow" }, Action = { value = ["s3:GetObject", "s3:ListBucket"] }, Resource = { func = "concat", args = [ { relation = "reads", target_type = "object_storage", attr = "arn", wrap = "list" }, { func = "formatlist", args = [ { value = "%s/*" }, { relation = "reads", target_type = "object_storage", attr = "arn", wrap = "list" } ] } ] } } }
+
+# Ship logs to the linked group(s): the group ARN for the group itself, `<arn>:*` for the
+# streams inside it, which is where the log lines actually go.
+[[providers.aws.blocks.args.policy.args.object.Statement.list]]
+if = { relation = "logs_to" }
+then = { object = { Sid = { value = "Logs" }, Effect = { value = "Allow" }, Action = { value = ["logs:CreateLogStream", "logs:PutLogEvents", "logs:DescribeLogStreams"] }, Resource = { func = "concat", args = [ { relation = "logs_to", attr = "arn", wrap = "list" }, { func = "formatlist", args = [ { value = "%s:*" }, { relation = "logs_to", attr = "arn", wrap = "list" } ] } ] } } }
+
+# Mount the linked EFS file system(s). ClientRootAccess is what lets a container write as
+# a user other than the one the access point pins; drop it if the pods run unprivileged.
+[[providers.aws.blocks.args.policy.args.object.Statement.list]]
+if = { relation = "attachment", target_type = "file_system" }
+then = { object = { Sid = { value = "FileSystem" }, Effect = { value = "Allow" }, Action = { value = ["elasticfilesystem:ClientMount", "elasticfilesystem:ClientWrite", "elasticfilesystem:ClientRootAccess"] }, Resource = { relation = "attachment", target_type = "file_system", attr = "arn", wrap = "list" } } }
+
+# A database with IAM authentication is reached with the role itself. The resource names
+# the *database user*, not the instance, so the ARN is assembled rather than referenced.
+[[providers.aws.blocks.args.policy.args.object.Statement.list]]
+if = { relation = "attribute_reference", target_type = "relational_database", target_field = "iam_authentication" }
+then = { object = { Sid = { value = "DatabaseConnect" }, Effect = { value = "Allow" }, Action = { value = ["rds-db:connect"] }, Resource = { func = "formatlist", args = [ { value = "arn:aws:rds-db:%s:%s:dbuser:%s/%s" }, { self_data = "region", attr = "name" }, { self_data = "account", attr = "account_id" }, { relation = "attribute_reference", target_type = "relational_database", attr = "resource_id", wrap = "list" }, { field = "db_user", fallback = { field = "service_account", fallback = { field = "name", transform = "kebab" } } } ] } } }
 
 [providers.aws.outputs]
 service_account = { attr = "service_account", description = "ServiceAccount the pods must run as" }
@@ -153,15 +236,84 @@ Identity needs no annotation on the ServiceAccount, but the cluster **must** run
 """
 
 [[providers.aws.manual_steps]]
-title = "Database and cache access is not an IAM grant"
-when = { any = [ { relation = "attribute_reference", target_type = "relational_database" }, { relation = "attribute_reference", target_type = "cache" } ] }
+title = "Database access is not an IAM grant"
+when = { relation = "attribute_reference", target_type = "relational_database", target_field = "iam_authentication", not_equals = "true" }
 body = """
-No policy statement is generated for a linked database or cache, because neither is
-reached with the pod's IAM role by default: RDS wants a user name and password (put them in
-a Secret and link it with 'Reads'), and ElastiCache has no IAM at all. Switch the database
-to IAM database authentication if you want the role to be enough — that adds an
-`rds-db:connect` statement whose resource names the database user, which the diagram does
-not know.
+No policy statement is generated for the linked database: RDS wants a user name and a
+password unless IAM database authentication is on. Put the credentials in a Secret and link
+it with 'Reads', or tick **IAM / directory authentication** on the database — an
+`rds-db:connect` statement for this workload's database user is then generated instead.
+"""
+
+[[providers.aws.manual_steps]]
+title = "Create the database user the role connects as"
+when = { relation = "attribute_reference", target_type = "relational_database", target_field = "iam_authentication" }
+body = """
+The policy grants `rds-db:connect` on
+`arn:aws:rds-db:<region>:<account>:dbuser:<instance resource id>/<database user>`, with the
+database user taken from the workload's **Database user** field (the service account name
+by default). That user has to exist inside the database and be told to trust IAM:
+
+    CREATE USER "<database user>";
+    GRANT rds_iam TO "<database user>";          -- PostgreSQL
+    CREATE USER '<database user>' IDENTIFIED WITH AWSAuthenticationPlugin AS 'RDS';  -- MySQL
+
+The pods then fetch a token (`aws rds generate-db-auth-token`, or the SDK's signer) and use
+it as the password. TLS is mandatory for IAM authentication.
+"""
+
+[[providers.aws.manual_steps]]
+title = "Cache access is not an IAM grant"
+when = { relation = "attribute_reference", target_type = "cache" }
+body = """
+No policy statement is generated for a linked cache: ElastiCache has no IAM data plane
+for the engines this type creates. Link a Secret holding the auth token instead.
+"""
+
+[[providers.aws.manual_steps]]
+title = "Forward the container logs to the log group"
+when = { relation = "logs_to" }
+body = """
+The policy lets these pods create streams and put events in the linked log group, but
+nothing in the cluster forwards container logs on its own. Install **Fluent Bit** (the
+`aws-for-fluent-bit` chart) or the CloudWatch agent as a DaemonSet, point its `cloudwatch_logs`
+output at the group's name, and give its ServiceAccount this workload's role — or, more
+usually, a role of its own with the same statement. Nothing else needs the credentials:
+the agent picks them up from EKS Pod Identity.
+"""
+
+[[providers.aws.manual_steps]]
+title = "Mount the file system with the EFS CSI driver"
+when = { relation = "attachment", target_type = "file_system" }
+body = """
+The policy lets these pods mount the linked EFS file system; the volume itself is a
+Kubernetes object. Tick `efs_csi` in the cluster's **Add-ons**, then apply a StorageClass,
+a PersistentVolume and a claim, taking the file system id from the generated
+`<file system>_id` output:
+
+    apiVersion: v1
+    kind: PersistentVolume
+    metadata:
+      name: models
+    spec:
+      capacity: { storage: 100Gi }
+      accessModes: [ReadWriteMany]
+      persistentVolumeReclaimPolicy: Retain
+      storageClassName: efs-sc
+      csi:
+        driver: efs.csi.aws.com
+        volumeHandle: <the file system id>
+    ---
+    apiVersion: v1
+    kind: PersistentVolumeClaim
+    metadata: { name: models, namespace: <namespace> }
+    spec:
+      accessModes: [ReadWriteMany]
+      storageClassName: efs-sc
+      resources: { requests: { storage: 100Gi } }
+
+and mount the claim in the pod template. The mount targets must sit in subnets the nodes
+can reach, and their security group must allow TCP 2049 from the nodes.
 """
 
 # ---------------------------------------------------------------- Azure
@@ -219,10 +371,23 @@ principal_id         = { relation = "iam_binding", attr = "principal_id" }
 key = "secret_read"
 resource = "azurerm_role_assignment"
 for_each_relation = "reads"
+for_each_target_type = "secret"
 
 [providers.azure.blocks.args]
 scope                = { target = "id" }
 role_definition_name = { value = "Key Vault Secrets User" }
+principal_id         = { relation = "iam_binding", attr = "principal_id" }
+
+# A 'Reads' bucket is read-only: the reader role cannot write or delete.
+[[providers.azure.blocks]]
+key = "blob_read"
+resource = "azurerm_role_assignment"
+for_each_relation = "reads"
+for_each_target_type = "object_storage"
+
+[providers.azure.blocks.args]
+scope                = { target = "id" }
+role_definition_name = { value = "Storage Blob Data Reader" }
 principal_id         = { relation = "iam_binding", attr = "principal_id" }
 
 [[providers.azure.blocks]]
@@ -255,14 +420,71 @@ taking the client id from the linked Role's managed identity (its `client_id` ou
 """
 
 [[providers.azure.manual_steps]]
-title = "Database and cache access is not a role assignment"
-when = { any = [ { relation = "attribute_reference", target_type = "relational_database" }, { relation = "attribute_reference", target_type = "cache" } ] }
+title = "Database access is not a role assignment"
+when = { relation = "attribute_reference", target_type = "relational_database", target_field = "iam_authentication", not_equals = "true" }
 body = """
-No role assignment is generated for a linked database or cache. PostgreSQL Flexible Server
-can authenticate the managed identity through Microsoft Entra, but that needs an Entra
-administrator and a database role created inside the server; Azure Cache for Redis uses
-access keys. Link a Secret with the credentials instead, or wire Entra authentication by
-hand.
+No role assignment is generated for the linked database: a flexible server is reached with
+a login and password unless directory authentication is on. Link a Secret with the
+credentials, or tick **IAM / directory authentication** on the database.
+"""
+
+[[providers.azure.manual_steps]]
+title = "Map the identity to a database role"
+when = { relation = "attribute_reference", target_type = "relational_database", target_field = "iam_authentication" }
+body = """
+The server accepts Microsoft Entra tokens, but this identity still needs a principal
+inside the database. With an Entra administrator on the server, run
+
+    SELECT * FROM pgaadauth_create_principal('<identity name>', false, false);
+    GRANT ... TO "<identity name>";
+
+then have the pods request a token for `https://ossrdbms-aad.database.windows.net` and use
+it as the password. The user name is the identity's name, not the **Database user** field
+(which is an AWS concept).
+"""
+
+[[providers.azure.manual_steps]]
+title = "Cache access is not a role assignment"
+when = { relation = "attribute_reference", target_type = "cache" }
+body = """
+No role assignment is generated for a linked cache: Azure Cache for Redis authenticates
+with access keys. Link a Secret with the key instead.
+"""
+
+[[providers.azure.manual_steps]]
+title = "A blob contributor may also delete"
+when = { all = [ { relation = "attribute_reference", target_type = "object_storage" }, { field = "delete_objects", equals = "false" } ] }
+body = """
+This workload is marked as not deleting objects, but Azure has no built-in role between
+*Storage Blob Data Reader* and *Storage Blob Data Contributor*: the assignment generated
+for an 'Uses' bucket carries `.../blobs/delete`. Either accept it, or replace the
+assignment with a custom role definition that omits that action and
+`.../blobs/deleteBlobVersion`. Link the bucket with 'Reads' instead when the workload only
+reads it — that generates the reader role.
+"""
+
+[[providers.azure.manual_steps]]
+title = "Container logs reach the workspace through the cluster"
+when = { relation = "logs_to" }
+body = """
+Nothing is generated for this link. On AKS container logs are collected by **Container
+Insights**, which runs as the *cluster's* add-on and writes with the *cluster's* identity,
+not this workload's: switch on **Container Insights** on the Kubernetes Cluster and link the
+same Log Analytics workspace there. The pods then need no credentials of their own; what
+this link records is which workspace the logs are expected to land in.
+"""
+
+[[providers.azure.manual_steps]]
+title = "Mount the file system with the Azure Files CSI driver"
+when = { relation = "attachment", target_type = "file_system" }
+body = """
+Nothing is generated for this link: an Azure Files NFS share is mounted with the built-in
+`file.csi.azure.com` driver, which reads the storage account key from a Kubernetes Secret
+rather than from this workload's identity. Create that Secret (`azurestorageaccountname` /
+`azurestorageaccountkey`), then a PersistentVolume with `csi.driver: file.csi.azure.com`,
+`volumeHandle: <resource group>#<account>#<share>` and `mountOptions` of
+`vers=4,minorversion=1,sec=sys`, and a claim for the pods. The share is only reachable
+over a private route — see the File System's own manual step.
 """
 
 # ---------------------------------------------------------------- GCP
@@ -319,12 +541,27 @@ member       = { relation = "iam_binding", attr = "member" }
 key = "secret_read"
 resource = "google_secret_manager_secret_iam_member"
 for_each_relation = "reads"
+for_each_target_type = "secret"
 
 [providers.gcp.blocks.args]
 secret_id = { target = "id" }
 role      = { value = "roles/secretmanager.secretAccessor" }
 member    = { relation = "iam_binding", attr = "member" }
 
+# A 'Reads' bucket is read-only.
+[[providers.gcp.blocks]]
+key = "bucket_read"
+resource = "google_storage_bucket_iam_member"
+for_each_relation = "reads"
+for_each_target_type = "object_storage"
+
+[providers.gcp.blocks.args]
+bucket = { target = "name" }
+role   = { value = "roles/storage.objectViewer" }
+member = { relation = "iam_binding", attr = "member" }
+
+# Read / write without delete is objectViewer + objectCreator; objectAdmin is the only
+# built-in role that also deletes, so it is used exactly when the workload asks for it.
 [[providers.gcp.blocks]]
 key = "bucket_rw"
 resource = "google_storage_bucket_iam_member"
@@ -333,8 +570,31 @@ for_each_target_type = "object_storage"
 
 [providers.gcp.blocks.args]
 bucket = { target = "name" }
-role   = { value = "roles/storage.objectAdmin" }
+role   = { if = { field = "delete_objects" }, then = { value = "roles/storage.objectAdmin" }, else = { value = "roles/storage.objectCreator" } }
 member = { relation = "iam_binding", attr = "member" }
+
+[[providers.gcp.blocks]]
+key = "bucket_rw_read"
+resource = "google_storage_bucket_iam_member"
+for_each_relation = "attribute_reference"
+for_each_target_type = "object_storage"
+when = { field = "delete_objects", not_equals = "true" }
+
+[providers.gcp.blocks.args]
+bucket = { target = "name" }
+role   = { value = "roles/storage.objectViewer" }
+member = { relation = "iam_binding", attr = "member" }
+
+# Writing to Cloud Logging is a project-level role: there is no per-bucket log writer.
+[[providers.gcp.blocks]]
+key = "log_writer"
+resource = "google_project_iam_member"
+when = { relation = "logs_to" }
+
+[providers.gcp.blocks.args]
+project = { var = "project" }
+role    = { value = "roles/logging.logWriter" }
+member  = { relation = "iam_binding", attr = "member" }
 
 [providers.gcp.outputs]
 member = { attr = "member", description = "Workload identity member (serviceAccount:<workload pool>[<ns>/<sa>])" }
@@ -351,11 +611,56 @@ the pod template. Without the annotation the pods fall back to the node's servic
 """
 
 [[providers.gcp.manual_steps]]
-title = "Database and cache access is not an IAM grant"
-when = { any = [ { relation = "attribute_reference", target_type = "relational_database" }, { relation = "attribute_reference", target_type = "cache" } ] }
+title = "Database access is not an IAM grant"
+when = { relation = "attribute_reference", target_type = "relational_database", target_field = "iam_authentication", not_equals = "true" }
 body = """
-No IAM member is generated for a linked database or cache. Cloud SQL accepts the service
-account through the Cloud SQL Auth Proxy with `roles/cloudsql.client`, which also needs the
-proxy as a sidecar; Memorystore has no IAM data plane. Link a Secret with the credentials
-instead.
+No IAM member is generated for the linked database. Cloud SQL accepts the service account
+through the Cloud SQL Auth Proxy with `roles/cloudsql.client`, which also needs the proxy as
+a sidecar; without it the instance wants a password. Link a Secret with the credentials, or
+tick **IAM / directory authentication** on the database.
+"""
+
+[[providers.gcp.manual_steps]]
+title = "Grant the service account the Cloud SQL instance-user role"
+when = { relation = "attribute_reference", target_type = "relational_database", target_field = "iam_authentication" }
+body = """
+The instance has `cloudsql.iam_authentication` on, so this service account can log in with
+an OAuth token — once it is a database user (a `google_sql_user` of type
+`CLOUD_IAM_SERVICE_ACCOUNT`, named with the account's email minus the
+`.gserviceaccount.com` suffix) and holds `roles/cloudsql.instanceUser` plus
+`roles/cloudsql.client` on the project. Neither is generated here, because both are
+project-level grants rather than links in the diagram.
+"""
+
+[[providers.gcp.manual_steps]]
+title = "Cache access is not an IAM grant"
+when = { relation = "attribute_reference", target_type = "cache" }
+body = """
+No IAM member is generated for a linked cache: Memorystore has no IAM data plane. Link a
+Secret with the auth string instead.
+"""
+
+[[providers.gcp.manual_steps]]
+title = "roles/logging.logWriter is project-wide"
+when = { relation = "logs_to" }
+body = """
+Cloud Logging has no per-bucket write permission: the generated
+`google_project_iam_member` lets this workload write **any** log in the project, and the
+linked Log Group only decides where the entries are kept. Route them there with a log sink
+whose filter matches this workload (`resource.labels.namespace_name` /
+`labels."k8s-pod/app"`), and remember that GKE already forwards container stdout with the
+node's own identity, so this grant is only needed when the pods call the Logging API
+themselves.
+"""
+
+[[providers.gcp.manual_steps]]
+title = "Mount the file system with the Filestore CSI driver"
+when = { relation = "attachment", target_type = "file_system" }
+body = """
+Nothing is generated for this link: a Filestore share is mounted with the
+`filestore.csi.storage.gke.io` driver, which needs no identity of its own — the nodes reach
+the instance over the VPC. Switch on the Filestore CSI driver in the cluster
+(`addons_config.gcp_filestore_csi_driver_config`), then create a PersistentVolume with
+`volumeHandle: modeInstance/<zone>/<instance>/share` and a claim for the pods, taking the
+address from the File System's own manual step.
 """

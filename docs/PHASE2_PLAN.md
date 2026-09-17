@@ -543,6 +543,63 @@ now required only when no Topic is linked. GCP's billing account moves to a proj
 override for projects that already set it. `examples/operations.ttg.json` links its
 Budget to its Topic to exercise the lot.
 
+## Round 2: Kubernetes (gap report R2.12, R2.14, R2.18, R2.19)
+
+A production EKS design rebuilt through the MCP showed what the Kubernetes types still
+could not say. Four log groups were "unreferenced" because a workload could only log
+through its cluster; a `/models` mount was undocumented; every bucket link granted Get,
+Put, Delete and List, so the API could delete the recordings it wrote; one service calling
+another was a flow annotation rather than a link; a workload could not reach a database on
+AWS at all; and the Log Group drawn for the control plane sat unused next to the one EKS
+named itself.
+
+- **Workload links** — `logs_to` a Log Group (AWS: a `logs:CreateLogStream` /
+  `PutLogEvents` / `DescribeLogStreams` statement on `<arn>` and `<arn>:*`, with Fluent Bit
+  left as a manual step; GCP: one project-level `roles/logging.logWriter` member, because
+  Cloud Logging has no per-bucket write; Azure: a manual step, since Container Insights
+  writes with the *cluster's* identity), `attachment` to a File System ("Mounts": AWS
+  grants `elasticfilesystem:ClientMount` / `ClientWrite` / `ClientRootAccess` and the
+  manual step carries the EFS CSI PersistentVolume snippet; Azure Files and Filestore CSI
+  are manual steps), and `calls` to another workload — documentation only.
+- **Bucket access split by intent** — 'Uses' stays read *and* write but no longer implies
+  delete: a new `delete_objects` field adds `s3:DeleteObject` / picks
+  `roles/storage.objectAdmin` over `objectCreator` + `objectViewer`. A second `reads`
+  declaration makes a bucket link read-only (`s3:GetObject` + `ListBucket`, *Storage Blob
+  Data Reader*, `roles/storage.objectViewer`). Azure has no built-in role between reader
+  and contributor, and says so.
+- **Workload → database on AWS** — `iam_authentication` on Relational Database
+  (`iam_database_authentication_enabled`, an `authentication` block with the Entra tenant
+  on a PostgreSQL flexible server, the `cloudsql.iam_authentication` database flag). The
+  workload then gets `rds-db:connect` on
+  `arn:aws:rds-db:<region>:<account>:dbuser:<resource id>/<db user>`, with the account and
+  region from `aws_caller_identity` / `aws_region` data sources and the user from a new
+  `db_user` field. The old "database access is not an IAM grant" step now only applies
+  when the switch is off; with it on, each provider explains the database role to create.
+- **The EKS log group** — a Log Group a cluster logs to is named `/aws/eks/<cluster>/cluster`,
+  so Terraform owns it instead of racing EKS for it. The name is built from the *cluster's
+  field*, not its resource, and the cluster `depends_on` the group: a reference would be a
+  cycle. Two clusters logging to one group is an error.
+- **Autoscaling and insights** — `cluster_autoscaler` joins the cluster's add-ons: on AWS
+  it emits the discovery tags on the cluster's node group *and* on every linked node pool,
+  an IAM role trusted by pods, the autoscaler policy and a pod identity association for
+  `kube-system/cluster-autoscaler`, leaving only the Helm chart; on AKS and GKE it is
+  accepted and the manual step says nothing is needed. A `container_insights` bool emits
+  the `amazon-cloudwatch-observability` add-on plus `CloudWatchAgentServerPolicy` on AWS,
+  `oms_agent` against the linked workspace on Azure (an error without one), and
+  `monitoring_config` with managed Prometheus on GCP. The `node_count` alarm warning is
+  gone when the watched cluster has it on.
+- **Mapping language** — `incoming = true` now works as an *argument source*, not only as
+  a condition; `field = "<name>"` on a relation source reads the other entity's field as a
+  literal (no reference, so no dependency); `min_count = N` counts matching targets instead
+  of asking "any?"; and `equals` / `not_equals` against a `string_list` field mean
+  membership, which is how a node pool reads its cluster's add-on list.
+- **`calls`** — a new relation kind with no mapping at all: no `depends_on`, no manual
+  step, no "cannot express" diagnostic, and out of the dependency graph, so two services
+  calling each other is not a cycle.
+- `examples/kubernetes.ttg.json` grows a third workload that reads a bucket read-only and
+  calls the API, an EFS file system the ASR worker mounts, an application Log Group all
+  three workloads write to, and an IAM-authenticated database.
+
 ## Explicitly still out of scope
 
 Running `plan`/`apply`, live-account access, multi-user collaboration, cost estimation,

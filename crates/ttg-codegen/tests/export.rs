@@ -318,6 +318,172 @@ status = "logical"
         .expect("a declared relation names its own subjects");
 }
 
+/// An `incoming` relation source reads the edges that point *at* an entity, so there is no
+/// declaration of the kind on this type to check against — only the kind itself and the
+/// other end's type. `field` takes a value off that other entity instead of a reference to
+/// its resource, which is how a name can be built from a neighbour without depending on it.
+#[test]
+fn incoming_relation_sources_are_checked_against_the_other_end() {
+    let head = r#"
+schema_version = 2
+[resource]
+type = "thing"
+category = "network"
+display_name = "Thing"
+[providers.aws]
+[[providers.aws.blocks]]
+key = "main"
+resource = "aws_thing"
+[providers.aws.blocks.args]
+name = "#;
+    let aws = include_str!("../../../definitions/providers/aws.toml");
+    let other = r#"
+schema_version = 2
+[resource]
+type = "other"
+category = "network"
+display_name = "Other"
+[[fields]]
+name = "size"
+type = "string"
+[providers.aws]
+[[providers.aws.blocks]]
+key = "main"
+resource = "aws_other"
+"#;
+    let load = |src: &str| {
+        let def = format!("{head}{src}\n");
+        Catalog::from_sources(
+            [("thing.toml", def.as_str()), ("other.toml", other)].into_iter(),
+            [("aws.toml", aws)].into_iter(),
+        )
+        .map(|_| ())
+    };
+
+    // An outgoing source still has to name a relation the type declares.
+    let err = load(r#"{ relation = "logs_to", attr = "id" }"#).expect_err("undeclared");
+    assert!(err.to_string().contains("undeclared relation 'logs_to'"), "{err}");
+    load(r#"{ relation = "logs_to", incoming = true, attr = "id" }"#)
+        .expect("an incoming source needs no declaration of its own");
+    let err = load(r#"{ relation = "shouts_at", incoming = true, attr = "id" }"#).expect_err("unknown kind");
+    assert!(err.to_string().contains("unknown relation kind"), "{err}");
+    let err = load(r#"{ relation = "logs_to", incoming = true, target_type = "nope", attr = "id" }"#)
+        .expect_err("unknown type");
+    assert!(err.to_string().contains("not a known type"), "{err}");
+
+    // `field` and `attr` answer different questions; only one may be asked.
+    let err = load(
+        r#"{ relation = "logs_to", incoming = true, target_type = "other", field = "size", attr = "id" }"#,
+    )
+    .expect_err("both");
+    assert!(
+        err.to_string().contains("field and attr cannot be combined"),
+        "{err}"
+    );
+    let err = load(r#"{ relation = "logs_to", incoming = true, target_type = "other", field = "nope" }"#)
+        .expect_err("unknown field");
+    assert!(err.to_string().contains("'other' has no field 'nope'"), "{err}");
+    let err = load(r#"{ relation = "logs_to", incoming = true, attr = "id", transform = "kebab" }"#)
+        .expect_err("transform without field");
+    assert!(
+        err.to_string().contains("only applies together with field"),
+        "{err}"
+    );
+    load(
+        r#"{ relation = "logs_to", incoming = true, target_type = "other", field = "size", transform = "kebab" }"#,
+    )
+    .expect("reading a field off the other end is valid");
+
+    // `min_count` counts the matching targets; 0 is what `absent` is for.
+    let cond_head = head.replace("[providers.aws.blocks.args]\nname = ", "when = ");
+    let load = |src: &str| {
+        let def = format!("{cond_head}{src}\n");
+        Catalog::from_sources(
+            [("thing.toml", def.as_str()), ("other.toml", other)].into_iter(),
+            [("aws.toml", aws)].into_iter(),
+        )
+        .map(|_| ())
+    };
+    let err = load(r#"{ relation = "logs_to", incoming = true, min_count = 0 }"#).expect_err("min_count 0");
+    assert!(err.to_string().contains("min_count must be at least 1"), "{err}");
+    load(r#"{ relation = "logs_to", incoming = true, min_count = 2 }"#).expect("counting is valid");
+}
+
+/// R2.18: a Log Group a Kubernetes Cluster logs to takes the name EKS would give itself,
+/// built from the cluster's *field* so nothing refers to the cluster resource; the cluster
+/// waits for the group instead. Two clusters cannot share one group, and `min_count = 2`
+/// is what says so.
+#[test]
+fn the_eks_log_group_is_named_after_its_cluster() {
+    let cat = Catalog::builtin();
+    let p = example("kubernetes.ttg.json");
+    let g = generate(&p, &cat, "aws", Tool::OpenTofu).unwrap();
+    assert!(
+        g.files["monitoring.tf"].contains("format(\"/aws/eks/%s/cluster\", \"platform\")"),
+        "{}",
+        g.files["monitoring.tf"]
+    );
+    assert!(g.diagnostics.iter().all(|d| d.severity != Severity::Error));
+    // Azure and Google Cloud have no such convention: the group keeps its own name.
+    for provider in ["azure", "gcp"] {
+        let g = generate(&p, &cat, provider, Tool::OpenTofu).unwrap();
+        assert!(
+            g.files["monitoring.tf"].contains("cluster-logs"),
+            "{}",
+            g.files["monitoring.tf"]
+        );
+    }
+
+    // A second cluster logging to the same group is an error, not a silent rename.
+    let mut p2 = p.clone();
+    let mut second = p2.nodes["k8s-platform"].clone();
+    second.id = "k8s-second".into();
+    second.name = "second".into();
+    p2.nodes.insert(second.id.clone(), second);
+    p2.add_edge(
+        "k8s-second",
+        "subnet-nodes-a",
+        ttg_core::Relation::NetworkMembership,
+    );
+    p2.add_edge(
+        "k8s-second",
+        "subnet-nodes-b",
+        ttg_core::Relation::NetworkMembership,
+    );
+    p2.add_edge("k8s-second", "log-cluster", ttg_core::Relation::LogsTo);
+    let d = ttg_codegen::diagnostics::run(&p2, &cat, "aws");
+    assert!(
+        d.iter()
+            .any(|x| x.severity == Severity::Error && x.message.contains("more than one Kubernetes Cluster")),
+        "{:?}",
+        d.iter().map(|x| &x.message).collect::<Vec<_>>()
+    );
+}
+
+/// `calls` is documentation only: it neither generates anything nor orders anything, so
+/// two services that call each other are not a dependency cycle.
+#[test]
+fn calls_edges_are_documentation_only() {
+    let cat = Catalog::builtin();
+    let mut p = example("kubernetes.ttg.json");
+    // api -> asr worker already exists; close the loop.
+    p.add_edge("wl-asr", "wl-api", ttg_core::Relation::Calls);
+    assert!(!ttg_core::validate::structural(&p).has_errors());
+    let g = generate(&p, &cat, "aws", Tool::OpenTofu).expect("a call cycle still exports");
+    assert!(g.diagnostics.iter().all(|d| d.severity != Severity::Error));
+    assert!(
+        !g.manual_steps.iter().any(|s| s.title.contains("Calls")),
+        "{:?}",
+        g.manual_steps.iter().map(|s| &s.title).collect::<Vec<_>>()
+    );
+    // A depends_on edge between the same two would order them; `calls` does not.
+    assert!(
+        !g.files["container.tf"].contains("aws_eks_pod_identity_association.api\n"),
+        "{}",
+        g.files["container.tf"]
+    );
+}
+
 #[test]
 fn step4_network_database_load_balancer() {
     let cat = Catalog::builtin();
@@ -1461,10 +1627,52 @@ fn kubernetes_example_node_pools_and_workload_identity() {
         c.contains("taint {\n    key    = \"nvidia.com/gpu\"\n    value  = \"present\"\n    effect = \"NO_SCHEDULE\"\n  }"),
         "{c}"
     );
-    // Add-ons: one aws_eks_addon per entry of the abstract list.
-    assert_eq!(c.matches("resource \"aws_eks_addon\"").count(), 3, "{c}");
+    // Add-ons: one aws_eks_addon per entry of the abstract list, except
+    // `cluster_autoscaler` (not an EKS add-on), plus the Container Insights add-on.
+    assert_eq!(c.matches("resource \"aws_eks_addon\"").count(), 5, "{c}");
     assert!(c.contains("addon_name   = \"eks-pod-identity-agent\""), "{c}");
     assert!(c.contains("addon_name   = \"aws-ebs-csi-driver\""), "{c}");
+    assert!(
+        c.contains("addon_name   = \"amazon-cloudwatch-observability\""),
+        "container insights installs the observability add-on: {c}"
+    );
+    assert!(
+        aws.files["iam.tf"].contains("policy_arn = \"arn:aws:iam::aws:policy/CloudWatchAgentServerPolicy\"")
+            || c.contains("policy_arn = \"arn:aws:iam::aws:policy/CloudWatchAgentServerPolicy\""),
+        "the nodes may publish what the agent collects: {c}"
+    );
+    // The Cluster Autoscaler: discovery tags on both node groups, a role pods may assume
+    // and the pod identity association for kube-system/cluster-autoscaler.
+    assert_eq!(
+        c.matches("k8s.io/cluster-autoscaler/enabled").count(),
+        2,
+        "the cluster's own group and the linked pool: {c}"
+    );
+    assert!(
+        c.contains("zipmap([\"Name\", \"k8s.io/cluster-autoscaler/enabled\", format(\"k8s.io/cluster-autoscaler/%s\", aws_eks_cluster.platform.name)], [\"gpu\", \"true\", \"owned\"])"),
+        "{c}"
+    );
+    assert!(c.contains("name               = \"platform-autoscaler\""), "{c}");
+    assert!(c.contains("\"autoscaling:SetDesiredCapacity\""), "{c}");
+    assert!(
+        c.contains("service_account = \"cluster-autoscaler\"")
+            && c.contains("namespace       = \"kube-system\""),
+        "{c}"
+    );
+    assert!(
+        aws.manual_steps
+            .iter()
+            .any(|s| s.title.contains("Install the Cluster Autoscaler chart")),
+        "{:?}",
+        aws.manual_steps.iter().map(|s| &s.title).collect::<Vec<_>>()
+    );
+    assert!(
+        !aws.manual_steps
+            .iter()
+            .any(|s| s.title.contains("Scaling a pool to zero")),
+        "the pool scales to zero because the autoscaler is generated: {:?}",
+        aws.manual_steps.iter().map(|s| &s.title).collect::<Vec<_>>()
+    );
     // Cluster logs and API endpoint access.
     assert!(c.contains("enabled_cluster_log_types = ["), "{c}");
     assert!(c.contains("endpoint_private_access = false"), "{c}");
@@ -1482,6 +1690,85 @@ fn kubernetes_example_node_pools_and_workload_identity() {
     assert!(
         c.contains("Sid = \"QueueConsume\"") && c.contains("Sid = \"Bucket\""),
         "the asr worker consumes the queue and writes the bucket: {c}"
+    );
+    // Bucket access splits three ways: read/write with delete, read/write without, and
+    // read-only through the 'Reads' link.
+    assert!(
+        c.contains("Action = [\"s3:GetObject\", \"s3:PutObject\", \"s3:DeleteObject\", \"s3:ListBucket\"]"),
+        "the asr worker may delete: {c}"
+    );
+    assert!(
+        c.contains("Action = [\"s3:GetObject\", \"s3:PutObject\", \"s3:ListBucket\"]"),
+        "the api may not: {c}"
+    );
+    assert!(
+        c.contains(
+            "Sid = \"BucketRead\", Effect = \"Allow\", Action = [\"s3:GetObject\", \"s3:ListBucket\"]"
+        ),
+        "the reporting workload only reads: {c}"
+    );
+    // Logs: the group ARN and its streams, for all three workloads.
+    assert_eq!(c.matches("Sid = \"Logs\"").count(), 3, "{c}");
+    assert!(
+        c.contains("Resource = concat([aws_cloudwatch_log_group.app_logs.arn], formatlist(\"%s:*\", [aws_cloudwatch_log_group.app_logs.arn]))"),
+        "{c}"
+    );
+    // The mounted file system.
+    assert!(
+        c.contains("Sid = \"FileSystem\", Effect = \"Allow\", Action = [\"elasticfilesystem:ClientMount\", \"elasticfilesystem:ClientWrite\", \"elasticfilesystem:ClientRootAccess\"], Resource = [aws_efs_file_system.models.arn]"),
+        "{c}"
+    );
+    assert!(
+        aws.manual_steps
+            .iter()
+            .any(|s| s.title.contains("EFS CSI driver")),
+        "{:?}",
+        aws.manual_steps.iter().map(|s| &s.title).collect::<Vec<_>>()
+    );
+    // A database with IAM authentication: rds-db:connect on the instance's resource id
+    // and this workload's database user, with the account and region read from data.
+    assert!(c.contains("data \"aws_caller_identity\" \"api_account\""), "{c}");
+    assert!(
+        c.contains("Sid = \"DatabaseConnect\", Effect = \"Allow\", Action = [\"rds-db:connect\"], Resource = formatlist(\"arn:aws:rds-db:%s:%s:dbuser:%s/%s\", data.aws_region.api_region.name, data.aws_caller_identity.api_account.account_id, [aws_db_instance.core_db.resource_id], \"api\")"),
+        "{c}"
+    );
+    assert!(
+        aws.files["database.tf"].contains("iam_database_authentication_enabled = true"),
+        "{}",
+        aws.files["database.tf"]
+    );
+    assert!(
+        aws.manual_steps
+            .iter()
+            .any(|s| s.title.contains("Create the database user the role connects as"))
+            && !aws
+                .manual_steps
+                .iter()
+                .any(|s| s.title.contains("Database access is not an IAM grant")),
+        "{:?}",
+        aws.manual_steps.iter().map(|s| &s.title).collect::<Vec<_>>()
+    );
+    // The linked Log Group takes the name EKS would have used, and the cluster waits for
+    // it rather than referring to it (which would be a cycle).
+    let mon = &aws.files["monitoring.tf"];
+    assert!(
+        mon.contains("name              = format(\"/aws/eks/%s/cluster\", \"platform\")"),
+        "{mon}"
+    );
+    assert!(mon.contains("name              = \"app-logs\""), "{mon}");
+    assert!(
+        c.contains("aws_iam_role_policy_attachment.platform_cluster_policy,\n    aws_cloudwatch_log_group.cluster_logs"),
+        "{c}"
+    );
+    // `calls` is documentation only: no depends_on, no manual step, no diagnostic.
+    assert!(
+        !c.contains("aws_eks_pod_identity_association.asr_worker\n"),
+        "a calls edge must not order anything: {c}"
+    );
+    assert!(
+        !aws.manual_steps.iter().any(|s| s.title.contains("(Calls")),
+        "{:?}",
+        aws.manual_steps.iter().map(|s| &s.title).collect::<Vec<_>>()
     );
     // A role pods may assume: EKS Pod Identity principal and sts:TagSession.
     let iam = &aws.files["iam.tf"];
@@ -1526,11 +1813,11 @@ fn kubernetes_example_node_pools_and_workload_identity() {
         "{c}"
     );
     assert!(
-        c.contains("issuer  = azurerm_kubernetes_cluster.platform.oidc_issuer_url"),
+        c.contains("issuer     = azurerm_kubernetes_cluster.platform.oidc_issuer_url"),
         "{c}"
     );
     assert!(
-        c.contains("subject = format(\"system:serviceaccount:%s:%s\", \"platform\", \"api\")"),
+        c.contains("subject    = format(\"system:serviceaccount:%s:%s\", \"platform\", \"api\")"),
         "{c}"
     );
     assert!(
@@ -1540,6 +1827,26 @@ fn kubernetes_example_node_pools_and_workload_identity() {
     assert!(
         c.contains("resource \"azurerm_monitor_diagnostic_setting\" \"platform_diag_0\""),
         "{c}"
+    );
+    // Container Insights is the cluster's own agent writing into the linked workspace.
+    assert!(
+        c.contains("oms_agent {\n    log_analytics_workspace_id = azurerm_log_analytics_workspace.cluster_logs.id\n  }"),
+        "{c}"
+    );
+    // Read-only bucket -> reader role; read/write -> contributor.
+    assert!(
+        c.contains("role_definition_name = \"Storage Blob Data Reader\"")
+            && c.contains("role_definition_name = \"Storage Blob Data Contributor\""),
+        "{c}"
+    );
+    // Entra authentication on the flexible server, with the tenant read from the client.
+    let db = &az.files["database.tf"];
+    assert!(
+        db.contains("active_directory_auth_enabled = true")
+            && db.contains(
+                "tenant_id                     = data.azurerm_client_config.core_db_entra.tenant_id"
+            ),
+        "{db}"
     );
 
     // ------------------------------------------------------------------ GCP
@@ -1566,6 +1873,26 @@ fn kubernetes_example_node_pools_and_workload_identity() {
         "{c}"
     );
     assert!(c.contains("enable_components = ["), "cluster logging: {c}");
+    assert!(
+        c.contains("managed_prometheus {\n      enabled = true\n    }"),
+        "container insights on GKE: {c}"
+    );
+    // Read-only bucket -> objectViewer; read/write without delete -> creator + viewer;
+    // read/write with delete -> objectAdmin.
+    assert!(c.contains("role   = \"roles/storage.objectViewer\""), "{c}");
+    assert!(c.contains("role   = \"roles/storage.objectCreator\""), "{c}");
+    assert!(c.contains("role   = \"roles/storage.objectAdmin\""), "{c}");
+    // Logging is a project-level role, one member per workload that logs.
+    assert_eq!(
+        c.matches("role    = \"roles/logging.logWriter\"").count(),
+        3,
+        "{c}"
+    );
+    assert!(
+        gcp.files["database.tf"].contains("name  = \"cloudsql.iam_authentication\""),
+        "{}",
+        gcp.files["database.tf"]
+    );
 
     // A mapping that documents a relation in its own manual step does not also get the
     // generic "link by hand" entry.

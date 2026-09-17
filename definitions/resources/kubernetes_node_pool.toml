@@ -142,7 +142,9 @@ instance_types  = { provider_field = "instance_type", wrap = "list", fallback = 
 capacity_type   = { if = { field = "spot" }, then = { value = "SPOT" }, else = { value = "ON_DEMAND" } }
 ami_type        = { if = { field = "gpu" }, then = { value = "AL2023_x86_64_NVIDIA" }, else = { value = "AL2023_x86_64_STANDARD" } }
 labels          = { field = "labels", wrap = "map" }
-tags            = { object = { Name = { field = "name" } } }
+# The cluster's add-on list decides whether this pool advertises itself to the Cluster
+# Autoscaler. The second tag key carries the cluster name, so the map is built with zipmap.
+tags            = { if = { relation = "attachment", target_type = "kubernetes_cluster", target_field = "addons", equals = "cluster_autoscaler" }, then = { func = "zipmap", args = [ { list = [ { value = "Name" }, { value = "k8s.io/cluster-autoscaler/enabled" }, { func = "format", args = [ { value = "k8s.io/cluster-autoscaler/%s" }, { relation = "attachment", target_type = "kubernetes_cluster", attr = "name" } ] } ] }, { list = [ { field = "name" }, { value = "true" }, { value = "owned" } ] } ] }, else = { object = { Name = { field = "name" } } } }
 depends_on      = { list = [ { relation = "attachment", target_type = "kubernetes_cluster", block = "node_policy_worker", attr = "" }, { relation = "attachment", target_type = "kubernetes_cluster", block = "node_policy_cni", attr = "" }, { relation = "attachment", target_type = "kubernetes_cluster", block = "node_policy_ecr", attr = "" } ] }
 
 [[providers.aws.blocks.nested]]
@@ -167,13 +169,13 @@ arn = { attr = "arn", description = "Node group ARN" }
 
 [[providers.aws.manual_steps]]
 title = "Scaling a pool to zero needs the Cluster Autoscaler"
-when = { field = "min_nodes", equals = "0" }
+when = { all = [ { field = "min_nodes", equals = "0" }, { relation = "attachment", target_type = "kubernetes_cluster", target_field = "addons", equals = "cluster_autoscaler", absent = true } ] }
 body = """
 EKS itself never changes the node count. A pool whose minimum is 0 stays at its desired
-size until the **Cluster Autoscaler** (or Karpenter) runs in the cluster and is allowed to
-discover this group — tag it `k8s.io/cluster-autoscaler/enabled` and
-`k8s.io/cluster-autoscaler/<cluster name>`, and give the autoscaler's service account
-`autoscaling:DescribeAutoScalingGroups` / `SetDesiredCapacity` on it.
+size until the **Cluster Autoscaler** (or Karpenter) runs in the cluster. Add
+**cluster_autoscaler** to the linked cluster's Add-ons: the discovery tags on this pool,
+the autoscaler's role and its pod identity are then generated, and only the Helm chart is
+left to install.
 """
 
 # ---------------------------------------------------------------- Azure
