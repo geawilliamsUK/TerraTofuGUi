@@ -255,6 +255,11 @@ pub struct BlockDef {
     pub resource: String,
     #[serde(default)]
     pub when: Option<Condition>,
+    /// Emit this block through an aliased configuration of the target provider
+    /// (schema_version 2), e.g. `us_east_1` for CloudFront's certificates and Web ACLs.
+    /// The alias must be declared in the provider definition.
+    #[serde(default)]
+    pub provider_alias: Option<String>,
     /// Emit one block per row of this `struct_list` / `string_list` field
     /// (schema_version 2). Sources inside may use `{ item = "..." }`.
     #[serde(default)]
@@ -775,6 +780,10 @@ pub struct ProviderDef {
     pub variables: Vec<VariableDef>,
     #[serde(default)]
     pub provider_block: ProviderBlockDef,
+    /// Extra configurations of the same provider a mapping may send a block to with
+    /// `provider_alias`. Each is emitted only when some emitted block uses it.
+    #[serde(default)]
+    pub aliases: Vec<ProviderAliasDef>,
     /// Container type every resource must be inside (Azure: `resource_group`).
     #[serde(default)]
     pub required_ancestor: Option<String>,
@@ -786,6 +795,21 @@ pub struct ProviderDef {
     /// How the project's default tags reach this provider's output.
     #[serde(default)]
     pub default_tags: Option<DefaultTagsDef>,
+}
+
+/// A second configuration of the same provider, written as
+/// `provider "<local_name>" { alias = "<name>" … }`. `args` override the arguments of the
+/// normal provider block; everything else (nested blocks, default tags) is copied from it.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ProviderAliasDef {
+    /// Alias name; also the HCL identifier blocks reference as `<local_name>.<name>`.
+    pub name: String,
+    #[serde(default)]
+    pub description: String,
+    /// Provider-block arguments this configuration replaces, e.g. `region`.
+    #[serde(default)]
+    pub args: IndexMap<String, ArgSource>,
 }
 
 /// A provider a curated mapping borrows one resource type from, without it becoming a

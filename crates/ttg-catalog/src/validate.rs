@@ -67,6 +67,7 @@ pub fn catalog(cat: &Catalog) -> Vec<String> {
             blocks: &[],
             data: &[],
             vars: &vars,
+            aliases: &[],
             item_fields: None,
             in_relation: false,
             cat,
@@ -77,6 +78,25 @@ pub fn catalog(cat: &Catalog) -> Vec<String> {
         }
         for n in &p.provider_block.nested {
             check_nested(&mut ctx, n, &mut errs);
+        }
+        // Aliases: a second configuration of the same provider, referenced by blocks as
+        // `provider_alias` and written as `<local_name>.<name>`, so the name has to be an
+        // HCL identifier.
+        let mut alias_names = HashSet::new();
+        for a in &p.aliases {
+            if !is_hcl_identifier(&a.name) {
+                errs.push(format!(
+                    "provider '{pid}': alias '{}' is not a valid HCL identifier",
+                    a.name
+                ));
+            }
+            if !alias_names.insert(a.name.as_str()) {
+                errs.push(format!("provider '{pid}': duplicate alias '{}'", a.name));
+            }
+            ctx.what = format!("provider '{pid}' alias '{}'", a.name);
+            for (k, src) in &a.args {
+                check_source(&mut ctx, &format!("arg '{k}'"), src, &mut errs);
+            }
         }
     }
 
@@ -217,6 +237,7 @@ pub fn catalog(cat: &Catalog) -> Vec<String> {
             let data_keys: Vec<&str> = m.data.iter().map(|b| b.key.as_str()).collect();
             let mut vars: Vec<&str> = pdef.variables.iter().map(|v| v.name.as_str()).collect();
             vars.extend(m.variables.iter().map(|v| v.name.as_str()));
+            let aliases: Vec<&str> = pdef.aliases.iter().map(|a| a.name.as_str()).collect();
             let mut ctx = SourceCtx {
                 what: pw(""),
                 fields: &def.fields,
@@ -225,6 +246,7 @@ pub fn catalog(cat: &Catalog) -> Vec<String> {
                 blocks: &block_keys,
                 data: &data_keys,
                 vars: &vars,
+                aliases: &aliases,
                 item_fields: None,
                 in_relation: false,
                 cat,
@@ -277,7 +299,8 @@ pub fn catalog(cat: &Catalog) -> Vec<String> {
         if uses_v2 && def.schema_version < 2 {
             errs.push(where_(
                 "uses schema_version 2 features (struct_list, for_each_field, data, item, \
-                 item_index, self_data, if, fallback, target_type, for_each_relation, target) but declares schema_version = 1",
+                 item_index, self_data, if, fallback, target_type, for_each_relation, target, \
+                 provider_alias) but declares schema_version = 1",
             ));
         }
     }
@@ -345,6 +368,8 @@ struct SourceCtx<'a> {
     blocks: &'a [&'a str],
     data: &'a [&'a str],
     vars: &'a [&'a str],
+    /// Provider aliases a block may send itself to with `provider_alias`.
+    aliases: &'a [&'a str],
     /// Sub-fields available to `item` sources, when inside a `for_each_field` block.
     item_fields: Option<Vec<String>>,
     /// Inside a `for_each_relation` block: `target` sources are valid.
@@ -362,9 +387,26 @@ impl<'a> SourceCtx<'a> {
     }
 }
 
+/// HCL identifiers start with a letter or `_` and continue with letters, digits, `-` or
+/// `_`. Alias names become one (`aws.us_east_1`), so they have to qualify.
+fn is_hcl_identifier(s: &str) -> bool {
+    let mut chars = s.chars();
+    chars.next().is_some_and(|c| c.is_ascii_alphabetic() || c == '_')
+        && chars.all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
+}
+
 fn check_block(ctx: &mut SourceCtx, b: &BlockDef, errs: &mut Vec<String>) {
     let outer_items = ctx.item_fields.clone();
     let outer_rel = ctx.in_relation;
+    if let Some(alias) = &b.provider_alias {
+        ctx.v2 = true;
+        if !ctx.aliases.contains(&alias.as_str()) {
+            errs.push(format!(
+                "{}block '{}': provider_alias '{alias}' is not declared by this provider",
+                ctx.what, b.key
+            ));
+        }
+    }
     if let Some(rel) = &b.for_each_relation {
         ctx.v2 = true;
         if b.for_each_field.is_some() {

@@ -143,8 +143,15 @@ pub fn render_versions(
     format!("{header}\n{}", fmt_block(&tf))
 }
 
-pub fn render_providers(header: &str, block: &Block) -> String {
-    format!("{header}\n{}", fmt_block(block))
+/// `providers.tf`: the project's own provider configuration, followed by the aliased ones
+/// some emitted resource sends itself to (`provider = aws.us_east_1`).
+pub fn render_providers(header: &str, blocks: &[Block]) -> String {
+    let mut out = String::from(header);
+    for b in blocks {
+        out.push('\n');
+        out.push_str(&fmt_block(b));
+    }
+    out
 }
 
 pub fn render_backend(header: &str, block: &Block) -> String {

@@ -5,6 +5,8 @@
 #      emits the CNAME records ACM asks for and an aws_acm_certificate_validation that
 #      blocks until the certificate is issued, so `apply` produces a usable certificate in
 #      one go. Without a zone the certificate stays PENDING_VALIDATION (manual step).
+#      A CDN that links to the certificate gets a second copy of all of it in us-east-1,
+#      the only region CloudFront reads certificates from.
 # Azure: there is no provider-neutral managed certificate. Drawn inside a Key Vault the
 #      mapping creates an azurerm_key_vault_certificate with a self-signed issuer policy —
 #      real enough to attach, but not publicly trusted; swap the issuer for a CA. Outside a
@@ -88,8 +90,55 @@ when = { relation = "attribute_reference", target_type = "dns_zone" }
 certificate_arn         = { self_block = "main", attr = "arn" }
 validation_record_fqdns = { raw = "[for r in @records@ : r.fqdn]", refs = { records = { self_block = "validation", attr = "" } } }
 
+# CloudFront only reads certificates from us-east-1, so a CDN that links here gets its own
+# copy of the same certificate in that region. The regional one keeps serving the load
+# balancer. Both are validated through the same zone: the validation records of the two
+# requests may or may not coincide, and `allow_overwrite` makes either case work.
+[[providers.aws.blocks]]
+key = "global"
+resource = "aws_acm_certificate"
+provider_alias = "us_east_1"
+when = { relation = "attribute_reference", incoming = true, target_type = "cdn" }
+
+[providers.aws.blocks.args]
+domain_name               = { field = "domain" }
+subject_alternative_names = { field = "alternative_names", optional = true }
+validation_method         = { value = "DNS" }
+tags                      = { object = { Name = { template = "{name} (us-east-1)" } } }
+
+[[providers.aws.blocks]]
+key = "global_validation"
+resource = "aws_route53_record"
+when = { all = [
+  { relation = "attribute_reference", incoming = true, target_type = "cdn" },
+  { relation = "attribute_reference", target_type = "dns_zone" },
+] }
+
+[providers.aws.blocks.args]
+for_each        = { raw = "{ for o in @options@ : o.domain_name => o }", refs = { options = { self_block = "global", attr = "domain_validation_options" } } }
+zone_id         = { relation = "attribute_reference", target_type = "dns_zone", attr = "zone_id" }
+name            = { raw = "each.value.resource_record_name" }
+type            = { raw = "each.value.resource_record_type" }
+records         = { raw = "[each.value.resource_record_value]" }
+ttl             = { value = 60 }
+allow_overwrite = { value = true }
+
+[[providers.aws.blocks]]
+key = "global_issued"
+resource = "aws_acm_certificate_validation"
+provider_alias = "us_east_1"
+when = { all = [
+  { relation = "attribute_reference", incoming = true, target_type = "cdn" },
+  { relation = "attribute_reference", target_type = "dns_zone" },
+] }
+
+[providers.aws.blocks.args]
+certificate_arn         = { self_block = "global", attr = "arn" }
+validation_record_fqdns = { raw = "[for r in @records@ : r.fqdn]", refs = { records = { self_block = "global_validation", attr = "" } } }
+
 [providers.aws.outputs]
-arn = { attr = "arn", description = "Certificate ARN" }
+arn        = { attr = "arn", description = "Certificate ARN" }
+global_arn = { block = "global", attr = "arn", description = "ARN of the us-east-1 copy CloudFront uses" }
 
 [[providers.aws.manual_steps]]
 title = "Validate the certificate by hand"
@@ -98,8 +147,9 @@ body = """
 No DNS Zone is linked, so the certificate is created with `validation_method = "DNS"` and
 stays in `PENDING_VALIDATION`. Read the CNAME name/value from the certificate's
 `domain_validation_options` (console or `aws acm describe-certificate`) and add it to
-whoever hosts the domain. Link a DNS Zone with **Validated in** to have the records and the
-`aws_acm_certificate_validation` generated instead.
+whoever hosts the domain. Do it for every copy of the certificate: a CDN linked to this
+one also gets a us-east-1 request of its own. Link a DNS Zone with **Validated in** to have
+the records and the `aws_acm_certificate_validation` generated instead.
 """
 
 # ---------------------------------------------------------------- Azure

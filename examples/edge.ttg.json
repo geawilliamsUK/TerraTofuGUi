@@ -233,7 +233,8 @@
       "config": {
         "domain": "www.example.com",
         "alternative_names": [
-          "example.com"
+          "example.com",
+          "assets.example.com"
         ]
       },
       "provider_config": {},
@@ -258,6 +259,24 @@
       "position": {
         "x": 1000,
         "y": 170
+      },
+      "parent": "zone-public",
+      "manual": false
+    },
+    "rec-assets": {
+      "id": "rec-assets",
+      "name": "assets record",
+      "resource_type": "dns_record",
+      "config": {
+        "record_name": "assets",
+        "record_type": "A",
+        "ttl": 300,
+        "values": []
+      },
+      "provider_config": {},
+      "position": {
+        "x": 1000,
+        "y": 240
       },
       "parent": "zone-public",
       "manual": false
@@ -341,7 +360,9 @@
       "id": "cdn-assets",
       "name": "assets cdn",
       "resource_type": "cdn",
-      "config": {},
+      "config": {
+        "domain": "assets.example.com"
+      },
       "provider_config": {},
       "position": {
         "x": 1360,
@@ -428,8 +449,23 @@
       "relation": "attribute_reference"
     },
     {
+      "source": "cdn-assets",
+      "target": "cert-site",
+      "relation": "attribute_reference"
+    },
+    {
+      "source": "cdn-assets",
+      "target": "waf-edge",
+      "relation": "attribute_reference"
+    },
+    {
       "source": "rec-www",
       "target": "lb-web",
+      "relation": "attribute_reference"
+    },
+    {
+      "source": "rec-assets",
+      "target": "cdn-assets",
       "relation": "attribute_reference"
     }
   ]

@@ -126,6 +126,8 @@ struct Emitter<'a> {
     instances: HashMap<(Id, String), Vec<String>>,
     vars: IndexMap<String, VarSpec>,
     used_vars: HashSet<String>,
+    /// Provider aliases some emitted block sent itself to; only these get a block.
+    used_aliases: HashSet<String>,
     manual: Vec<ManualEntry>,
     manual_refs_done: HashSet<Id>,
 }
@@ -155,6 +157,7 @@ pub fn generate(p: &Project, cat: &Catalog, provider: &str, tool: Tool) -> Resul
         instances: HashMap::new(),
         vars: IndexMap::new(),
         used_vars: HashSet::new(),
+        used_aliases: HashSet::new(),
         manual: Vec::new(),
         manual_refs_done: HashSet::new(),
     };
@@ -430,10 +433,10 @@ pub fn generate(p: &Project, cat: &Catalog, provider: &str, tool: Tool) -> Resul
         "versions.tf".into(),
         files::render_versions(&header, &em.profile, pdef, &helpers),
     );
-    let provider_block = em.build_provider_block()?;
+    let provider_blocks = em.build_provider_blocks()?;
     files.insert(
         "providers.tf".into(),
-        files::render_providers(&header, &provider_block),
+        files::render_providers(&header, &provider_blocks),
     );
     if let Some(b) = em
         .profile
@@ -511,6 +514,15 @@ fn data_traversal(resource_type: &str, local: &str, attr: &str) -> Expression {
         .attr(resource_type)
         .attr(local);
     Expression::Traversal(Box::new(attr_path(t, attr).build()))
+}
+
+/// `aws.us_east_1` — the value of a block's `provider` meta-argument.
+fn provider_ref(local_name: &str, alias: &str) -> Expression {
+    Expression::Traversal(Box::new(
+        Traversal::builder(Variable::unchecked(local_name))
+            .attr(alias)
+            .build(),
+    ))
 }
 
 fn var_ref(name: &str) -> Expression {
@@ -839,6 +851,16 @@ impl<'a> Emitter<'a> {
             .add_label(b.resource.as_str())
             .add_label(local);
         let extra = e.extra_args(self.provider, &b.key).cloned().unwrap_or_default();
+        // An aliased configuration of the same provider (CloudFront's us-east-1
+        // certificates and Web ACLs). Emitting the alias marks it as used, so the
+        // aliased provider block is only written when something actually needs it.
+        if let Some(alias) = &b.provider_alias {
+            if !extra.contains_key("provider") {
+                self.used_aliases.insert(alias.clone());
+                builder =
+                    builder.add_attribute(("provider", provider_ref(self.pdef.provider.local_name(), alias)));
+            }
+        }
         for (k, src) in &b.args {
             if extra.contains_key(k) {
                 continue; // an extra argument overrides what the mapping sets
@@ -1044,10 +1066,48 @@ impl<'a> Emitter<'a> {
         Ok(out)
     }
 
-    fn build_provider_block(&mut self) -> Result<Block, GenError> {
-        let mut builder = Block::builder("provider").add_label(self.pdef.provider.local_name());
+    /// The `provider` blocks: the project's own configuration, plus one per alias some
+    /// emitted block sent itself to. An alias nothing uses is left out, so `init` never
+    /// asks for credentials a configuration does not need.
+    fn build_provider_blocks(&mut self) -> Result<Vec<Block>, GenError> {
+        let pdef = self.pdef;
+        let used: Vec<&ttg_catalog::ProviderAliasDef> = pdef
+            .aliases
+            .iter()
+            .filter(|a| self.used_aliases.contains(&a.name))
+            .collect();
+        let mut out = vec![self.build_provider_block(None)?];
+        for a in used {
+            out.push(self.build_provider_block(Some(a))?);
+        }
+        Ok(out)
+    }
+
+    fn build_provider_block(
+        &mut self,
+        alias: Option<&ttg_catalog::ProviderAliasDef>,
+    ) -> Result<Block, GenError> {
+        let pdef = self.pdef;
+        let mut builder = Block::builder("provider").add_label(pdef.provider.local_name());
+        if let Some(a) = alias {
+            builder = builder.add_attribute(("alias", a.name.as_str()));
+        }
+        // An alias replaces individual arguments of the normal block (a region) and keeps
+        // the rest, including the nested blocks and the project's default tags.
+        let args: IndexMap<&String, &ArgSource> = pdef
+            .provider_block
+            .args
+            .iter()
+            .map(|(k, v)| (k, alias.and_then(|a| a.args.get(k)).unwrap_or(v)))
+            .chain(
+                alias
+                    .into_iter()
+                    .flat_map(|a| a.args.iter())
+                    .filter(|(k, _)| !pdef.provider_block.args.contains_key(*k)),
+            )
+            .collect();
         // Provider block sources may only use `var` / literals; resolve with a dummy entity.
-        for (k, src) in &self.pdef.provider_block.args {
+        for (k, src) in args {
             let expr = match src {
                 ArgSource::Var(v) => {
                     self.used_vars.insert(v.var.clone());

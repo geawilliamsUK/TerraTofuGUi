@@ -1636,8 +1636,8 @@ fn edge_aws_https_waf_cdn_and_alias() {
     assert!(net.contains("scope = \"REGIONAL\""));
     assert_eq!(
         net.matches("managed_rule_group_statement").count(),
-        3,
-        "one statement per managed rule group"
+        6,
+        "one statement per managed rule group, in the REGIONAL and the CLOUDFRONT ACL"
     );
     assert!(net.contains("override_action { none {} }"), "{net}");
     assert!(
@@ -1649,16 +1649,20 @@ fn edge_aws_https_waf_cdn_and_alias() {
 
     // CloudFront over the bucket: origin access control plus the reader policy.
     assert!(net.contains("origin_access_control_id = aws_cloudfront_origin_access_control.assets_cdn_oac.id"));
-    assert!(net.contains("cloudfront_default_certificate = true"));
     assert!(
         net.contains("\"AWS:SourceArn\" = aws_cloudfront_distribution.assets_cdn.arn"),
         "{net}"
     );
 
-    // Alias record: an `alias` block instead of records / ttl.
+    // Alias records: an `alias` block instead of records / ttl, for the load balancer and
+    // for the distribution.
     let dns = norm(&g.files["dns.tf"]);
     assert!(
         dns.contains("alias { name = aws_lb.web_lb.dns_name zone_id = aws_lb.web_lb.zone_id evaluate_target_health = false }"),
+        "{dns}"
+    );
+    assert!(
+        dns.contains("alias { name = aws_cloudfront_distribution.assets_cdn.domain_name zone_id = aws_cloudfront_distribution.assets_cdn.hosted_zone_id evaluate_target_health = false }"),
         "{dns}"
     );
     assert!(
@@ -1734,7 +1738,9 @@ fn edge_gcp_builds_a_global_https_load_balancer() {
 
     let net = norm(&g.files["network.tf"]);
     assert!(
-        net.contains("managed { domains = concat([\"www.example.com\"], [\"example.com\"]) }"),
+        net.contains(
+            "managed { domains = concat([\"www.example.com\"], [\"example.com\", \"assets.example.com\"]) }"
+        ),
         "{net}"
     );
     // Cloud Armor: one rule per translatable group, a rate-based ban and the catch-all.
@@ -1774,6 +1780,202 @@ fn https_without_a_certificate_is_an_error() {
     }
     // Azure never terminates TLS on a load balancer, so it has nothing to complain about.
     generate(&p, &cat, "azure", Tool::OpenTofu).unwrap();
+}
+
+// ---------------------------------------------------------------- provider aliases
+
+#[test]
+fn a_cdn_pulls_its_certificate_and_web_acl_into_us_east_1() {
+    let cat = Catalog::builtin();
+    let p = example("edge.ttg.json");
+    let g = generate(&p, &cat, "aws", Tool::OpenTofu).unwrap();
+
+    // The aliased provider block: the normal arguments with the alias' overrides applied.
+    let providers = norm(&g.files["providers.tf"]);
+    assert!(
+        providers.contains("provider \"aws\" { region = var.region }"),
+        "{providers}"
+    );
+    assert!(
+        providers.contains("provider \"aws\" { alias = \"us_east_1\" region = \"us-east-1\" }"),
+        "{providers}"
+    );
+
+    let net = norm(&g.files["network.tf"]);
+    // A second certificate, its validation records and its own validation resource.
+    assert!(
+        net.contains("resource \"aws_acm_certificate\" \"site_cert_global\" { provider = aws.us_east_1"),
+        "{net}"
+    );
+    assert!(net.contains(
+        "for_each = {for o in aws_acm_certificate.site_cert_global.domain_validation_options : o.domain_name => o}"
+    ));
+    assert!(
+        net.contains("resource \"aws_acm_certificate_validation\" \"site_cert_global_issued\" { provider = aws.us_east_1 certificate_arn = aws_acm_certificate.site_cert_global.arn"),
+        "{net}"
+    );
+    // The same rules again, CloudFront-scoped.
+    assert!(
+        net.contains("resource \"aws_wafv2_web_acl\" \"edge_waf_global\" { provider = aws.us_east_1"),
+        "{net}"
+    );
+    assert!(net.contains("scope = \"CLOUDFRONT\""));
+    assert_eq!(
+        net.matches("managed_rule_group_statement").count(),
+        6,
+        "three managed rule groups in each of the two Web ACLs"
+    );
+    // ... and the distribution uses both copies.
+    assert!(
+        net.contains("web_acl_id = aws_wafv2_web_acl.edge_waf_global.arn"),
+        "{net}"
+    );
+    assert!(
+        net.contains(
+            "acm_certificate_arn = aws_acm_certificate_validation.site_cert_global_issued.certificate_arn"
+        ),
+        "{net}"
+    );
+    assert!(
+        !net.contains("cloudfront_default_certificate"),
+        "the distribution has a certificate of its own: {net}"
+    );
+
+    // Nothing is left for the operator, and nothing is flagged.
+    let steps = &g.files["MANUAL_STEPS.md"];
+    assert!(!steps.contains("CLOUDFRONT-scoped Web ACL"), "{steps}");
+    assert!(
+        !steps.contains("Point the custom domain at the distribution"),
+        "{steps}"
+    );
+    assert!(
+        !g.diagnostics.iter().any(|d| d.message.contains("not wired up")),
+        "{:?}",
+        g.diagnostics
+    );
+}
+
+#[test]
+fn an_alias_nothing_uses_gets_no_provider_block() {
+    let cat = Catalog::builtin();
+    let mut p = example("edge.ttg.json");
+    // Without the CDN's links there is nothing in us-east-1 to configure.
+    p.edges
+        .retain(|e| !(e.source == "cdn-assets" && (e.target == "cert-site" || e.target == "waf-edge")));
+    let g = generate(&p, &cat, "aws", Tool::OpenTofu).unwrap();
+    assert_eq!(g.files["providers.tf"].matches("provider \"aws\"").count(), 1);
+    assert!(!g.files["providers.tf"].contains("alias"));
+    let net = &g.files["network.tf"];
+    assert!(!net.contains("aws.us_east_1"), "{net}");
+    assert!(!net.contains("site_cert_global"), "{net}");
+    assert!(!net.contains("edge_waf_global"), "{net}");
+    assert!(net.contains("cloudfront_default_certificate = true"));
+}
+
+#[test]
+fn an_aliased_provider_block_carries_the_project_tags() {
+    let cat = Catalog::builtin();
+    let mut p = example("edge.ttg.json");
+    p.settings.tags.insert("owner".into(), "platform".into());
+    let g = generate(&p, &cat, "aws", Tool::OpenTofu).unwrap();
+    let providers = norm(&g.files["providers.tf"]);
+    assert_eq!(
+        providers
+            .matches("default_tags { tags = { owner = \"platform\" } }")
+            .count(),
+        2,
+        "both configurations tag what they create: {providers}"
+    );
+}
+
+// ---------------------------------------------------------------- DNS alias to a CDN
+
+#[test]
+fn a_record_aliases_a_cdn_on_every_provider() {
+    let cat = Catalog::builtin();
+    let p = example("edge.ttg.json");
+
+    // AWS: a Route 53 alias block, no records and no ttl.
+    let aws = norm(&generate(&p, &cat, "aws", Tool::OpenTofu).unwrap().files["dns.tf"]);
+    assert!(
+        aws.contains("name = aws_cloudfront_distribution.assets_cdn.domain_name"),
+        "{aws}"
+    );
+
+    // Azure: the endpoint is the alias target of the A record set.
+    let azure = norm(&generate(&p, &cat, "azure", Tool::OpenTofu).unwrap().files["dns.tf"]);
+    assert!(
+        azure.contains("resource \"azurerm_dns_a_record\" \"assets_record_a\""),
+        "{azure}"
+    );
+    assert!(
+        azure.contains("target_resource_id = azurerm_cdn_endpoint.assets_cdn.id"),
+        "{azure}"
+    );
+    assert!(
+        !azure.contains("records = ["),
+        "an alias record has no literal values: {azure}"
+    );
+
+    // Google Cloud has no alias record, so the CDN reserves an address for the record.
+    let gcp = generate(&p, &cat, "gcp", Tool::OpenTofu).unwrap();
+    assert!(
+        norm(&gcp.files["network.tf"]).contains(
+            "resource \"google_compute_global_address\" \"assets_cdn_addr\" { name = \"assets-cdn-address\""
+        ),
+        "{}",
+        gcp.files["network.tf"]
+    );
+    assert!(norm(&gcp.files["dns.tf"])
+        .contains("rrdatas = [ google_compute_global_address.assets_cdn_addr.address ]"));
+    assert!(gcp.files["MANUAL_STEPS.md"].contains("Give the reserved address to the front end"));
+}
+
+#[test]
+fn a_cdn_alias_needs_no_placeholder_values() {
+    let cat = Catalog::builtin();
+    let p = example("edge.ttg.json");
+    for provider in ["aws", "azure", "gcp"] {
+        let g = generate(&p, &cat, provider, Tool::OpenTofu).unwrap();
+        assert!(
+            !g.diagnostics.iter().any(|d| d.message.contains("has no values")),
+            "{provider}: {:?}",
+            g.diagnostics
+        );
+    }
+}
+
+#[test]
+fn azure_accepts_a_cname_alias_of_a_cdn_but_not_of_a_load_balancer() {
+    let cat = Catalog::builtin();
+    let mut p = example("edge.ttg.json");
+    p.nodes
+        .get_mut("rec-assets")
+        .unwrap()
+        .config
+        .insert("record_type".into(), ttg_core::Value::Str("CNAME".into()));
+
+    let g = generate(&p, &cat, "azure", Tool::OpenTofu).unwrap();
+    let dns = norm(&g.files["dns.tf"]);
+    assert!(
+        dns.contains("resource \"azurerm_dns_cname_record\" \"assets_record_cname\""),
+        "{dns}"
+    );
+    assert!(
+        dns.contains("target_resource_id = azurerm_cdn_endpoint.assets_cdn.id"),
+        "{dns}"
+    );
+    assert!(
+        !dns.contains("record = one("),
+        "an alias CNAME has no literal record: {dns}"
+    );
+
+    // A load balancer alias is its public IP address, which no CNAME can name.
+    p.edges
+        .retain(|e| !(e.source == "rec-assets" && e.target == "cdn-assets"));
+    p.add_edge("rec-assets", "lb-web", ttg_core::Relation::AttributeReference);
+    let err = generate(&p, &cat, "azure", Tool::OpenTofu).unwrap_err();
+    assert!(err.to_string().contains("set the type to A"), "{err}");
 }
 
 // ---------------------------------------------------------------------------

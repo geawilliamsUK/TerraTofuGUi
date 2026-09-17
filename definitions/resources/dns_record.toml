@@ -6,8 +6,9 @@
 # block per entry (`for_each_field` over a string_list).
 #
 # An 'Alias of' link to a Load Balancer or CDN replaces the literal values with the
-# provider's own alias mechanism: a Route 53 `alias` block, an Azure `target_resource_id`,
-# or the Google forwarding rule's address.
+# provider's own alias mechanism: a Route 53 `alias` block, an Azure `target_resource_id`
+# (A or CNAME for a CDN endpoint, A only for a load balancer's public IP), or, on Google
+# Cloud, which has no alias record, the address of the thing that fronts it.
 
 schema_version = 2
 
@@ -114,9 +115,11 @@ name                = { field = "record_name" }
 zone_name           = { relation = "attribute_reference", target_type = "dns_zone", attr = "name" }
 resource_group_name = { ancestor = "resource_group", attr = "name" }
 ttl                 = { field = "ttl" }
-# Azure aliases an A record to a public IP resource; the Load Balancer's is its `pip` block.
-target_resource_id  = { relation = "attribute_reference", target_type = "load_balancer", block = "pip", attr = "id", optional = true }
-records             = { if = { relation = "attribute_reference", target_type = "load_balancer", absent = true }, then = { field = "values" } }
+# An Azure alias record set names the target resource. An A record may point at a public IP
+# (the Load Balancer's `pip` block) or at a CDN endpoint — the latter is how a zone apex
+# reaches a CDN, since the apex cannot hold a CNAME.
+target_resource_id  = { relation = "attribute_reference", target_type = "load_balancer", block = "pip", attr = "id", fallback = { relation = "attribute_reference", target_type = "cdn", attr = "id" } }
+records             = { if = { all = [ { relation = "attribute_reference", target_type = "load_balancer", absent = true }, { relation = "attribute_reference", target_type = "cdn", absent = true } ] }, then = { field = "values" } }
 
 [[providers.azure.blocks]]
 key = "cname"
@@ -128,7 +131,10 @@ name                = { field = "record_name" }
 zone_name           = { relation = "attribute_reference", target_type = "dns_zone", attr = "name" }
 resource_group_name = { ancestor = "resource_group", attr = "name" }
 ttl                 = { field = "ttl" }
-record              = { func = "one", args = [ { field = "values" } ] }
+# A CNAME may be an alias of a CDN endpoint too; a public IP is not a CNAME target, so a
+# load balancer alias is rejected by the check below rather than mapped here.
+target_resource_id  = { relation = "attribute_reference", target_type = "cdn", attr = "id" }
+record              = { if = { relation = "attribute_reference", target_type = "cdn", absent = true }, then = { func = "one", args = [ { field = "values" } ] } }
 
 [[providers.azure.blocks]]
 key = "txt"
@@ -155,23 +161,27 @@ txt_fqdn   = { block = "txt", attr = "fqdn", description = "Fully qualified reco
 
 [[providers.azure.checks]]
 severity = "error"
-when = { all = [ { field = "record_type", not_equals = "A" }, { any = [ { relation = "attribute_reference", target_type = "load_balancer" }, { relation = "attribute_reference", target_type = "cdn" } ] } ] }
-message = "\"{name}\" is an alias of a load balancer or CDN, which only works for an A record; set the type to A or remove the link"
+when = { all = [ { field = "record_type", not_equals = "A" }, { relation = "attribute_reference", target_type = "load_balancer" } ] }
+message = "\"{name}\" is an alias of a load balancer, which on Azure means its public IP address; set the type to A or remove the link"
 
 [[providers.azure.checks]]
 severity = "error"
-when = { all = [ { field = "values", absent = true }, { relation = "attribute_reference", target_type = "load_balancer", absent = true } ] }
-message = "\"{name}\" has no values and no 'Alias of' link to a load balancer; a record needs one or the other"
+when = { all = [ { field = "record_type", equals = "TXT" }, { relation = "attribute_reference", target_type = "cdn" } ] }
+message = "\"{name}\" is an alias of a CDN endpoint, which Azure supports for A and CNAME record sets only; set the type to A or CNAME or remove the link"
+
+[[providers.azure.checks]]
+severity = "error"
+when = { all = [ { field = "values", absent = true }, { relation = "attribute_reference", target_type = "load_balancer", absent = true }, { relation = "attribute_reference", target_type = "cdn", absent = true } ] }
+message = "\"{name}\" has no values and no 'Alias of' link; a record needs one or the other"
 
 [[providers.azure.manual_steps]]
-title = "Point the record at the CDN endpoint by hand"
+title = "Register the name on the CDN endpoint"
 when = { relation = "attribute_reference", target_type = "cdn" }
 body = """
-Azure DNS can only alias an A record to one of its own resources (a public IP, Traffic
-Manager profile or another zone) — a classic CDN endpoint is not one of them. Point the name
-at the endpoint with a **CNAME** to its `fqdn` instead, and register the name on the
-endpoint with an `azurerm_cdn_endpoint_custom_domain`. (The apex of a zone cannot hold a
-CNAME, so an apex alias needs Front Door rather than the classic CDN.)
+The alias record resolves to the endpoint, but a classic CDN endpoint only answers for host
+names it knows: add an `azurerm_cdn_endpoint_custom_domain` for this name (and enable HTTPS
+on it) or the endpoint returns an error for every request. Set the CDN node's **Custom
+domain** field to have that step spelled out on the endpoint's side too.
 """
 
 # ---------------------------------------------------------------- GCP
@@ -187,9 +197,10 @@ managed_zone = { relation = "attribute_reference", target_type = "dns_zone", att
 name         = { func = "format", args = [ { value = "%s.%s" }, { field = "record_name" }, { relation = "attribute_reference", target_type = "dns_zone", attr = "dns_name" } ] }
 type         = { field = "record_type" }
 ttl          = { field = "ttl" }
-# Cloud DNS has no alias record type: an aliased A record holds the forwarding rule's
-# address (the global one when the load balancer is https).
-rrdatas      = { if = { relation = "attribute_reference", target_type = "load_balancer" }, then = { relation = "attribute_reference", target_type = "load_balancer", block = "rule", attr = "ip_address", wrap = "list", fallback = { relation = "attribute_reference", target_type = "load_balancer", block = "grule", attr = "ip_address", wrap = "list" } }, else = { field = "values" } }
+# Cloud DNS has no alias record type: an aliased A record holds an address. For a load
+# balancer that is its forwarding rule's (the global one when the protocol is https); for a
+# CDN it is the global address the CDN reserves for whatever fronts its backend bucket.
+rrdatas      = { if = { relation = "attribute_reference", target_type = "load_balancer" }, then = { relation = "attribute_reference", target_type = "load_balancer", block = "rule", attr = "ip_address", wrap = "list", fallback = { relation = "attribute_reference", target_type = "load_balancer", block = "grule", attr = "ip_address", wrap = "list" } }, else = { if = { relation = "attribute_reference", target_type = "cdn" }, then = { relation = "attribute_reference", target_type = "cdn", block = "addr", attr = "address", wrap = "list" }, else = { field = "values" } } }
 
 [providers.gcp.outputs]
 name = { attr = "name", description = "Fully qualified record name" }
@@ -201,14 +212,16 @@ message = "\"{name}\" is an alias of a load balancer or CDN, which only works fo
 
 [[providers.gcp.checks]]
 severity = "error"
-when = { all = [ { field = "values", absent = true }, { relation = "attribute_reference", target_type = "load_balancer", absent = true } ] }
-message = "\"{name}\" has no values and no 'Alias of' link to a load balancer; a record needs one or the other"
+when = { all = [ { field = "values", absent = true }, { relation = "attribute_reference", target_type = "load_balancer", absent = true }, { relation = "attribute_reference", target_type = "cdn", absent = true } ] }
+message = "\"{name}\" has no values and no 'Alias of' link; a record needs one or the other"
 
 [[providers.gcp.manual_steps]]
-title = "Point the record at the CDN by hand"
+title = "The CDN's address has to be given to a forwarding rule"
 when = { relation = "attribute_reference", target_type = "cdn" }
 body = """
-On Google Cloud a CDN is a backend bucket or a flag on a backend service, not an endpoint
-with an address of its own, so there is nothing for this record to point at. Put the backend
-bucket behind an HTTPS load balancer and alias this record to that load balancer instead.
+On Google Cloud a CDN is a backend bucket, not an endpoint with an address of its own, so
+this record points at the `google_compute_global_address` the CDN node reserves. Nothing
+answers on it until a URL map, target proxy and `google_compute_global_forwarding_rule`
+front the backend bucket and the forwarding rule's `ip_address` is set to that address; the
+CDN node's own manual steps say the same thing from the other side.
 """

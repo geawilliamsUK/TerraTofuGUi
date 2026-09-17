@@ -109,7 +109,7 @@ All types live in `ttg-core::ir`. Field names below are the serialized names.
     },
     "backend": null,                    // or { "type": "s3", "args": { "bucket": "...", ... } }
     "state_encryption": false,          // OpenTofu-only feature; ignored for Terraform
-    "tags": { "Project": "demo" }       // put on every generated resource (see MAPPING_FORMAT §4.2)
+    "tags": { "Project": "demo" }       // put on every generated resource (see MAPPING_FORMAT §4.3)
   },
   "containers": { "<id>": Container, ... },
   "nodes":      { "<id>": Node, ... },

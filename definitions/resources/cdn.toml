@@ -3,12 +3,16 @@
 # An edge cache in front of an Object Storage bucket or a Load Balancer.
 # AWS: aws_cloudfront_distribution. A bucket origin also gets an origin access control and
 #      the bucket policy that lets only this distribution read the objects; a load balancer
-#      origin becomes a custom origin whose protocol follows the load balancer's.
+#      origin becomes a custom origin whose protocol follows the load balancer's. The
+#      linked certificate and Web Application Firewall each grow a us-east-1 copy of
+#      themselves, because that is the only shape CloudFront accepts.
 # Azure: azurerm_cdn_profile + azurerm_cdn_endpoint (classic Microsoft CDN). Custom domains
-#      and certificates are separate resources, so they stay manual steps.
+#      and certificates are separate resources, so they stay manual steps, and a WAF policy
+#      cannot be attached to a classic endpoint at all (that is Front Door's job).
 # GCP: google_compute_backend_bucket with enable_cdn for a bucket origin. Cloud CDN in
 #      front of a load balancer is a flag on the backend service, which belongs to the load
-#      balancer's mapping, so that case is a manual step.
+#      balancer's mapping, so that case is a manual step. A DNS Record aliased to the CDN
+#      reserves a google_compute_global_address for the front end to use.
 
 schema_version = 2
 
@@ -43,12 +47,15 @@ targets = ["tls_certificate"]
 cardinality = "optional"
 providers = ["aws"]
 
+# Azure's classic CDN endpoint cannot carry a WAF policy at all (that is Front Door's
+# job), so the link is not its business; Google Cloud can use the same Cloud Armor policy
+# but only from the backend service, which is a manual step.
 [[relations]]
 kind = "attribute_reference"
 label = "Protected by"
 targets = ["web_application_firewall"]
 cardinality = "optional"
-providers = ["aws"]
+providers = ["aws", "gcp"]
 
 # ---------------------------------------------------------------- AWS
 [providers.aws]
@@ -75,6 +82,9 @@ is_ipv6_enabled     = { value = true }
 comment             = { template = "{name} (managed by TerraTofu GUI)" }
 default_root_object = { if = { relation = "attribute_reference", target_type = "object_storage" }, then = { value = "index.html" } }
 aliases             = { field = "domain", wrap = "list", optional = true }
+# The Web Application Firewall's CLOUDFRONT-scoped copy, which is the only kind of Web ACL
+# a distribution accepts.
+web_acl_id          = { relation = "attribute_reference", target_type = "web_application_firewall", block = "global", attr = "arn" }
 tags                = { object = { Name = { field = "name" } } }
 
 [[providers.aws.blocks.nested]]
@@ -131,7 +141,8 @@ block = "viewer_certificate"
 when = { relation = "attribute_reference", target_type = "tls_certificate" }
 
 [providers.aws.blocks.nested.args]
-acm_certificate_arn      = { relation = "attribute_reference", target_type = "tls_certificate", block = "issued", attr = "certificate_arn", fallback = { relation = "attribute_reference", target_type = "tls_certificate", attr = "arn" } }
+# The certificate's us-east-1 copy: CloudFront ignores certificates from anywhere else.
+acm_certificate_arn      = { relation = "attribute_reference", target_type = "tls_certificate", block = "global_issued", attr = "certificate_arn", fallback = { relation = "attribute_reference", target_type = "tls_certificate", block = "global", attr = "arn" } }
 ssl_support_method       = { value = "sni-only" }
 minimum_protocol_version = { value = "TLSv1.2_2021" }
 
@@ -171,34 +182,23 @@ Condition = { object = { StringEquals = { object = { "AWS:SourceArn" = { self_bl
 domain_name = { attr = "domain_name", description = "CloudFront domain name to point DNS at" }
 hosted_zone = { attr = "hosted_zone_id", description = "Hosted zone id for an alias record" }
 
-[[providers.aws.checks]]
-when = { relation = "attribute_reference", target_type = "web_application_firewall" }
-message = "\"{name}\": a CloudFront distribution needs a CLOUDFRONT-scoped Web ACL, but the Web Application Firewall type emits a REGIONAL one; the link is not wired up"
-
-[[providers.aws.manual_steps]]
-title = "Attach a CLOUDFRONT-scoped Web ACL"
-when = { relation = "attribute_reference", target_type = "web_application_firewall" }
-body = """
-`web_acl_id` was deliberately left unset. A CloudFront distribution can only use a Web ACL
-created with `scope = "CLOUDFRONT"` in **us-east-1**, which is a different resource from the
-REGIONAL ACL the linked Web Application Firewall emits for the load balancer. Create a
-second `aws_wafv2_web_acl` with that scope (an aliased us-east-1 provider) and set
-`web_acl_id` on the distribution to its ARN.
-"""
-
 [[providers.aws.manual_steps]]
 title = "Point the custom domain at the distribution"
-when = { field = "domain" }
+when = { all = [
+  { field = "domain" },
+  { relation = "attribute_reference", incoming = true, target_type = "dns_record", absent = true },
+] }
 body = """
 `aliases` names the custom domain, but CloudFront only serves it once DNS sends the name to
 the distribution. Add a DNS Record of type A with an **Alias of** link to this CDN (or a
-CNAME to its `domain_name`), and make sure the linked certificate covers the alias and lives
-in **us-east-1** — CloudFront ignores certificates from any other region.
+CNAME to its `domain_name`), and make sure the linked certificate covers the alias — the
+us-east-1 copy of it is generated for you.
 """
 
 # ---------------------------------------------------------------- Azure
 [providers.azure]
 status = "partial"
+notes = "A classic CDN endpoint has no firewall of its own — 'Protected by' is an AWS and Google Cloud link. Azure WAF in front of a CDN means Front Door, which is a different service from the azurerm_cdn_profile this type maps to."
 
 [[providers.azure.blocks]]
 key = "profile"
@@ -268,6 +268,19 @@ header to an IP origin: create a DNS Record for the load balancer and set the en
 [providers.gcp]
 status = "partial"
 
+# Cloud DNS has no alias record type, so a DNS Record pointing here needs an address to
+# write into `rrdatas`. A backend bucket has none of its own: reserve a global one for the
+# forwarding rule that will front it, and hand the record that.
+[[providers.gcp.blocks]]
+key = "addr"
+resource = "google_compute_global_address"
+when = { relation = "attribute_reference", incoming = true, target_type = "dns_record" }
+
+[providers.gcp.blocks.args]
+name         = { template = "{name}-address", transform = "kebab" }
+description  = { template = "Front-end address for {name} (managed by TerraTofu GUI)" }
+address_type = { value = "EXTERNAL" }
+
 [[providers.gcp.blocks]]
 key = "main"
 resource = "google_compute_backend_bucket"
@@ -290,6 +303,7 @@ max_ttl     = { value = 86400 }
 
 [providers.gcp.outputs]
 self_link = { attr = "self_link", description = "Backend bucket to use as a URL map target" }
+address   = { block = "addr", attr = "address", description = "Reserved global address the DNS record points at" }
 
 [[providers.gcp.manual_steps]]
 title = "Put the backend bucket behind a load balancer"
@@ -311,4 +325,27 @@ but `enable_cdn = true` (plus a `cdn_policy`) on the
 `google_compute_backend_service` the load balancer creates. Set it there — for example as an
 extra argument on the Load Balancer node's backend-service block — and delete this node, or
 keep it as documentation of intent.
+"""
+
+[[providers.gcp.manual_steps]]
+title = "Give the reserved address to the front end"
+when = { relation = "attribute_reference", incoming = true, target_type = "dns_record" }
+body = """
+A DNS Record aliases this CDN, and Cloud DNS can only hold an address, so a
+`google_compute_global_address` was reserved and the record points at it. Nothing listens on
+it yet: set `ip_address` on the `google_compute_global_forwarding_rule` in front of this
+backend bucket (see the step above) to `google_compute_global_address.<this node>.address`,
+or the name will resolve to an address that answers nothing.
+"""
+
+[[providers.gcp.manual_steps]]
+title = "Attach the Cloud Armor policy to the backend service"
+when = { relation = "attribute_reference", target_type = "web_application_firewall" }
+body = """
+The linked Web Application Firewall's `google_compute_security_policy` is the right object
+for this CDN, but Cloud Armor attaches from the *backend service* side, and a backend bucket
+has no `security_policy` argument — only `edge_security_policy`, which needs a policy of
+type `CLOUD_ARMOR_EDGE` and cannot carry the preconfigured WAF rules this one holds. Put the
+backend bucket behind an HTTPS load balancer and set `security_policy` on its
+`google_compute_backend_service` to the policy's id.
 """

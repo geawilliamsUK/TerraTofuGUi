@@ -399,6 +399,7 @@ impl Catalog {
                     key: "main".into(),
                     resource: tf_type.to_string(),
                     when: None,
+                    provider_alias: None,
                     for_each_field: None,
                     for_each_relation: None,
                     for_each_target_type: None,

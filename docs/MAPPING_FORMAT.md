@@ -453,7 +453,46 @@ block = "features"
 The Terraform / OpenTofu difference (registry address prefix, `required_version`) is not
 part of the definition; it is applied by `ttg-codegen::tool::Profile`.
 
-### 4.1 Helper providers
+### 4.1 Provider aliases
+
+Some resources have to be created in a fixed place whatever the project's region:
+CloudFront reads its certificate and its Web ACL from **us-east-1** only. An *alias* is a
+second configuration of the same provider that a block can send itself to.
+
+```toml
+[[aliases]]
+name = "us_east_1"                     # also the HCL identifier: `aws.us_east_1`
+description = "CloudFront's home region: its certificates and Web ACLs live here"
+args = { region = { value = "us-east-1" } }   # provider-block arguments this one replaces
+```
+
+`args` are ordinary argument sources (`var` / `value` / `raw`, as on the provider block)
+and *override* the normal block's arguments of the same name; everything the alias does not
+mention — the other arguments, the nested blocks, the project's default tags — is copied
+from it, so an aliased configuration tags what it creates exactly like the main one.
+
+A block claims an alias with `provider_alias` (schema_version 2):
+
+```toml
+[[providers.aws.blocks]]
+key = "global"
+resource = "aws_wafv2_web_acl"
+provider_alias = "us_east_1"
+when = { relation = "attribute_reference", incoming = true, target_type = "cdn" }
+```
+
+The emitter writes `provider = aws.us_east_1` into that resource and adds the
+`provider "aws" { alias = "us_east_1" … }` block to `providers.tf` — **only when some
+emitted block actually uses it**, so a configuration without a CDN never asks for a second
+set of credentials. An alias a block references must be declared by that provider, and the
+name must be a valid HCL identifier; both are checked at load time.
+
+Nothing else changes: the aliased resource is an ordinary block with its own key, so
+outputs, `self_block` and cross-resource references (`block = "global"`) address it as
+usual. `web_application_firewall.toml` and `tls_certificate.toml` use this to grow a
+second, CloudFront-scoped copy of themselves when a `cdn` links to them.
+
+### 4.2 Helper providers
 
 A mapping sometimes needs one resource from a small side provider — a `random_password`
 for a generated secret value. Declaring it as a *helper* keeps it out of the way: there is
@@ -472,7 +511,7 @@ local_name = "random"                  # optional; defaults to the part after th
 A block whose `resource` belongs to a helper provider is skipped by the schema check (the
 bundled index only carries the target providers), so keep such blocks small and literal.
 
-### 4.2 Project-wide default tags
+### 4.3 Project-wide default tags
 
 `Settings::tags` (Settings ▸ Default tags in the app, `tags` on the MCP `settings_set`
 tool) is one map of tags for the whole project. Each provider definition says where they

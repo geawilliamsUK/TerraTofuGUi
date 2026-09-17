@@ -317,6 +317,42 @@ Mapping-language additions this needed: `{ raw = "…", refs = { … } }` (splic
 traversals into a raw expression — the ACM `for_each` comprehension), several relation
 declarations sharing one kind, and `manual_steps` on a `logical` mapping.
 
+### Round 2: internet edge (gap report 2.13, 2.16, done 2026-09-17)
+
+A production design put a CDN in front of the load balancer and found the seams: the WAF
+and the certificate each served the load balancer and left the distribution with a check
+and a manual step, and a DNS record aliasing a CDN only worked on AWS. The seam was really
+one missing idea — **provider aliases** (MAPPING_FORMAT §4.1). A provider definition may
+declare an extra configuration of itself (`[[aliases]] name = "us_east_1"` with `args`
+overriding the provider block's), a block claims it with `provider_alias`, and the emitter
+writes `provider = aws.us_east_1` plus the aliased `provider` block — only when something
+emitted actually uses it. With that in hand the three items become mappings rather than
+prose:
+
+- **CDN protection.** A Web ACL is scoped once and for all when it is created, so one Web
+  Application Firewall entity now emits two: the REGIONAL one for its load balancers, and,
+  when a `cdn` links to it, a CLOUDFRONT-scoped copy of the same rules in us-east-1 that
+  the distribution's `web_acl_id` points at. The "not wired up" check and the manual step
+  are gone. Azure's classic CDN endpoint cannot carry a WAF policy at all (that is Front
+  Door), so "Protected by" is an AWS + Google Cloud link; on Google Cloud the same Cloud
+  Armor policy is the right object but attaches from the backend service, which is a manual
+  step with the reason in it.
+- **Certificate region.** Likewise `tls_certificate`: a CDN link grows a second
+  `aws_acm_certificate` in us-east-1 with its own validation records and
+  `aws_acm_certificate_validation`, and the distribution's `viewer_certificate` uses that
+  one. Both requests validate through the same zone, and `allow_overwrite` makes it work
+  whether or not ACM hands out the same CNAME for the two.
+- **DNS alias to a CDN everywhere.** Azure alias record sets accept a CDN endpoint for A
+  *and* CNAME (an A alias is how a zone apex reaches a CDN at all), so both blocks take
+  `target_resource_id` and the checks say what each record type can alias rather than
+  insisting on A. Google Cloud has no alias record: a CDN with a record pointing at it
+  reserves a `google_compute_global_address` and the record holds that, with a manual step
+  on both sides saying which forwarding rule has to claim it. The "no values and no alias"
+  check accepts a CDN alias on every provider, so an aliased record needs no placeholders.
+
+`examples/edge.ttg.json` now has the CDN protected by the same firewall as the load
+balancer, served by the same certificate, and named by a second DNS record.
+
 ## Phase 4 — Contribution guide and tooling (done 2026-09-09)
 
 - ~~`CONTRIBUTING.md`~~ with the definition workflow, the security-group worked example,

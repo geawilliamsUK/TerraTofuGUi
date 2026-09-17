@@ -26,6 +26,13 @@ default = "eu-west-2"
 [provider_block.args]
 region = { var = "region" }
 
+# A second configuration of the same provider, used by blocks that say
+# `provider_alias = "us_east_1"`. It is only emitted when some block does.
+[[aliases]]
+name = "us_east_1"
+description = "CloudFront's home region: its certificates and Web ACLs live here"
+args = { region = { value = "us-east-1" } }
+
 # Generated values (Secret "generate value") come from hashicorp/random; the provider is
 # only required when some emitted block is a `random_*` resource.
 [[helper_providers]]
