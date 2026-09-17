@@ -73,3 +73,30 @@ method: disjoint packages, one commit each, merged onto `master` after review.
 | **WP9 Diagnostics** | a per-provider check may *omit* the entity from that provider's export with a warning instead of blocking the export; cross-provider diagnostics ("would block the Azure export") while another provider is the target | R2.10, R2.17 |
 | **WP10 Internet edge** | provider aliases in the mapping language (`us-east-1` for CloudFront); `scope` on `web_application_firewall` and a global ACL for the CDN; the CDN's certificate in the right region; the CDN alias honoured by `dns_record` on Azure and GCP | R2.13, R2.16 |
 | **WP11 Small fixes** | `""` / `null` in an `entity_ref` means none; the Performance Insights check reads the effective instance class; `cors_methods` on object storage; `budget` notifies a topic and GCP's billing account is a provider variable | R2.7, R2.8, R2.11, R2.15 |
+
+### Status (2026-09-17)
+
+All five packages are merged on `master` (commits 8c21234, 410f1cf, dfe21bd, 601d29f,
+3cbf77b, ae3d5df), each verified with clippy for both feature sets, the full suite with
+`tofu validate` on all three providers, the strict catalog check and the project-schema
+drift check. The CallScope design exports and validates on AWS (12 manual steps, down
+from 14), Azure and GCP without being touched.
+
+Mapping language: provider aliases (`[[aliases]]` / `provider_alias`), incoming relation
+sources (`incoming = true` on a source, `field` + `transform` on a relation source,
+`min_count` on a relation condition, list-valued `equals` as membership), `ends_with` /
+`not_ends_with` on field and provider-field conditions, `options` on `string_list`
+fields, and the `omit` check severity. Diagnostics carry an optional `provider` and
+`diagnostics::other_providers` / `run_all` report what the other providers would refuse.
+MCP: `view_delete`, `view_update { filter }`, `view_save { replace }`, annotations
+movable through `entity_move` / `entity_resize`, notes placed beside their anchor,
+`parent` on groups, `screenshot { width, height }`, `hide_links` alias, and no command is
+ever applied for a caller that has gone (closed reply, heartbeat, busy reason).
+
+Open, with the reason: the AWS alarm metric check stays an `error` although EKS cluster
+cpu / memory only exist through Container Insights (make it `omit` too, or map those two
+presets to Container Insights, once someone needs it); an omitted entity is recomputed by
+each `layers` entry point rather than cached (cheap today, worth a cache if catalogs grow);
+GCP's `billing_account` provider variable is emitted for every GCP export like Azure's
+`subscription_id`; `screenshot` sizes are bounded by the display because egui has no
+off-screen renderer.
