@@ -281,8 +281,10 @@ pub fn catalog(cat: &Catalog) -> Vec<String> {
                         Err(e) => errs.push(pw(&format!("check #{i}: for_each_field: {e}"))),
                     }
                 }
-                if chk.severity != "warning" && chk.severity != "error" {
-                    errs.push(pw(&format!("check #{i}: severity must be warning or error")));
+                if !["warning", "error", "omit"].contains(&chk.severity.as_str()) {
+                    errs.push(pw(&format!(
+                        "check #{i}: severity must be warning, error or omit"
+                    )));
                 }
                 check_condition(&mut ctx, &chk.when, &mut errs);
                 ctx.item_fields = outer;

@@ -205,7 +205,9 @@ pub struct CheckDef {
     /// Evaluate once per row of this field; `{item.<name>}` placeholders then work.
     #[serde(default)]
     pub for_each_field: Option<String>,
-    /// `warning` (default) or `error`.
+    /// `warning` (default), `error`, or `omit` — the provider cannot express this
+    /// entity, so it is left out of that provider's export and the message is reported
+    /// as a warning instead of blocking.
     #[serde(default = "default_severity")]
     pub severity: String,
     /// May use `{name}` and `{item.<name>}` placeholders.

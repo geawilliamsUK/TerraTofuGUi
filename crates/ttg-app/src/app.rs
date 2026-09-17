@@ -88,6 +88,10 @@ pub struct TtgApp {
     pub clip: Option<Clip>,
     pub diagnostics: Vec<Diagnostic>,
     pub diag_dirty: bool,
+    /// The *other* providers' errors as warnings (see `diagnostics::other_providers`).
+    /// Computed on demand — only the panel and the agent ask for them — and dropped
+    /// whenever the target provider's diagnostics are recomputed.
+    pub other_diags: Option<Vec<Diagnostic>>,
     pub palette_filter: String,
     pub pending_edge: Option<PendingEdge>,
     pub export: ExportUi,
@@ -185,6 +189,7 @@ impl TtgApp {
             clip: None,
             diagnostics: Vec::new(),
             diag_dirty: true,
+            other_diags: None,
             palette_filter: String::new(),
             pending_edge: None,
             export: ExportUi::default(),
@@ -337,8 +342,25 @@ impl TtgApp {
                 &self.project.settings.target_provider,
             );
             self.diag_dirty = false;
+            self.other_diags = None;
             self.reach = None;
         }
+    }
+
+    /// What the other providers would refuse, as warnings: "this will block the Azure
+    /// export" while the target is AWS. Three providers' diagnostics are more work than
+    /// one, so this runs only when something asks — the diagnostics panel while it is
+    /// open, or the agent's `diagnostics` tool — and is cached until the project changes.
+    pub fn other_diagnostics(&mut self) -> &[Diagnostic] {
+        self.refresh_diagnostics();
+        if self.other_diags.is_none() {
+            self.other_diags = Some(ttg_codegen::diagnostics::other_providers(
+                &self.project,
+                &self.catalog,
+                &self.project.settings.target_provider,
+            ));
+        }
+        self.other_diags.as_deref().unwrap()
     }
 
     /// Reachability analysis for the current provider, computed on demand.

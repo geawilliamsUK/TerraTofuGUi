@@ -1403,21 +1403,29 @@ impl TtgApp {
         }))
     }
 
-    fn diagnostics_json(&self) -> J {
-        J::Array(
-            self.diagnostics
-                .iter()
-                .map(|d| {
-                    json!({
-                        "entity": d.entity,
-                        "name": d.entity.as_ref().and_then(|id| self.project.entity(id).map(|e| e.name.to_string())),
-                        "severity": format!("{:?}", d.severity).to_lowercase(),
-                        "code": format!("{:?}", d.code),
-                        "message": d.message,
-                    })
-                })
-                .collect(),
-        )
+    fn diagnostics_json(&mut self) -> J {
+        let one = |p: &TtgApp, d: &ttg_codegen::Diagnostic| {
+            json!({
+                "entity": d.entity,
+                "name": d.entity.as_ref().and_then(|id| p.project.entity(id).map(|e| e.name.to_string())),
+                "severity": format!("{:?}", d.severity).to_lowercase(),
+                "code": format!("{:?}", d.code),
+                "provider": d.provider,
+                "message": d.message,
+            })
+        };
+        let mine: Vec<J> = self.diagnostics.iter().map(|d| one(self, d)).collect();
+        let others: Vec<J> = self
+            .other_diagnostics()
+            .to_vec()
+            .iter()
+            .map(|d| one(self, d))
+            .collect();
+        json!({
+            "provider": self.project.settings.target_provider,
+            "diagnostics": mine,
+            "other_providers": others,
+        })
     }
 
     fn reach_posture_json(&mut self) -> J {

@@ -11,9 +11,15 @@
 # rather than a provider's spelling of it, and each provider mapping turns it into its own
 # metric name, namespace and aggregation for the type of resource the alarm watches. Not
 # every cloud publishes every metric for every type, so each mapping also carries one
-# design-time check that refuses a combination it cannot express, and `custom` always
-# falls back to the free-text provider fields. Those fields, when set, win over the
-# preset, so a project that was drawn before presets existed keeps the metric it chose.
+# design-time check for a combination it cannot express, and `custom` always falls back to
+# the free-text provider fields. Those fields, when set, win over the preset, so a project
+# that was drawn before presets existed keeps the metric it chose.
+#
+# On Azure and Google Cloud that check is an `omit`: the gap belongs to the one cloud, so
+# the alarm is left out of that cloud's export with a warning rather than blocking a design
+# the other clouds can express (see MAPPING_FORMAT.md §2.6). On AWS it stays an `error`,
+# because AWS is the reference for these presets: it covers every combination the other two
+# do except a cluster's cpu / memory, which EKS publishes only through Container Insights.
 
 schema_version = 2
 
@@ -195,7 +201,7 @@ pattern_hint = "an email address"
 description = "Azure notifies through an action group rather than a topic: when set, an action group with this email receiver is generated and attached to the alert."
 
 [[providers.azure.checks]]
-severity = "error"
+severity = "omit"
 when = { any = [ { all = [ { relation = "attribute_reference", target_type = "compute_instance" }, { field = "metric", not_equals = "custom" }, { field = "metric", not_equals = "cpu" } ] }, { all = [ { relation = "attribute_reference", target_type = "relational_database" }, { field = "metric", not_equals = "custom" }, { field = "metric", not_equals = "cpu" }, { field = "metric", not_equals = "db_storage" }, { field = "metric", not_equals = "db_connections" } ] }, { all = [ { relation = "attribute_reference", target_type = "function" }, { field = "metric", not_equals = "custom" }, { field = "metric", not_equals = "function_errors" } ] }, { all = [ { relation = "attribute_reference", target_type = "event_queue" }, { field = "metric", not_equals = "custom" }, { field = "metric", not_equals = "queue_depth" }, { field = "metric", not_equals = "dlq_depth" } ] }, { all = [ { relation = "attribute_reference", target_type = "load_balancer" }, { field = "metric", not_equals = "custom" } ] }, { all = [ { relation = "attribute_reference", target_type = "container_app" }, { field = "metric", not_equals = "custom" }, { field = "metric", not_equals = "cpu" }, { field = "metric", not_equals = "memory" } ] }, { all = [ { relation = "attribute_reference", target_type = "kubernetes_cluster" }, { field = "metric", not_equals = "custom" }, { field = "metric", not_equals = "cpu" }, { field = "metric", not_equals = "memory" } ] }, { all = [ { relation = "attribute_reference", target_type = "object_storage" }, { field = "metric", not_equals = "custom" }, { field = "metric", not_equals = "bucket_size" } ] }, { all = [ { relation = "attribute_reference", target_type = "topic" }, { field = "metric", not_equals = "custom" } ] }, { all = [ { relation = "attribute_reference", target_type = "cache" }, { field = "metric", not_equals = "custom" }, { field = "metric", not_equals = "cpu" }, { field = "metric", not_equals = "memory" } ] }, { all = [ { relation = "attribute_reference", target_type = "file_system" }, { field = "metric", not_equals = "custom" } ] } ] }
 message = "\"{name}\": Azure Monitor has no platform metric of that kind for the resource this alarm watches. Notable gaps: a VM's disk usage is a guest metric published by the diagnostics extension, an Azure Load Balancer is layer 4 and counts no HTTP status codes, Service Bus reports no message age, and AKS reports node utilisation rather than a node count. Choose 'custom' and name the metric (and its namespace) yourself"
 
@@ -325,7 +331,7 @@ when = { all = [ { field = "metric", equals = "custom" }, { provider_field = "me
 message = "\"{name}\" uses a custom metric but names no filter, so the alert watches the usual metric of the type it is linked to; write a Cloud Monitoring metric filter to watch anything else"
 
 [[providers.gcp.checks]]
-severity = "error"
+severity = "omit"
 when = { any = [ { all = [ { relation = "attribute_reference", target_type = "compute_instance" }, { field = "metric", not_equals = "custom" }, { field = "metric", not_equals = "cpu" }, { field = "metric", not_equals = "disk" } ] }, { all = [ { relation = "attribute_reference", target_type = "relational_database" }, { field = "metric", not_equals = "custom" }, { field = "metric", not_equals = "cpu" }, { field = "metric", not_equals = "db_storage" }, { field = "metric", not_equals = "db_connections" } ] }, { all = [ { relation = "attribute_reference", target_type = "function" }, { field = "metric", not_equals = "custom" }, { field = "metric", not_equals = "function_errors" } ] }, { all = [ { relation = "attribute_reference", target_type = "event_queue" }, { field = "metric", not_equals = "custom" }, { field = "metric", not_equals = "queue_depth" }, { field = "metric", not_equals = "dlq_depth" }, { field = "metric", not_equals = "queue_oldest_message_age" } ] }, { all = [ { relation = "attribute_reference", target_type = "load_balancer" }, { field = "metric", not_equals = "custom" }, { field = "metric", not_equals = "lb_latency" } ] }, { all = [ { relation = "attribute_reference", target_type = "container_app" }, { field = "metric", not_equals = "custom" }, { field = "metric", not_equals = "cpu" }, { field = "metric", not_equals = "memory" } ] }, { all = [ { relation = "attribute_reference", target_type = "kubernetes_cluster" }, { field = "metric", not_equals = "custom" }, { field = "metric", not_equals = "cpu" }, { field = "metric", not_equals = "memory" } ] }, { all = [ { relation = "attribute_reference", target_type = "object_storage" }, { field = "metric", not_equals = "custom" }, { field = "metric", not_equals = "bucket_size" } ] }, { all = [ { relation = "attribute_reference", target_type = "topic" }, { field = "metric", not_equals = "custom" } ] }, { all = [ { relation = "attribute_reference", target_type = "cache" }, { field = "metric", not_equals = "custom" }, { field = "metric", not_equals = "cpu" }, { field = "metric", not_equals = "memory" } ] }, { all = [ { relation = "attribute_reference", target_type = "file_system" }, { field = "metric", not_equals = "custom" } ] } ] }
 message = "\"{name}\": Cloud Monitoring has no metric of that kind for the resource this alarm watches. Notable gaps: the generated load balancer is a layer-3 passthrough and counts no HTTP status codes, a Pub/Sub topic is measured through its subscriptions, and Filestore metrics are per instance. Choose 'custom' and write the metric filter yourself"
 

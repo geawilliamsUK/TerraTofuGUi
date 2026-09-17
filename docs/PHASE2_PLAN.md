@@ -478,8 +478,10 @@ five VPC endpoints as native resources. All of that is curated now:
   storage, bucket size, …) that fills in the metric name, namespace, dimensions,
   statistic and Cloud Monitoring filter per provider *and* per watched type, over an
   extended *Watches* list (Kubernetes Cluster, Object Storage, Topic, Cache, File System).
-  A preset the watched type has no metric for is an error, not a guess; `custom` is the
-  default and keeps the free-text provider fields a project may already carry.
+  A preset the watched type has no metric for is never a guess: an error on AWS, and on
+  Azure and Google Cloud an `omit` that leaves that one alarm out (see "Round 2"
+  below). `custom` is the default and keeps the free-text provider fields a project may
+  already carry.
 - **Topic subscriptions**: a table of protocol / endpoint rows becomes one
   `aws_sns_topic_subscription` each; Google Cloud pushes to `https` endpoints and says
   what it cannot do with the rest; Azure points at an Alarm's action group.
@@ -494,6 +496,32 @@ five VPC endpoints as native resources. All of that is curated now:
 Two mechanisms carry this: `target_shares_ancestor` may name a **relation** instead of
 reading the current `for_each_relation` row, and an output whose block is repeated is the
 **list** of its instances. `examples/operations.ttg.json` exercises the lot.
+
+## Round 2: diagnostics (gap report R2.10 and R2.17)
+
+An 84-resource design built through the MCP hit two diagnostics that were right about the
+cloud and wrong about what to do next. Three alarms watched metrics Azure Monitor and
+Cloud Monitoring do not publish, and each one stopped those providers exporting at all;
+and a TLS certificate drawn outside a Key Vault said nothing until someone tried the Azure
+export. Both are now answered without loosening a single message.
+
+- **`severity = "omit"`** on a definition check (MAPPING_FORMAT.md §2.6): the provider
+  cannot express *this one entity*, so it leaves that provider's layer exactly as a
+  `providers` tag would — dropped from the export with its links, children re-parented,
+  nothing left dangling — and the check's message is reported once as a warning with
+  `; left out of the <Provider> export` appended. The entity still draws on the canvas;
+  a view filtered by `providers` treats it as off that layer. The Alarm's
+  metric-availability checks are `omit` on Azure and Google Cloud and stay an `error` on
+  AWS, which is the reference for the presets.
+- **Cross-provider diagnostics**: `diagnostics::other_providers` (and `run_all`) report
+  what the *other* providers would refuse, as warnings tagged with the provider and
+  prefixed `[Microsoft Azure] … (would block the Microsoft Azure export)`. They show up in
+  a collapsed "Other providers (N)" section under the target's list, under the agent's
+  `other_providers` key, and after `ttg check`'s own list. Exports still block on the
+  target provider's errors alone, and an entity off another provider's layer produces
+  nothing for it. Three providers cost about three times one — roughly 17 ms for 84
+  resources — so the app computes them only while the panel is open and caches until the
+  project changes.
 
 ## Explicitly still out of scope
 

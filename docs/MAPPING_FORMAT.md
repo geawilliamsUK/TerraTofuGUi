@@ -374,8 +374,24 @@ otherwise add — the `depends_on` for ordering and the "cannot express" diagnos
 because they are still true.
 
 **Design-time checks.** `[[providers.<id>.checks]]` with `when`, optional
-`for_each_field`, `severity = "warning" | "error"` and a `message` using `{name}` and
-`{item.<x>}` placeholders. Errors block export like any other diagnostic.
+`for_each_field`, `severity = "warning" | "error" | "omit"` and a `message` using `{name}`
+and `{item.<x>}` placeholders. `warning` is the default; errors block export like any
+other diagnostic.
+
+`severity = "omit"` is for the case where the provider has no way to express *this one
+entity* and the rest of the design is fine: an Alarm on a metric Azure Monitor does not
+publish should not stop the whole Azure export. The entity is taken off that provider's
+layer exactly as if it were tagged `providers` without that provider — it is left out of
+the export, links to and from it are dropped, its children are re-parented — and the
+check's message is reported once, as a **warning**, with `; left out of the <Provider>
+export` appended. Nothing that referenced it breaks, because the reference went with it.
+The entity is still part of the project, so it still draws on the canvas; a view filtered
+by `providers` treats it as off that layer, like any other off-layer entity.
+
+Use `omit` when omission is the honest outcome and `error` when the design is wrong
+everywhere. If one provider is the reference for a portable field (AWS is, for the Alarm's
+metric presets), keep that provider's check an `error`: a combination the reference
+refuses is a mistake, not a gap.
 
 **Field-level guards.** `required_unless_relation = "<kind>"` makes a field required only
 when the entity has no target for that relation (a function's storage account name unless

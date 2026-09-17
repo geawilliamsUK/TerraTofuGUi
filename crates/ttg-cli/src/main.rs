@@ -503,8 +503,20 @@ fn main() -> Result<()> {
             for d in &diags {
                 println!("{d}");
             }
+            // What the other providers would refuse. These never block this export; they
+            // carry their provider in the message, so they read as a separate list.
+            let others = ttg_codegen::diagnostics::other_providers(&p, &cat, &provider);
+            for d in &others {
+                println!("{d}");
+            }
             let errors = diags.iter().filter(|d| d.severity == Severity::Error).count();
             println!("{} diagnostics, {errors} error(s)", diags.len());
+            if !others.is_empty() {
+                println!(
+                    "{} other-provider warning(s) (would block an export for another provider)",
+                    others.len()
+                );
+            }
             if errors > 0 {
                 std::process::exit(1);
             }

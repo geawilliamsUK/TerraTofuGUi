@@ -174,7 +174,10 @@ every argument from `extra`; the catalog creates them on demand (`Catalog::ensur
 
 **Provider layers.** One diagram serves every provider. A node, container or edge may
 carry `providers`; a provider's *layer* is the project minus entities not tagged for it,
-minus entities whose abstract type is provider-scoped elsewhere (auto-tagged), with the
+minus entities whose abstract type is provider-scoped elsewhere (auto-tagged), minus
+entities a definition check with `severity = "omit"` fired on (the provider cannot express
+that one entity, so it is left out with a warning rather than blocking the export — see
+MAPPING_FORMAT.md §2.6), with the
 contents of a dropped container re-parented to the nearest kept ancestor. Codegen,
 diagnostics and reachability all run on the layer (`Project::layer`,
 `ttg_codegen::layers`); what a layer leaves out is reported as `Layer` diagnostics so
@@ -361,6 +364,16 @@ Three layers, all surfaced through the same `Diagnostic` list:
    internet gateway, functions in subnets having an outbound route, and managed
    services (`network_agnostic`) drawn inside a network being informational only.
 
+`diagnostics::run` answers for one target provider. `diagnostics::other_providers` adds
+the *other* providers' errors, each downgraded to a warning, tagged with the provider it
+came from (`Diagnostic::provider`) and prefixed `[<Provider>] … (would block the
+<Provider> export)`; `run_all` is the two lists concatenated. They answer "this will block
+the Azure export" while the target is AWS. Exports still block on the target provider's
+own errors only, and an entity that is off another provider's layer produces nothing for
+it. Running three providers costs roughly three times one, so the app computes the other
+providers lazily — only while the diagnostics panel is open or the agent's `diagnostics`
+tool asks — and caches the result until the project changes.
+
 ### 6.0a Reachability (`ttg-codegen::reach`)
 
 A separate analysis over the same IR answers "where can this resource send traffic, what
@@ -415,6 +428,9 @@ no runtime dependency on either binary.
 Diagnostics are computed by `ttg-codegen::diagnostics::run` whenever the project revision counter
 changes, and the result drives the warning badges (`manual`, `unmapped`, `partial`, `invalid`).
 Export is disabled while any error-level diagnostic exists; the button tooltip lists them.
+The other providers' would-be errors (`diagnostics::other_providers`) are computed on
+demand and shown in a collapsed "Other providers (N)" section under the target's list, in
+a muted colour; they never reach the canvas badges, which stay about the export at hand.
 
 ## 8. Non-goals for v1
 

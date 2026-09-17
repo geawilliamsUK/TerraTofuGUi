@@ -2455,3 +2455,141 @@ fn an_audit_trail_without_a_bucket_is_an_error() {
     generate(&p, &cat, "azure", Tool::OpenTofu).unwrap();
     generate(&p, &cat, "gcp", Tool::OpenTofu).unwrap();
 }
+
+/// R2.10: a check with `severity = "omit"` leaves one entity out of one provider's
+/// export instead of blocking the whole export. The alarm below watches a queue's oldest
+/// message age, which Service Bus does not report: AWS and Google Cloud generate it,
+/// Azure warns and generates everything else.
+#[test]
+fn an_omit_check_leaves_the_entity_out_of_that_provider() {
+    let cat = Catalog::builtin();
+    let mut p = example("operations.ttg.json");
+    p.nodes.get_mut("alm-dlq").unwrap().config.insert(
+        "metric".into(),
+        ttg_core::Value::Str("queue_oldest_message_age".into()),
+    );
+
+    // AWS and Google Cloud have the metric: the alarm is generated, nothing is said.
+    for provider in ["aws", "gcp"] {
+        let g = generate(&p, &cat, provider, Tool::OpenTofu).expect("exports");
+        assert!(
+            g.files["monitoring.tf"].contains("dead_letters_piling_up"),
+            "{provider}: {}",
+            g.files["monitoring.tf"]
+        );
+    }
+
+    // Azure: the export succeeds, the alarm is simply not in it.
+    let d = ttg_codegen::diagnostics::run(&p, &cat, "azure");
+    let omitted: Vec<_> = d
+        .iter()
+        .filter(|x| x.entity.as_deref() == Some("alm-dlq") && x.code == ttg_codegen::Code::Check)
+        .collect();
+    assert_eq!(omitted.len(), 1, "reported once, not once per pass: {d:?}");
+    assert_eq!(omitted[0].severity, Severity::Warning);
+    assert!(
+        omitted[0]
+            .message
+            .contains("Azure Monitor has no platform metric")
+            && omitted[0]
+                .message
+                .ends_with("; left out of the Microsoft Azure export"),
+        "{:?}",
+        omitted[0]
+    );
+    assert!(d.iter().all(|x| x.severity != Severity::Error), "{d:?}");
+
+    let g = generate(&p, &cat, "azure", Tool::Terraform).expect("azure still exports");
+    let all = g.files.values().cloned().collect::<Vec<_>>().join("\n");
+    assert!(!all.contains("dead_letters_piling_up"), "{all}");
+    assert!(!all.contains("azurerm_monitor_metric_alert"), "{all}");
+    // Nothing the alarm pointed at is broken: the queue it watched is still exported and
+    // no reference to the alarm is left dangling.
+    assert!(all.contains("azurerm_servicebus_queue"), "{all}");
+    assert!(!all.contains("alm_dlq") && !all.contains("alm-dlq"), "{all}");
+
+    // The layer itself no longer holds the alarm or the link to the queue it watched.
+    let layer = ttg_codegen::layers::project_for(&p, &cat, "azure");
+    assert!(!layer.nodes.contains_key("alm-dlq"));
+    assert!(layer
+        .edges
+        .iter()
+        .all(|e| e.source != "alm-dlq" && e.target != "alm-dlq"));
+
+    // Views: the alarm still draws (it is in the project), but a `providers = ["azure"]`
+    // filter treats it as off that layer, the same as a tagged entity.
+    let filter = ttg_core::ViewFilter {
+        providers: ["azure".to_string()].into(),
+        ..Default::default()
+    };
+    let vis = ttg_codegen::views::visible_set(&p, &cat, &filter).expect("filtered");
+    assert!(!vis.contains("alm-dlq"), "{vis:?}");
+    assert!(vis.contains("q-dead"), "{vis:?}");
+    let filter = ttg_core::ViewFilter {
+        providers: ["aws".to_string()].into(),
+        ..Default::default()
+    };
+    let vis = ttg_codegen::views::visible_set(&p, &cat, &filter).expect("filtered");
+    assert!(vis.contains("alm-dlq"), "{vis:?}");
+}
+
+/// R2.17: while the target is AWS, the errors the other providers would raise are
+/// reported as warnings, so "this will block the Azure export" is visible before anyone
+/// switches the target.
+#[test]
+fn other_providers_errors_are_reported_as_warnings() {
+    let cat = Catalog::builtin();
+    let mut p = example("edge.ttg.json");
+    // A certificate outside a Key Vault: Azure has nowhere to put it.
+    p.nodes.get_mut("cert-site").unwrap().parent = Some("rg-edge".into());
+
+    let aws = ttg_codegen::diagnostics::run(&p, &cat, "aws");
+    assert!(aws.iter().all(|d| d.severity != Severity::Error), "{aws:?}");
+    assert!(aws.iter().all(|d| d.provider.is_none()), "{aws:?}");
+
+    let others = ttg_codegen::diagnostics::other_providers(&p, &cat, "aws");
+    let azure: Vec<_> = others
+        .iter()
+        .filter(|d| d.provider.as_deref() == Some("azure") && d.entity.as_deref() == Some("cert-site"))
+        .collect();
+    assert_eq!(azure.len(), 1, "{others:?}");
+    assert_eq!(azure[0].severity, Severity::Warning);
+    assert!(
+        azure[0].message.starts_with("[Microsoft Azure] ")
+            && azure[0]
+                .message
+                .ends_with("(would block the Microsoft Azure export)"),
+        "{:?}",
+        azure[0]
+    );
+    assert!(
+        others.iter().all(|d| d.severity == Severity::Warning),
+        "{others:?}"
+    );
+    // `run_all` is the two lists together, and the AWS export is not blocked by them.
+    let all = ttg_codegen::diagnostics::run_all(&p, &cat, "aws");
+    assert_eq!(all.len(), aws.len() + others.len());
+    generate(&p, &cat, "aws", Tool::OpenTofu).expect("aws still exports");
+
+    // With Azure as the target it is the target's own error, reported once, and nothing
+    // is repeated in the other-provider list.
+    let az = ttg_codegen::diagnostics::run_all(&p, &cat, "azure");
+    let mine: Vec<_> = az
+        .iter()
+        .filter(|d| d.entity.as_deref() == Some("cert-site") && d.severity == Severity::Error)
+        .collect();
+    assert_eq!(mine.len(), 1, "{az:?}");
+    assert!(mine[0].provider.is_none());
+    assert!(
+        az.iter()
+            .all(|d| d.provider.as_deref() != Some("azure") && !d.message.contains("[Microsoft Azure]")),
+        "{az:?}"
+    );
+    // An entity tagged for one provider produces nothing for the others.
+    p.nodes.get_mut("cert-site").unwrap().providers = vec!["aws".into()];
+    let others = ttg_codegen::diagnostics::other_providers(&p, &cat, "aws");
+    assert!(
+        others.iter().all(|d| d.entity.as_deref() != Some("cert-site")),
+        "{others:?}"
+    );
+}

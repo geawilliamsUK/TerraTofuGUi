@@ -904,9 +904,21 @@ impl Project {
 
     /// Ids of every entity on the `provider` layer.
     pub fn layer_members(&self, provider: &str, type_on: &dyn Fn(&str) -> bool) -> BTreeSet<Id> {
+        self.layer_members_omitting(provider, type_on, &BTreeSet::new())
+    }
+
+    /// [`Project::layer_members`] with entities the caller has already decided are off
+    /// the layer for a reason the project itself cannot see — a provider check with
+    /// `severity = "omit"` that fired on them.
+    pub fn layer_members_omitting(
+        &self,
+        provider: &str,
+        type_on: &dyn Fn(&str) -> bool,
+        omitted: &BTreeSet<Id>,
+    ) -> BTreeSet<Id> {
         self.entities()
             .iter()
-            .filter(|e| self.entity_on_layer(e.id, provider, type_on))
+            .filter(|e| !omitted.contains(e.id) && self.entity_on_layer(e.id, provider, type_on))
             .map(|e| e.id.to_string())
             .collect()
     }
@@ -916,7 +928,19 @@ impl Project {
     /// kept ancestor (a provider-only container is just grouping elsewhere). Everything
     /// downstream (codegen, diagnostics, reachability) works on this.
     pub fn layer(&self, provider: &str, type_on: &dyn Fn(&str) -> bool) -> Project {
-        let keep = self.layer_members(provider, type_on);
+        self.layer_omitting(provider, type_on, &BTreeSet::new())
+    }
+
+    /// [`Project::layer`] with entities the caller has already decided are off the layer
+    /// (an `omit` check fired on them). They are dropped exactly like a tagged entity:
+    /// links to and from them go with them, and their children are re-parented.
+    pub fn layer_omitting(
+        &self,
+        provider: &str,
+        type_on: &dyn Fn(&str) -> bool,
+        omitted: &BTreeSet<Id>,
+    ) -> Project {
+        let keep = self.layer_members_omitting(provider, type_on, omitted);
         let mut out = self.clone();
         out.nodes.retain(|id, _| keep.contains(id));
         out.containers.retain(|id, _| keep.contains(id));
@@ -936,7 +960,11 @@ impl Project {
         for c in out.containers.values_mut() {
             c.parent = nearest(c.parent.as_deref());
         }
-        out.edges.retain(|e| self.edge_on_layer(e, provider, type_on));
+        out.edges.retain(|e| {
+            (e.providers.is_empty() || e.providers.iter().any(|p| p == provider))
+                && keep.contains(&e.source)
+                && keep.contains(&e.target)
+        });
         out
     }
 

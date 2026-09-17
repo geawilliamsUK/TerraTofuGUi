@@ -549,3 +549,62 @@ fn headless_view_documents() {
         "one undo must take the whole batch: {after_undo}"
     );
 }
+
+/// The `diagnostics` tool keeps the target provider's list and the other providers'
+/// would-be errors apart, so the agent cannot mistake one for the other.
+#[test]
+fn headless_diagnostics_report_the_other_providers() {
+    let server = start("edge.ttg.json");
+    let mut c = Client::new(&server);
+    c.initialize();
+
+    // As drawn, every provider is happy.
+    let (err, d) = c.call("diagnostics", json!({}));
+    assert!(!err, "{d}");
+    assert_eq!(d["provider"], json!("aws"), "{d}");
+    assert!(d["diagnostics"].is_array(), "{d}");
+    assert_eq!(d["other_providers"], json!([]), "{d}");
+
+    // Take the certificate out of the Key Vault: Azure has nowhere to put it, AWS does
+    // not care. The target's own list stays error-free; the other list says what Azure
+    // would refuse.
+    let (err, moved) = c.call(
+        "entity_set_parent",
+        json!({"entity": "cert-site", "parent": "rg-edge"}),
+    );
+    assert!(!err, "{moved}");
+    let (err, d) = c.call("diagnostics", json!({}));
+    assert!(!err, "{d}");
+    assert!(
+        d["diagnostics"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|x| x["severity"] != json!("error")),
+        "{d}"
+    );
+    let others = d["other_providers"].as_array().unwrap();
+    let azure = others
+        .iter()
+        .find(|x| x["provider"] == json!("azure") && x["entity"] == json!("cert-site"))
+        .unwrap_or_else(|| panic!("{d}"));
+    assert_eq!(azure["severity"], json!("warning"), "{azure}");
+    assert!(
+        azure["message"]
+            .as_str()
+            .unwrap()
+            .starts_with("[Microsoft Azure] "),
+        "{azure}"
+    );
+    assert!(
+        azure["message"]
+            .as_str()
+            .unwrap()
+            .ends_with("(would block the Microsoft Azure export)"),
+        "{azure}"
+    );
+
+    // The AWS export is not blocked by any of it.
+    let (err, preview) = c.call("export_preview", json!({}));
+    assert!(!err, "{preview}");
+}

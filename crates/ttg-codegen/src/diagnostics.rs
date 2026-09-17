@@ -57,6 +57,10 @@ pub struct Diagnostic {
     pub severity: Severity,
     pub code: Code,
     pub message: String,
+    /// `None` for the target provider's own diagnostics. [`run_all`] sets it to the
+    /// provider an error came from when it reports another provider's errors as
+    /// warnings; the message then carries the same provider as a `[Azure] ` prefix.
+    pub provider: Option<String>,
 }
 
 impl fmt::Display for Diagnostic {
@@ -89,6 +93,7 @@ pub fn run(full: &Project, cat: &Catalog, provider: &str) -> Vec<Diagnostic> {
             severity: sev,
             code,
             message: msg,
+            provider: None,
         })
     };
     // Parity report: what this provider's layer leaves out.
@@ -106,7 +111,11 @@ pub fn run(full: &Project, cat: &Catalog, provider: &str) -> Vec<Diagnostic> {
             .collect::<Vec<_>>()
             .join(" / ")
     };
-    for (id, why) in crate::layers::off_layer(full, cat, provider) {
+    // Entities a `severity = "omit"` check leaves out of this provider's export. They
+    // are off the layer below, so the check is reported once, here, and nothing else in
+    // this run sees them.
+    let omitted = crate::layers::omitted(full, cat, provider);
+    for (id, why) in crate::layers::off_layer_omitting(full, cat, provider, &omitted) {
         let e = full.entity(&id).unwrap();
         let display = cat
             .resource(e.resource_type)
@@ -140,10 +149,22 @@ pub fn run(full: &Project, cat: &Catalog, provider: &str) -> Vec<Diagnostic> {
                     names(&scope)
                 ),
             ),
+            crate::layers::OffReason::Check(msg) => push(
+                &mut out,
+                Some(&id),
+                Severity::Warning,
+                Code::Check,
+                format!("{msg}; left out of the {provider_name} export"),
+            ),
             crate::layers::OffReason::InsideOffLayerContainer => {}
         }
     }
-    let layer = crate::layers::project_for(full, cat, provider);
+    let layer = crate::layers::project_for_omitting(
+        full,
+        cat,
+        provider,
+        &omitted.iter().map(|(id, _)| id.clone()).collect(),
+    );
     let p = &layer;
 
     let structural = ttg_core::validate::structural(p);
@@ -429,6 +450,11 @@ pub fn run(full: &Project, cat: &Catalog, provider: &str) -> Vec<Diagnostic> {
 
         // Definition-level checks.
         for chk in &m.checks {
+            // `omit` checks are reported by the parity loop above, on the entity they
+            // took out of the layer; nothing on the layer can still be failing one.
+            if chk.severity == "omit" {
+                continue;
+            }
             let sev = if chk.severity == "error" {
                 Severity::Error
             } else {
@@ -671,6 +697,79 @@ pub fn run(full: &Project, cat: &Catalog, provider: &str) -> Vec<Diagnostic> {
         }
     }
     out.sort_by_key(|a| std::cmp::Reverse(a.severity));
+    out
+}
+
+/// The `omit` checks that fire on `p`, which must already be the provider's layer:
+/// `(entity, rendered message)`. Feeds [`crate::layers::omitted`], which takes those
+/// entities out of the layer; nothing else calls this.
+pub fn omit_checks(p: &Project, cat: &Catalog, provider: &str) -> Vec<(Id, String)> {
+    let mut out = Vec::new();
+    for e in p.entities() {
+        if e.manual {
+            continue;
+        }
+        let Some(m) = cat.mapping(e.resource_type, provider) else {
+            continue;
+        };
+        for chk in m.checks.iter().filter(|c| c.severity == "omit") {
+            let fired = match &chk.for_each_field {
+                Some(field) => {
+                    let rows = field_rows(&e, provider, field);
+                    rows.iter()
+                        .enumerate()
+                        .find(|(n, row)| condition_holds(p, cat, provider, &e, &chk.when, Some((row, *n))))
+                        .map(|(_, row)| render_message(&chk.message, &e, Some(row)))
+                }
+                None => condition_holds(p, cat, provider, &e, &chk.when, None)
+                    .then(|| render_message(&chk.message, &e, None)),
+            };
+            if let Some(msg) = fired {
+                out.push((e.id.to_string(), msg));
+                break;
+            }
+        }
+    }
+    out
+}
+
+/// [`run`] for the target provider, plus what the *other* providers in the catalog would
+/// refuse: each of their errors, downgraded to a warning, tagged with the provider it
+/// came from and prefixed `[<Provider>] `. Exports still block on the target provider's
+/// own errors only — this is the "you will hit this when you switch" list.
+pub fn run_all(full: &Project, cat: &Catalog, provider: &str) -> Vec<Diagnostic> {
+    let mut out = run(full, cat, provider);
+    out.extend(other_providers(full, cat, provider));
+    out
+}
+
+/// The other-provider half of [`run_all`], on its own, for callers that keep the two
+/// lists apart (the app's panel, the MCP `other_providers` key).
+pub fn other_providers(full: &Project, cat: &Catalog, provider: &str) -> Vec<Diagnostic> {
+    let mut out = Vec::new();
+    for pid in cat.provider_ids() {
+        if pid == provider {
+            continue;
+        }
+        let name = cat
+            .provider(&pid)
+            .map(|d| d.provider.display_name.clone())
+            .unwrap_or_else(|| pid.clone());
+        // `run` works on that provider's own layer, so an entity tagged for other
+        // providers (or omitted there) never reaches this list in the first place.
+        for d in run(full, cat, &pid) {
+            if d.severity != Severity::Error {
+                continue;
+            }
+            out.push(Diagnostic {
+                entity: d.entity,
+                severity: Severity::Warning,
+                code: d.code,
+                message: format!("[{name}] {} (would block the {name} export)", d.message),
+                provider: Some(pid.clone()),
+            });
+        }
+    }
     out
 }
 
@@ -1165,6 +1264,7 @@ fn network_checks(p: &Project, cat: &Catalog, provider: &str, out: &mut Vec<Diag
             severity: sev,
             code: Code::Network,
             message: msg,
+            provider: None,
         })
     };
     let entities = p.entities();
@@ -1471,6 +1571,7 @@ fn extra_checks(p: &Project, cat: &Catalog, provider: &str, out: &mut Vec<Diagno
                             "{}: no schema for {} in the bundled index, extra arguments are not checked",
                             b.key, b.resource
                         ),
+                        provider: None,
                     });
                 }
                 continue;
@@ -1484,6 +1585,7 @@ fn extra_checks(p: &Project, cat: &Catalog, provider: &str, out: &mut Vec<Diagno
                                 severity: Severity::Error,
                                 code: Code::Extra,
                                 message: format!("{}.{k} is read-only on {}", b.resource, provider),
+                                provider: None,
                             });
                         } else if !json_matches(a.kind(), v) {
                             out.push(Diagnostic {
@@ -1491,6 +1593,7 @@ fn extra_checks(p: &Project, cat: &Catalog, provider: &str, out: &mut Vec<Diagno
                                 severity: Severity::Error,
                                 code: Code::Extra,
                                 message: format!("{}.{k} expects a {} value", b.resource, a.kind().label()),
+                                provider: None,
                             });
                         }
                     } else if let Some(n) = schema.blocks.get(k) {
@@ -1509,6 +1612,7 @@ fn extra_checks(p: &Project, cat: &Catalog, provider: &str, out: &mut Vec<Diagno
                                     b.resource,
                                     n.nesting()
                                 ),
+                                provider: None,
                             });
                         }
                     } else if !["depends_on", "count", "for_each", "provider", "lifecycle"]
@@ -1519,6 +1623,7 @@ fn extra_checks(p: &Project, cat: &Catalog, provider: &str, out: &mut Vec<Diagno
                             severity: Severity::Error,
                             code: Code::Extra,
                             message: format!("{} has no argument '{k}' on {}", b.resource, provider),
+                            provider: None,
                         });
                     }
                     if b.args.contains_key(k) || b.nested.iter().any(|n| &n.block == k) {
@@ -1530,6 +1635,7 @@ fn extra_checks(p: &Project, cat: &Catalog, provider: &str, out: &mut Vec<Diagno
                                 "extra argument {k} overrides the value the {} mapping sets",
                                 b.resource
                             ),
+                            provider: None,
                         });
                     }
                 }
@@ -1547,6 +1653,7 @@ fn extra_checks(p: &Project, cat: &Catalog, provider: &str, out: &mut Vec<Diagno
                         severity: Severity::Error,
                         code: Code::Extra,
                         message: format!("{} requires: {}", b.resource, missing.join(", ")),
+                        provider: None,
                     });
                 }
             }

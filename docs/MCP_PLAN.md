@@ -39,6 +39,12 @@ Read: `project_get`, `project_summary`, `catalog_types`, `catalog_type`, `diagno
 `reach_posture`, `reach_from`, `reach_to`, `export_preview`, `view_get`, `view_export`,
 `view_fit`, `screenshot`.
 
+`diagnostics` answers `{ provider, diagnostics, other_providers }`: the target provider's
+list, and separately the errors the *other* providers would raise, as warnings carrying
+their `provider` and a `[<Provider>] … (would block the <Provider> export)` message. The
+two lists are kept apart so an agent cannot mistake "blocks the export I am making" for
+"would block an export nobody asked for". `ttg://diagnostics` returns the same object.
+
 Write (each undoable): `entity_add`, `entity_update` (values validated against the
 definition, unknown fields rejected with the list of valid ones), `entity_move`,
 `entity_resize`, `entity_set_parent` (allowed-parent check, moves the entity inside the

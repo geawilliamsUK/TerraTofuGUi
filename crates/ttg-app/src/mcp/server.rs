@@ -55,7 +55,7 @@ const RESOURCES: &[(&str, &str, &str, &str)] = &[
     (
         "ttg://diagnostics",
         "diagnostics",
-        "Current diagnostics for the target provider",
+        "Current diagnostics for the target provider, plus what the other providers would refuse",
         "application/json",
     ),
     (
@@ -739,7 +739,7 @@ impl TtgServer {
     }
 
     #[tool(
-        description = "Current diagnostics (errors block export; warnings become manual steps) for the target provider."
+        description = "Current diagnostics (errors block export; warnings become manual steps) for the target provider, under `diagnostics`. `other_providers` carries the errors the *other* providers would raise, as warnings: they do not block this export, they say what switching the target would cost."
     )]
     async fn diagnostics(&self) -> CallToolResult {
         self.run(AgentCommand::Diagnostics).await

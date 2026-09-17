@@ -1531,9 +1531,49 @@ pub fn status_ui(app: &mut TtgApp, ui: &mut Ui) {
                     }
                 }
             }
+            // What the other providers would refuse, collapsed: it is about an export
+            // nobody asked for yet, so it never competes with the target's own list and
+            // never reaches the canvas badges.
+            let others = app.other_diagnostics().to_vec();
+            if !others.is_empty() {
+                ui.add_space(2.0);
+                egui::CollapsingHeader::new(
+                    RichText::new(format!("Other providers ({})", others.len()))
+                        .small()
+                        .color(OTHER_PROVIDER),
+                )
+                .id_salt("other_provider_diags")
+                .default_open(false)
+                .show(ui, |ui| {
+                    for d in others {
+                        let name = d
+                            .entity
+                            .as_ref()
+                            .and_then(|id| app.project.entity(id).map(|e| e.name.to_string()))
+                            .unwrap_or_default();
+                        let text = if name.is_empty() {
+                            d.message.clone()
+                        } else {
+                            format!("{name}: {}", d.message)
+                        };
+                        let r = ui.selectable_label(false, RichText::new(text).small().color(OTHER_PROVIDER));
+                        if r.clicked() {
+                            if let Some(id) = &d.entity {
+                                app.selection.clear();
+                                app.selection.insert(id.clone());
+                                app.selected_edge = None;
+                            }
+                        }
+                    }
+                });
+            }
         });
     }
 }
+
+/// Muted grey-brown for another provider's errors: readable, but plainly not the
+/// warning colour of something that blocks the export being worked on.
+const OTHER_PROVIDER: Color32 = Color32::from_rgb(130, 120, 105);
 
 fn reach_glyph(s: ttg_codegen::reach::Status) -> (&'static str, Color32) {
     match s {
