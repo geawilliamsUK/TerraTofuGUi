@@ -90,9 +90,23 @@
           "default": null
         },
         "state_encryption": {
-          "description": "OpenTofu-only: emit a state `encryption` block. Ignored for Terraform.",
+          "description": "OpenTofu-only: emit a state `encryption` block. Terraform has none, so there it\nonly produces a warning.",
           "type": "boolean",
           "default": false
+        },
+        "state_encryption_key": {
+          "description": "Id of the `encryption_key` entity whose key encrypts the state (AWS KMS / Google\nCloud KMS key provider). The key cannot live in the configuration whose state it\nencrypts, so the export moves it to the separate `bootstrap/` root. Unset, or on a\nprovider without a KMS key provider, the state is encrypted with a passphrase.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "provider_versions": {
+          "description": "Per-provider version constraint for `required_providers` (`{ \"aws\": \"~> 6.0\" }`).\nA provider without an entry uses its definition's `version_constraint`.",
+          "type": "object",
+          "additionalProperties": {
+            "type": "string"
+          }
         },
         "tags": {
           "description": "Tags applied to every resource the project generates (cost allocation, ownership).\nHow they reach the HCL is the provider definition's business: AWS `default_tags`,\nGCP `default_labels`, Azure a `tags` argument merged into each resource.",
@@ -116,11 +130,11 @@
       ]
     },
     "BackendConfig": {
-      "description": "Remote/local state backend configuration. Rendered by the tool layer.",
+      "description": "Where the state lives. Rendered into the `terraform {}` block by `ttg-codegen::state`,\nwhich also owns the list of backend types and the keys each one takes (`s3`: `bucket`,\n`region`, optional `key_prefix`, `key` and `kms_key_id`; `azurerm`:\n`resource_group_name`, `storage_account_name`, `container_name`, optional `key_prefix`\nand `key`; `gcs`: `bucket`, optional `key_prefix` (or its own name, `prefix`); `local`:\noptional `path`). The state key is derived — `<key_prefix>/terraform.tfstate` — so a\nnamed environment can later slot in between; an explicit `key` gets it in front of its\nfile name.",
       "type": "object",
       "properties": {
         "type": {
-          "description": "`local`, `s3`, `azurerm`, ...",
+          "description": "`local`, `s3`, `azurerm` or `gcs`.",
           "type": "string"
         },
         "args": {

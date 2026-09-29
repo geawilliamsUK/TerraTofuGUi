@@ -179,6 +179,11 @@ enum SchemaCmd {
         tool: Option<ToolArg>,
         #[arg(long)]
         out: Option<PathBuf>,
+        /// Build the index for another version than the definition's default, e.g.
+        /// `--provider-version aws="~> 7.0"` (repeatable). The diagnostics then check the
+        /// curated mappings a project uses against that version, naming any that break.
+        #[arg(long = "provider-version", value_name = "PROVIDER=CONSTRAINT")]
+        provider_version: Vec<String>,
     },
     /// Search resource types on a provider.
     Search {
@@ -284,15 +289,32 @@ fn main() -> Result<()> {
                     );
                 }
             }
-            SchemaCmd::Refresh { tool, out } => {
+            SchemaCmd::Refresh {
+                tool,
+                out,
+                provider_version,
+            } => {
                 let tool = tool.map(Into::into).unwrap_or(Tool::OpenTofu);
+                let mut pins = std::collections::BTreeMap::new();
+                for pv in &provider_version {
+                    let (id, c) = pv.split_once('=').ok_or_else(|| {
+                        anyhow::anyhow!("--provider-version takes PROVIDER=CONSTRAINT, got {pv}")
+                    })?;
+                    if cat.provider(id).is_none() {
+                        anyhow::bail!("--provider-version: unknown provider {id}");
+                    }
+                    ttg_codegen::versions::check_constraint(c.trim()).map_err(|e| anyhow::anyhow!(e))?;
+                    pins.insert(id.to_string(), c.trim().to_string());
+                }
                 let providers: Vec<(String, String)> = cat
                     .providers
-                    .values()
-                    .map(|p| {
+                    .iter()
+                    .map(|(id, p)| {
                         (
                             format!("{}/{}", p.provider.source_namespace, p.provider.source_name),
-                            p.provider.version_constraint.clone(),
+                            pins.get(id)
+                                .cloned()
+                                .unwrap_or(p.provider.version_constraint.clone()),
                         )
                     })
                     .collect();

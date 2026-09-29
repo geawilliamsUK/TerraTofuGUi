@@ -49,6 +49,11 @@ pub enum Code {
     Layer,
     /// Extra / native arguments checked against the provider schema.
     Extra,
+    /// Where the state lives and what protects it: the backend, state encryption, the
+    /// bootstrap root, secrets that land in the state (`crate::state`).
+    State,
+    /// Provider version constraints against the bundled schema (`crate::versions`).
+    Version,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -663,6 +668,8 @@ pub fn run(full: &Project, cat: &Catalog, provider: &str) -> Vec<Diagnostic> {
     }
     network_checks(p, cat, provider, &mut out);
     extra_checks(p, cat, provider, &mut out);
+    out.extend(crate::state::checks(full, p, cat, provider, full.settings.tool));
+    out.extend(crate::versions::checks(p, cat, provider));
 
     for e in &p.edges {
         if is_redundant_edge(p, cat, e) {

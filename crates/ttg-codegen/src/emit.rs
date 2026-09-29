@@ -8,6 +8,7 @@
 
 use crate::diagnostics::{self, consumed_relations, Consumed, Diagnostic, Severity};
 use crate::files;
+use crate::state;
 use crate::tool::Profile;
 use crate::GenError;
 use hcl::{Block, Expression, FuncCall, Identifier, Number, Object, ObjectKey, Traversal, Variable};
@@ -239,6 +240,10 @@ struct Emitter<'a> {
     used_aliases: HashSet<String>,
     manual: Vec<ManualEntry>,
     manual_refs_done: HashSet<Id>,
+    /// The Encryption Key the bootstrap root creates because it encrypts this
+    /// configuration's state: treated like an external entity here, its references
+    /// becoming input variables the bootstrap root's outputs fill.
+    bootstrap_key: Option<Id>,
 }
 
 /// Generate the complete file set for one provider. Errors if diagnostics contain any
@@ -247,13 +252,22 @@ pub fn generate(p: &Project, cat: &Catalog, provider: &str, tool: Tool) -> Resul
     let pdef = cat
         .provider(provider)
         .ok_or_else(|| GenError::UnknownProvider(provider.to_string()))?;
-    let diags = diagnostics::run(p, cat, provider);
+    let mut diags = diagnostics::run(p, cat, provider);
+    if tool != p.settings.tool {
+        // The state checks answer for the project's own tool; this export is for the
+        // other one (exporting both flavours, the validate suite), so ask again.
+        let layer = crate::layers::project_for(p, cat, provider);
+        diags.retain(|d| d.code != diagnostics::Code::State);
+        diags.extend(state::checks(p, &layer, cat, provider, tool));
+        diags.sort_by_key(|a| std::cmp::Reverse(a.severity));
+    }
     if diags.iter().any(|d| d.severity == Severity::Error) {
         return Err(GenError::Blocked(diags));
     }
     // Only the provider's layer is generated.
     let layer = crate::layers::project_for(p, cat, provider);
     let p = &layer;
+    let encryption = state::encryption_plan(p, cat, provider, tool);
 
     let mut em = Emitter {
         p,
@@ -269,6 +283,10 @@ pub fn generate(p: &Project, cat: &Catalog, provider: &str, tool: Tool) -> Resul
         used_aliases: HashSet::new(),
         manual: Vec::new(),
         manual_refs_done: HashSet::new(),
+        bootstrap_key: encryption
+            .as_ref()
+            .filter(|e| e.key_in_bootstrap)
+            .and_then(|e| e.key.clone()),
     };
 
     // Provider-level variables are always present.
@@ -295,18 +313,22 @@ pub fn generate(p: &Project, cat: &Catalog, provider: &str, tool: Tool) -> Resul
         );
         em.used_vars.insert(v.name.clone());
     }
-    if tool == Tool::OpenTofu && p.settings.state_encryption {
+    if encryption
+        .as_ref()
+        .is_some_and(|e| e.source == state::KeySource::Passphrase)
+    {
+        let name = state::PASSPHRASE_VAR.to_string();
         em.vars.insert(
-            "state_passphrase".into(),
+            name.clone(),
             VarSpec {
-                name: "state_passphrase".into(),
+                name: name.clone(),
                 var_type: "string".into(),
-                description: "Passphrase for OpenTofu state encryption (pbkdf2 key provider).".into(),
+                description: "Passphrase the OpenTofu state and plan are encrypted with (pbkdf2 key provider); at least 16 characters. Keep it out of version control: TF_VAR_state_passphrase.".into(),
                 default: None,
                 sensitive: true,
             },
         );
-        em.used_vars.insert("state_passphrase".into());
+        em.used_vars.insert(name);
     }
 
     // Phase 1: plan which (entity, block) pairs exist, so cross references can be checked.
@@ -565,20 +587,64 @@ pub fn generate(p: &Project, cat: &Catalog, provider: &str, tool: Tool) -> Resul
         .iter()
         .filter(|h| emitted.iter().any(|b| b.resource_type.starts_with(&h.prefix)))
         .collect();
+    // The state: backend and encryption go into the same `terraform {}` block as the
+    // version constraints, so `versions.tf` says everything `init` needs to know.
+    let mut state_blocks = Vec::new();
+    if let Some(cfg) = state::configured_backend(p) {
+        state_blocks.push(state::backend_block(p, &cfg, None));
+    }
+    if let Some(plan) = &encryption {
+        let key = match (&plan.key, plan.key_attr()) {
+            (Some(k), Some(attr)) => em.reference(k, None, attr, "state encryption key")?,
+            _ => None,
+        };
+        state_blocks.push(state::encryption_block(plan, key));
+    }
+    // The key reference may have added a variable; render variables.tf again.
+    let vars: Vec<&VarSpec> = em
+        .vars
+        .values()
+        .filter(|v| em.used_vars.contains(&v.name))
+        .collect();
+    files.insert("variables.tf".into(), files::render_variables(&header, &vars));
+    let versions = files::VersionsSpec {
+        provider_version: crate::versions::constraint(p, pdef),
+        required_version: state::required_version(p, tool, encryption.is_some())
+            .unwrap_or(em.profile.required_version()),
+        extra_blocks: &state_blocks,
+    };
     files.insert(
         "versions.tf".into(),
-        files::render_versions(&header, &em.profile, pdef, &helpers),
+        files::render_versions(&header, &em.profile, pdef, &helpers, &versions),
     );
     let provider_blocks = em.build_provider_blocks()?;
     files.insert(
         "providers.tf".into(),
         files::render_providers(&header, &provider_blocks),
     );
-    if let Some(b) = em
-        .profile
-        .backend_block(p.settings.backend.as_ref(), p.settings.state_encryption)
-    {
-        files.insert("backend.tf".into(), files::render_backend(&header, &b));
+
+    // The bootstrap roots: the state store and the state key, generated from small
+    // projects of their own (see `state`).
+    let roots = state::bootstrap_roots(p, cat, provider, tool);
+    let mut bootstrap_files: Vec<(String, String)> = Vec::new();
+    let mut with_steps: Vec<&str> = Vec::new();
+    for root in &roots {
+        let g = generate(&root.project, cat, &root.provider, tool).map_err(|e| {
+            GenError::Emit(format!(
+                "the bootstrap root {}/ could not be generated: {e}",
+                root.dir
+            ))
+        })?;
+        if !g.manual_steps.is_empty() {
+            with_steps.push(&root.dir);
+        }
+        for (name, content) in g.files {
+            bootstrap_files.push((format!("{}/{name}", root.dir), content));
+        }
+    }
+    if !roots.is_empty() {
+        let step = bootstrap_step(p, &roots, &with_steps, &em.vars, &em.used_vars, tool);
+        em.manual.insert(0, step);
     }
     if !em.manual.is_empty() {
         files.insert(
@@ -588,9 +654,17 @@ pub fn generate(p: &Project, cat: &Catalog, provider: &str, tool: Tool) -> Resul
     }
     files.insert(
         "README.md".into(),
-        files::render_readme(p, &em.profile, pdef, !em.manual.is_empty(), !manifests.is_empty()),
+        files::render_readme(
+            p,
+            &em.profile,
+            pdef,
+            !em.manual.is_empty(),
+            !manifests.is_empty(),
+            &files::StateSummary::of(p, encryption.as_ref(), &roots),
+        ),
     );
     files.extend(manifests);
+    files.extend(bootstrap_files);
 
     Ok(Generated {
         provider: provider.to_string(),
@@ -601,6 +675,74 @@ pub fn generate(p: &Project, cat: &Catalog, provider: &str, tool: Tool) -> Resul
         diagnostics: diags,
         entity_blocks,
     })
+}
+
+/// The first manual step of an export with a bootstrap root: apply that root first, then
+/// hand its outputs to this one.
+fn bootstrap_step(
+    p: &Project,
+    roots: &[state::BootstrapRoot],
+    with_steps: &[&str],
+    vars: &IndexMap<String, VarSpec>,
+    used: &HashSet<String>,
+    tool: Tool,
+) -> ManualEntry {
+    let bin = Profile::new(tool).binary();
+    let mut body = String::from(
+        "The state has to be somewhere before this configuration can keep it there, and a key \
+         has to exist before it can encrypt anything, so neither can be part of the configuration \
+         whose state it is. The `bootstrap/` directory is a separate, small configuration that \
+         creates them. It keeps its own state in a local file: that state holds no secrets, only \
+         the names and ids of the bucket and the key, but keep it (or move it into the new bucket \
+         later with a backend block of its own).\n\n",
+    );
+    for r in roots {
+        let what = match (r.store, r.key.is_some()) {
+            (true, true) => "the state store and the state encryption key",
+            (true, false) => "the state store",
+            _ => "the state encryption key",
+        };
+        body.push_str(&format!(
+            "- `{}/` creates {what}:\n\n  ```\n  {bin} -chdir={} init\n  {bin} -chdir={} apply\n  ```\n",
+            r.dir, r.dir, r.dir
+        ));
+        if with_steps.contains(&r.dir.as_str()) {
+            body.push_str(&format!(
+                "\n  It has manual steps of its own: read `{}/MANUAL_STEPS.md` first.\n",
+                r.dir
+            ));
+        }
+    }
+    let mut key_vars: Vec<(&str, &VarSpec)> = Vec::new();
+    for r in roots {
+        let Some(k) = r.key.as_deref() else { continue };
+        let prefix = format!("{}_", p.hcl_name(k));
+        for v in vars.values() {
+            if v.name.starts_with(&prefix) && used.contains(&v.name) {
+                key_vars.push((r.dir.as_str(), v));
+            }
+        }
+    }
+    if !key_vars.is_empty() {
+        body.push_str(
+            "\nThen give this configuration the key, from the bootstrap root's outputs (in \
+             `terraform.tfvars`, or as `TF_VAR_<name>`):\n\n",
+        );
+        for (dir, v) in key_vars {
+            body.push_str(&format!(
+                "- `{}` = `{bin} -chdir={dir} output -raw {}`\n",
+                v.name, v.name
+            ));
+        }
+    }
+    body.push_str(&format!(
+        "\nOnly then run `{bin} init` here: it connects to the backend the bootstrap root created."
+    ));
+    ManualEntry {
+        entity: None,
+        title: "Apply the bootstrap root first".into(),
+        body,
+    }
 }
 
 /// The block other resources reference: `main` if present, else the first.
@@ -877,7 +1019,7 @@ fn any_field<'a>(e: &EntityRef<'a>, provider: &str, name: &str) -> Option<&'a Va
 
 impl<'a> Emitter<'a> {
     fn status(&self, e: &EntityRef<'a>) -> Status<'a> {
-        if e.manual {
+        if e.manual || self.bootstrap_key.as_deref() == Some(e.id) {
             return Status::Manual;
         }
         match self.cat.mapping(e.resource_type, self.provider) {
@@ -1657,7 +1799,10 @@ impl<'a> Emitter<'a> {
             }
             Status::Logical(_) => Ok(None),
             Status::Manual | Status::Unmapped => {
-                let reason = if t.manual {
+                let in_bootstrap = self.bootstrap_key.as_deref() == Some(t.id);
+                let reason = if in_bootstrap {
+                    "created by the bootstrap root because it encrypts this configuration's state"
+                } else if t.manual {
                     "flagged as external / managed by hand"
                 } else {
                     "no mapping for this provider"
@@ -1670,10 +1815,17 @@ impl<'a> Emitter<'a> {
                 self.vars.entry(var_name.clone()).or_insert(VarSpec {
                     name: var_name.clone(),
                     var_type: "string".into(),
-                    description: format!(
-                        "`{attr}` of the {display} \"{}\" ({reason}). Supply after creating it.",
-                        t.name
-                    ),
+                    description: if in_bootstrap {
+                        format!(
+                            "`{attr}` of the {display} \"{}\" ({reason}): output `{var_name}` of the bootstrap root.",
+                            t.name
+                        )
+                    } else {
+                        format!(
+                            "`{attr}` of the {display} \"{}\" ({reason}). Supply after creating it.",
+                            t.name
+                        )
+                    },
                     default: None,
                     sensitive: false,
                 });
@@ -1685,6 +1837,10 @@ impl<'a> Emitter<'a> {
     }
 
     fn note_manual_entity(&mut self, t: &EntityRef<'a>, reason: &str) {
+        // The bootstrap root's key has a manual step of its own (`bootstrap_step`).
+        if self.bootstrap_key.as_deref() == Some(t.id) {
+            return;
+        }
         if !self.manual_refs_done.insert(t.id.to_string()) {
             return;
         }

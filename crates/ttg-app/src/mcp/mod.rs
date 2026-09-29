@@ -348,6 +348,13 @@ pub enum AgentCommand {
         /// Replaces the project's default tags outright; `{}` clears them.
         tags: Option<serde_json::Map<String, serde_json::Value>>,
         kubernetes_manifests: Option<bool>,
+        /// `Some(null)` clears the backend; `None` leaves it alone.
+        backend: Option<serde_json::Value>,
+        state_encryption: Option<bool>,
+        /// Id or name; `Some(null)` / `Some("")` clears it.
+        state_encryption_key: Option<serde_json::Value>,
+        /// Merged into the pins; a null or empty value removes one.
+        provider_versions: Option<serde_json::Map<String, serde_json::Value>>,
     },
     ProjectSave {
         path: Option<String>,

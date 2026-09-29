@@ -1948,3 +1948,158 @@ fn headless_kubernetes_manifests() {
     );
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+/// Round 3 (R3.2, R3.4, R3.14): the state backend, state encryption and provider version
+/// pins round-trip through `settings_set` and `project_get`, bad values and unknown keys
+/// are refused with a message that says what would be right, and the export carries the
+/// result.
+#[test]
+fn headless_settings_state_and_versions() {
+    let server = start("hardened.ttg.json");
+    let mut c = Client::new(&server);
+    c.initialize();
+
+    // R3.14: an unknown key is refused, naming the valid ones; nothing changes.
+    let (_, before) = c.call("project_get", json!({}));
+    let (err, msg) = c.call(
+        "settings_set",
+        json!({"tool": "terraform", "backnd": {"type": "s3"}}),
+    );
+    assert!(err, "{msg}");
+    let msg = msg.as_str().unwrap_or_default().to_string();
+    assert!(msg.contains("settings_set does not take `backnd`"), "{msg}");
+    for key in [
+        "tool",
+        "provider",
+        "provider_settings",
+        "tags",
+        "kubernetes_manifests",
+        "backend",
+        "state_encryption",
+        "state_encryption_key",
+        "provider_versions",
+    ] {
+        assert!(msg.contains(key), "valid key {key} missing from: {msg}");
+    }
+    let (_, after) = c.call("project_get", json!({}));
+    assert_eq!(
+        before["settings"], after["settings"],
+        "a refused call changed the settings"
+    );
+    // The same inside project_apply.
+    let (err, msg) = c.call(
+        "project_apply",
+        json!({"commands": [{"tool": "settings_set", "args": {"state_encrypt": true}}]}),
+    );
+    assert!(err, "{msg}");
+    assert!(msg.as_str().unwrap_or_default().contains("valid keys:"), "{msg}");
+
+    // R3.2: a backend with a missing key or an unknown type is refused with the reason.
+    let (err, msg) = c.call("settings_set", json!({"backend": {"type": "s3", "bucket": "b"}}));
+    assert!(err, "{msg}");
+    assert!(
+        msg.as_str()
+            .unwrap_or_default()
+            .contains("the s3 backend needs bucket, region; missing: region"),
+        "{msg}"
+    );
+    let (err, msg) = c.call("settings_set", json!({"backend": {"type": "consul"}}));
+    assert!(err, "{msg}");
+    assert!(
+        msg.as_str()
+            .unwrap_or_default()
+            .contains("use one of: local, s3, azurerm, gcs"),
+        "{msg}"
+    );
+    let (err, msg) = c.call("settings_set", json!({"state_encryption_key": "db password"}));
+    assert!(err, "{msg}");
+    assert!(
+        msg.as_str()
+            .unwrap_or_default()
+            .contains("must be an Encryption Key"),
+        "{msg}"
+    );
+    let (err, msg) = c.call("settings_set", json!({"provider_versions": {"aws": "latest"}}));
+    assert!(err, "{msg}");
+
+    // Before: local, unencrypted state, and a generated secret -> the warning.
+    let (_, d) = c.call("diagnostics", json!({}));
+    let warns = |d: &Value| -> Vec<String> {
+        d["diagnostics"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|x| x["code"] == json!("State"))
+            .map(|x| x["message"].as_str().unwrap().to_string())
+            .collect()
+    };
+    assert!(
+        warns(&d).iter().any(|m| m.contains(
+            "stored in plain text in local state; configure a remote backend and state encryption (Settings)"
+        )),
+        "{d}"
+    );
+
+    // Set everything in one call: the key by name, the backend flat.
+    let (err, set) = c.call(
+        "settings_set",
+        json!({
+            "backend": {"type": "s3", "bucket": "hardened-tfstate-x7q2", "region": "eu-west-2", "key_prefix": "platform/hardened"},
+            "state_encryption": true,
+            "state_encryption_key": "data key",
+            "provider_versions": {"aws": "~> 6.0"}
+        }),
+    );
+    assert!(!err, "{set}");
+    assert_eq!(set["status"], json!("settings updated"), "{set}");
+
+    // project_get shows it, in the project file's own shape...
+    let (_, p) = c.call("project_get", json!({}));
+    let s = &p["settings"];
+    assert_eq!(
+        s["backend"],
+        json!({"type": "s3", "args": {"bucket": "hardened-tfstate-x7q2", "key_prefix": "platform/hardened", "region": "eu-west-2"}}),
+        "{s}"
+    );
+    assert_eq!(s["state_encryption"], json!(true), "{s}");
+    assert_eq!(s["state_encryption_key"], json!("key-main"), "{s}");
+    assert_eq!(s["provider_versions"], json!({"aws": "~> 6.0"}), "{s}");
+    // ... which settings_set takes back unchanged.
+    let (err, again) = c.call("settings_set", json!({"backend": s["backend"].clone()}));
+    assert!(!err, "{again}");
+    let (_, p2) = c.call("project_get", json!({}));
+    assert_eq!(p2["settings"]["backend"], s["backend"]);
+
+    // The warning is gone, and the export carries backend, encryption and bootstrap root.
+    let (_, d) = c.call("diagnostics", json!({}));
+    assert!(warns(&d).is_empty(), "{d}");
+    let (err, preview) = c.call("export_preview", json!({}));
+    assert!(!err, "{preview}");
+    let v = preview["files"]["versions.tf"].as_str().unwrap();
+    assert!(v.contains("backend \"s3\""), "{v}");
+    assert!(
+        v.contains("key          = \"platform/hardened/terraform.tfstate\""),
+        "{v}"
+    );
+    assert!(v.contains("key_provider \"aws_kms\" \"state\""), "{v}");
+    assert!(v.contains("version = \"~> 6.0\""), "{v}");
+    assert!(preview["files"]["bootstrap/storage.tf"].is_string(), "{preview}");
+    assert!(preview["files"]["bootstrap/security.tf"].is_string(), "{preview}");
+
+    // null clears the backend and the key; an empty pin removes the pin.
+    let (err, _) = c.call(
+        "settings_set",
+        json!({"backend": null, "state_encryption_key": null, "provider_versions": {"aws": ""}}),
+    );
+    assert!(!err);
+    let (_, p) = c.call("project_get", json!({}));
+    let s = &p["settings"];
+    assert_eq!(s["backend"], json!(null), "{s}");
+    assert!(s.get("state_encryption_key").is_none_or(|k| k.is_null()), "{s}");
+    assert!(s.get("provider_versions").is_none_or(|v| v == &json!({})), "{s}");
+    // One undo brings them back.
+    let (err, _) = c.call("undo", json!({}));
+    assert!(!err);
+    let (_, p) = c.call("project_get", json!({}));
+    assert_eq!(p["settings"]["state_encryption_key"], json!("key-main"));
+}

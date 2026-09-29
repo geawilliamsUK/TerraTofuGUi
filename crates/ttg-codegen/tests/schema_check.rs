@@ -1,69 +1,21 @@
 //! Every curated mapping must agree with the real provider schema: the resource types it
 //! emits exist, and every static argument / nested block it writes is one the provider
 //! accepts. Catches provider renames before a user's export does.
+//!
+//! The check itself is `ttg_codegen::versions::mapping_findings`, which the diagnostics
+//! also run over the types a project uses, so a project pinned to the schema's major
+//! version hears about a mapping that breaks on it.
 
-use ttg_catalog::{ArgSource, BlockDef, Catalog, NestedBlockDef};
-use ttg_schema::BlockSchema;
-
-/// Meta-arguments every resource accepts regardless of its schema.
-const META: &[&str] = &["depends_on", "count", "for_each", "provider", "lifecycle"];
-
-fn check_nested(schema: &BlockSchema, n: &NestedBlockDef, at: &str, errs: &mut Vec<String>) {
-    let Some(ns) = schema.blocks.get(&n.block) else {
-        errs.push(format!("{at}: nested block '{}' does not exist", n.block));
-        return;
-    };
-    for k in n.args.keys() {
-        let key = k.split('.').next().unwrap_or(k);
-        if !ns.block().has(key) {
-            errs.push(format!("{at}.{}: argument '{key}' does not exist", n.block));
-        }
-    }
-    for inner in &n.nested {
-        check_nested(ns.block(), inner, &format!("{at}.{}", n.block), errs);
-    }
-}
-
-fn check_block(cat: &Catalog, provider: &str, b: &BlockDef, at: &str, errs: &mut Vec<String>) {
-    if b.resource == "terraform_data" {
-        return; // built into Terraform / OpenTofu, not part of any provider schema
-    }
-    // Helper providers (hashicorp/random) are not part of the bundled index.
-    if cat.provider(provider).is_some_and(|p| {
-        p.helper_providers
-            .iter()
-            .any(|h| b.resource.starts_with(&h.prefix))
-    }) {
-        return;
-    }
-    let idx = ttg_schema::index();
-    let Some(schema) = idx.resource(provider, &b.resource) else {
-        errs.push(format!(
-            "{at}: resource type '{}' does not exist on {provider}",
-            b.resource
-        ));
-        return;
-    };
-    for k in b.args.keys() {
-        let key = k.split('.').next().unwrap_or(k);
-        if !schema.has(key) && !META.contains(&key) {
-            errs.push(format!("{at} ({}): argument '{key}' does not exist", b.resource));
-        }
-    }
-    for n in &b.nested {
-        check_nested(schema, n, &format!("{at} ({})", b.resource), errs);
-    }
-}
+use ttg_catalog::{ArgSource, Catalog};
+use ttg_codegen::versions::mapping_findings;
 
 #[test]
 fn curated_mappings_match_provider_schemas() {
     let cat = Catalog::builtin();
     let mut errs = Vec::new();
     for (tid, def) in &cat.resources {
-        for (pid, m) in &def.providers {
-            for b in &m.blocks {
-                check_block(&cat, pid, b, &format!("{tid}/{pid}/{}", b.key), &mut errs);
-            }
+        for pid in def.providers.keys() {
+            errs.extend(mapping_findings(&cat, pid, tid));
         }
     }
     assert!(

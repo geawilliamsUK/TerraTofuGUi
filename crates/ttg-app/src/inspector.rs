@@ -1150,6 +1150,244 @@ fn tags_ui(app: &mut TtgApp, ui: &mut Ui) {
     ui.data_mut(|d| d.insert_temp(draft_id, rows));
 }
 
+fn muted(ui: &mut Ui, text: impl Into<String>) {
+    ui.label(RichText::new(text.into()).small().color(Color32::from_gray(110)));
+}
+
+/// Settings ▸ State backend: the backend type and the keys that type takes, checked as
+/// they are typed with the same rules `settings_set` and the export apply.
+fn backend_ui(app: &mut TtgApp, ui: &mut Ui) {
+    use ttg_codegen::state::{self, BACKENDS};
+    ui.label(RichText::new("State backend").strong());
+    let current = app
+        .project
+        .settings
+        .backend
+        .as_ref()
+        .map(|b| b.backend_type.clone())
+        .unwrap_or("none".into());
+    let label = |k: &str| {
+        state::backend_kind(k)
+            .map(|b| format!("{} ({k})", b.display))
+            .unwrap_or_else(|| {
+                if k == "none" {
+                    "none (local state)".into()
+                } else {
+                    k.to_string()
+                }
+            })
+    };
+    let mut kind = current.clone();
+    egui::ComboBox::from_id_salt("backend")
+        .selected_text(label(&kind))
+        .show_ui(ui, |ui| {
+            ui.selectable_value(&mut kind, "none".to_string(), label("none"));
+            for b in BACKENDS {
+                ui.selectable_value(&mut kind, b.kind.to_string(), label(b.kind));
+            }
+        });
+    if kind != current {
+        let before = app.snapshot();
+        app.project.settings.backend = (kind != "none").then(|| ttg_core::BackendConfig {
+            backend_type: kind.clone(),
+            args: Default::default(),
+        });
+        app.finish(before);
+    }
+    let Some(b) = app.project.settings.backend.clone() else {
+        muted(
+            ui,
+            "The state is a local file next to the configuration, secrets included. \
+             Choose a remote backend to share it; the export adds a bootstrap/ root that \
+             creates the bucket.",
+        );
+        return;
+    };
+    let Some(spec) = state::backend_kind(&b.backend_type) else {
+        ui.colored_label(
+            Color32::from_rgb(200, 60, 60),
+            format!("Unknown backend type \"{}\": choose one above.", b.backend_type),
+        );
+        return;
+    };
+    let default_prefix = ttg_core::slugify(&app.project.name).replace('_', "-");
+    egui::Grid::new("backend_args").num_columns(2).show(ui, |ui| {
+        for key in spec.keys() {
+            let required = spec.required.iter().any(|(k, _)| *k == key);
+            ui.label(if required {
+                format!("{key} *")
+            } else {
+                key.to_string()
+            })
+            .on_hover_text(spec.help(key));
+            let mut val = b.args.get(key).cloned().unwrap_or_default();
+            let hint = if key == "key_prefix" {
+                default_prefix.as_str()
+            } else {
+                ""
+            };
+            let r = ui.add(
+                egui::TextEdit::singleline(&mut val)
+                    .hint_text(hint)
+                    .desired_width(f32::INFINITY),
+            );
+            track_text_edit(app, &r);
+            if r.changed() {
+                let args = &mut app.project.settings.backend.as_mut().unwrap().args;
+                if val.is_empty() {
+                    args.remove(key);
+                } else {
+                    args.insert(key.to_string(), val);
+                }
+            }
+            ui.end_row();
+        }
+    });
+    let b = app.project.settings.backend.clone().unwrap();
+    match state::check_backend(&b) {
+        Err(e) => {
+            ui.colored_label(Color32::from_rgb(200, 60, 60), e);
+        }
+        Ok(()) => {
+            let at = match b.backend_type.as_str() {
+                "gcs" => format!("{}/default.tfstate", state::state_prefix(&app.project, &b, None)),
+                "local" => b.args.get("path").cloned().unwrap_or("terraform.tfstate".into()),
+                _ => state::state_key(&app.project, &b, None),
+            };
+            muted(ui, format!("State object: {at}"));
+            if spec.provider.is_some() {
+                muted(
+                    ui,
+                    "The export adds a bootstrap/ root that creates the store (versioned, \
+                     public access blocked, TLS only). Apply it first.",
+                );
+            }
+        }
+    }
+}
+
+/// Settings ▸ State encryption: on / off and the key that protects it.
+fn encryption_ui(app: &mut TtgApp, ui: &mut Ui) {
+    ui.label(RichText::new("State encryption").strong());
+    let mut enc = app.project.settings.state_encryption;
+    if ui
+        .checkbox(&mut enc, "Encrypt the state and plans (OpenTofu)")
+        .changed()
+    {
+        let before = app.snapshot();
+        app.project.settings.state_encryption = enc;
+        app.finish(before);
+    }
+    if app.project.settings.tool == Tool::Terraform && enc {
+        ui.colored_label(
+            Color32::from_rgb(200, 140, 40),
+            "Terraform has no state encryption: nothing is generated and the export warns. Switch the tool to OpenTofu.",
+        );
+    }
+    let keys: Vec<(Id, String)> = app
+        .project
+        .entities()
+        .iter()
+        .filter(|e| e.resource_type == "encryption_key")
+        .map(|e| (e.id.to_string(), e.name.to_string()))
+        .collect();
+    let current = app.project.settings.state_encryption_key.clone();
+    let name_of = |id: &Option<Id>| match id {
+        None => "passphrase (pbkdf2)".to_string(),
+        Some(id) => keys
+            .iter()
+            .find(|(k, _)| k == id)
+            .map(|(_, n)| n.clone())
+            .unwrap_or_else(|| format!("{id} (missing)")),
+    };
+    let mut chosen = current.clone();
+    ui.horizontal(|ui| {
+        ui.label("Key");
+        egui::ComboBox::from_id_salt("state_key")
+            .selected_text(name_of(&chosen))
+            .show_ui(ui, |ui| {
+                ui.selectable_value(&mut chosen, None, name_of(&None));
+                for (id, name) in &keys {
+                    ui.selectable_value(&mut chosen, Some(id.clone()), name);
+                }
+            });
+    });
+    if chosen != current {
+        let before = app.snapshot();
+        app.project.settings.state_encryption_key = chosen.clone();
+        app.finish(before);
+    }
+    muted(
+        ui,
+        if chosen.is_some() {
+            "AWS: aws_kms, Google Cloud: gcp_kms with this key, which the export moves to the \
+             bootstrap/ root (it must exist before the state it encrypts). Azure: a passphrase."
+        } else {
+            "A key derived from the state_passphrase variable. Choose an Encryption Key to \
+             use AWS KMS or Cloud KMS instead."
+        },
+    );
+}
+
+/// Settings ▸ Provider versions: a per-project pin, the definition's constraint when empty.
+fn provider_versions_ui(app: &mut TtgApp, ui: &mut Ui) {
+    ui.label(RichText::new("Provider versions").strong());
+    muted(
+        ui,
+        "The version constraint in required_providers. Empty = the tested default.",
+    );
+    let providers: Vec<(String, String, String)> = app
+        .catalog
+        .providers
+        .iter()
+        .map(|(id, p)| {
+            (
+                id.clone(),
+                p.provider.source_name.clone(),
+                p.provider.version_constraint.clone(),
+            )
+        })
+        .collect();
+    let mut problems: Vec<String> = Vec::new();
+    egui::Grid::new("provider_versions")
+        .num_columns(2)
+        .show(ui, |ui| {
+            for (pid, source, default) in providers {
+                ui.label(&source);
+                let mut val = app
+                    .project
+                    .settings
+                    .provider_versions
+                    .get(&pid)
+                    .cloned()
+                    .unwrap_or_default();
+                let r = ui.add(
+                    egui::TextEdit::singleline(&mut val)
+                        .hint_text(default.as_str())
+                        .desired_width(f32::INFINITY),
+                );
+                track_text_edit(app, &r);
+                if r.changed() {
+                    let pins = &mut app.project.settings.provider_versions;
+                    if val.trim().is_empty() {
+                        pins.remove(&pid);
+                    } else {
+                        pins.insert(pid.clone(), val.clone());
+                    }
+                }
+                if !val.trim().is_empty() {
+                    if let Err(e) = ttg_codegen::versions::check_constraint(val.trim()) {
+                        problems.push(format!("{source}: {e}"));
+                    }
+                }
+                ui.end_row();
+            }
+        });
+    for e in problems {
+        ui.colored_label(Color32::from_rgb(200, 60, 60), e);
+    }
+}
+
 /// Rows to a map, dropping the blank key a freshly added row starts with.
 fn collect_tags(rows: &[(String, String)]) -> std::collections::BTreeMap<String, String> {
     rows.iter()
@@ -1168,18 +1406,6 @@ pub fn settings_ui(app: &mut TtgApp, ui: &mut Ui) {
         }
         app.set_tool(t);
     });
-    let mut enc = app.project.settings.state_encryption;
-    if ui
-        .add_enabled(
-            app.project.settings.tool == Tool::OpenTofu,
-            egui::Checkbox::new(&mut enc, "OpenTofu state encryption (pbkdf2 passphrase)"),
-        )
-        .changed()
-    {
-        let before = app.snapshot();
-        app.project.settings.state_encryption = enc;
-        app.finish(before);
-    }
     let mut k8s = app.project.settings.kubernetes_manifests;
     if ui
         .checkbox(&mut k8s, "Kubernetes manifests (k8s/ beside the Terraform)")
@@ -1195,73 +1421,13 @@ pub fn settings_ui(app: &mut TtgApp, ui: &mut Ui) {
         app.finish(before);
     }
     ui.add_space(8.0);
-    ui.label(RichText::new("State backend").strong());
-    let mut kind = app
-        .project
-        .settings
-        .backend
-        .as_ref()
-        .map(|b| b.backend_type.clone())
-        .unwrap_or("none".into());
-    egui::ComboBox::from_id_salt("backend")
-        .selected_text(kind.clone())
-        .show_ui(ui, |ui| {
-            for k in ["none", "local", "s3", "azurerm", "gcs"] {
-                ui.selectable_value(&mut kind, k.to_string(), k);
-            }
-        });
-    let current_kind = app
-        .project
-        .settings
-        .backend
-        .as_ref()
-        .map(|b| b.backend_type.clone())
-        .unwrap_or("none".into());
-    if kind != current_kind {
-        let before = app.snapshot();
-        app.project.settings.backend = if kind == "none" {
-            None
-        } else {
-            let args: Vec<&str> = match kind.as_str() {
-                "s3" => vec!["bucket", "key", "region"],
-                "azurerm" => vec![
-                    "resource_group_name",
-                    "storage_account_name",
-                    "container_name",
-                    "key",
-                ],
-                "gcs" => vec!["bucket", "prefix"],
-                _ => vec!["path"],
-            };
-            Some(ttg_core::BackendConfig {
-                backend_type: kind.clone(),
-                args: args.into_iter().map(|a| (a.to_string(), String::new())).collect(),
-            })
-        };
-        app.finish(before);
-    }
-    if let Some(b) = app.project.settings.backend.clone() {
-        egui::Grid::new("backend_args").num_columns(2).show(ui, |ui| {
-            for (k, v) in b.args {
-                ui.label(&k);
-                let mut val = v.clone();
-                let r = ui.add(egui::TextEdit::singleline(&mut val).desired_width(f32::INFINITY));
-                track_text_edit(app, &r);
-                if r.changed() {
-                    app.project
-                        .settings
-                        .backend
-                        .as_mut()
-                        .unwrap()
-                        .args
-                        .insert(k.clone(), val);
-                }
-                ui.end_row();
-            }
-        });
-    }
+    backend_ui(app, ui);
+    ui.add_space(8.0);
+    encryption_ui(app, ui);
     ui.add_space(8.0);
     tags_ui(app, ui);
+    ui.add_space(8.0);
+    provider_versions_ui(app, ui);
     ui.add_space(8.0);
     ui.label(RichText::new("Provider settings").strong());
     ui.label(

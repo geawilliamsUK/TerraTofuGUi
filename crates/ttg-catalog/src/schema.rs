@@ -124,6 +124,11 @@ pub struct FieldDef {
     /// the field counts as used by every provider (see `MANIFEST_TYPES`).
     #[serde(default)]
     pub manifests: bool,
+    /// A `bool` field whose `true` puts a secret value into the state file (a generated
+    /// password). The diagnostics warn while such a value meets local or unencrypted
+    /// state (see `ttg-codegen::state`).
+    #[serde(default)]
+    pub state_secret: bool,
 }
 
 impl FieldDef {

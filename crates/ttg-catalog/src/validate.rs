@@ -379,6 +379,11 @@ fn check_field(cat: &Catalog, where_: &str, f: &FieldDef, errs: &mut Vec<String>
     if f.field_type == FieldType::StringList && !f.options.is_empty() {
         v2 = true;
     }
+    if f.state_secret && f.field_type != FieldType::Bool {
+        errs.push(format!(
+            "{where_}: state_secret is only meaningful on a bool field (true = the value lands in state)"
+        ));
+    }
     if f.field_type == FieldType::Enum && f.options.is_empty() {
         errs.push(format!("{where_}: enum field has no options"));
     }

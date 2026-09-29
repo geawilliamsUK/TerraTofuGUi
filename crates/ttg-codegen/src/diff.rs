@@ -191,12 +191,6 @@ fn file_diff(name: &str, old: Option<&str>, new: Option<&str>) -> FileDiff {
     }
 }
 
-/// Files an export manages inside its directory: generated `.tf` files plus the two
-/// markdown companions. Anything else in the directory is the user's and never diffed.
-fn managed(name: &str) -> bool {
-    name.ends_with(".tf") || name == "MANUAL_STEPS.md" || name == "README.md"
-}
-
 /// Compare a generated project with the contents of `dir` (what the last export wrote,
 /// possibly hand-edited since). Files are listed in generation order, then files that
 /// exist on disk but would no longer be generated. A missing directory diffs as
@@ -207,38 +201,11 @@ pub fn against_dir(g: &Generated, dir: &Path) -> Vec<FileDiff> {
         let old = std::fs::read_to_string(dir.join(name)).ok();
         out.push(file_diff(name, old.as_deref(), Some(content)));
     }
-    if let Ok(rd) = std::fs::read_dir(dir) {
-        let mut stale: Vec<String> = rd
-            .flatten()
-            .filter_map(|e| e.file_name().to_str().map(|s| s.to_string()))
-            .filter(|n| managed(n) && !g.files.contains_key(n))
-            .collect();
-        stale.extend(stale_manifests(g, dir));
-        stale.sort();
-        for name in stale {
-            let old = std::fs::read_to_string(dir.join(&name)).ok();
-            out.push(file_diff(&name, old.as_deref(), None));
-        }
+    // Files the export owns (`crate::owned`) that it would no longer write.
+    for name in crate::owned::stale(g, dir) {
+        let old = std::fs::read_to_string(dir.join(&name)).ok();
+        out.push(file_diff(&name, old.as_deref(), None));
     }
-    out
-}
-
-/// Files directly inside `<dir>/k8s/` that an export wrote and this one would not
-/// (`k8s/<name>`, the `Generated::files` key). `k8s/rendered/` is the render scripts'
-/// output and never counts.
-pub fn stale_manifests(g: &Generated, dir: &Path) -> Vec<String> {
-    let Ok(rd) = std::fs::read_dir(dir.join(crate::k8s::DIR)) else {
-        return Vec::new();
-    };
-    let mut out: Vec<String> = rd
-        .flatten()
-        .filter(|e| e.path().is_file())
-        .filter_map(|e| e.file_name().to_str().map(|s| s.to_string()))
-        .filter(|n| n.ends_with(".yaml") || n.ends_with(".sh") || n.ends_with(".ps1") || n == "README.md")
-        .map(|n| format!("{}/{n}", crate::k8s::DIR))
-        .filter(|n| !g.files.contains_key(n))
-        .collect();
-    out.sort();
     out
 }
 

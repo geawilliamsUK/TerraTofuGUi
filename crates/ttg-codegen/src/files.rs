@@ -100,6 +100,16 @@ pub fn render_outputs(header: &str, outputs: &[OutputSpec]) -> String {
     out
 }
 
+/// What `versions.tf` says beyond the provider list: the constraint for the project's
+/// provider (its definition's default or the project's pin), the tool version the state
+/// features need, and the `backend` / `encryption` blocks that share the `terraform {}`
+/// block.
+pub struct VersionsSpec<'a> {
+    pub provider_version: &'a str,
+    pub required_version: &'a str,
+    pub extra_blocks: &'a [Block],
+}
+
 /// `versions.tf`. `helpers` are the side providers some emitted block actually draws a
 /// resource from (`hashicorp/random` for generated secret values); an unused one is left
 /// out so `init` never downloads a provider the configuration does not reference.
@@ -108,6 +118,7 @@ pub fn render_versions(
     profile: &Profile,
     pdef: &ProviderDef,
     helpers: &[&HelperProviderDef],
+    spec: &VersionsSpec,
 ) -> String {
     let entry = |source: String, version: &str| {
         let mut o = Object::new();
@@ -125,7 +136,7 @@ pub fn render_versions(
         pdef.provider.local_name(),
         entry(
             profile.provider_source(&pdef.provider.source_namespace, &pdef.provider.source_name),
-            &pdef.provider.version_constraint,
+            spec.provider_version,
         ),
     ));
     for h in helpers {
@@ -136,11 +147,13 @@ pub fn render_versions(
         ));
     }
     let rp = rp.build();
-    let tf = Block::builder("terraform")
-        .add_attribute(("required_version", profile.required_version()))
-        .add_block(rp)
-        .build();
-    format!("{header}\n{}", fmt_block(&tf))
+    let mut tf = Block::builder("terraform")
+        .add_attribute(("required_version", spec.required_version))
+        .add_block(rp);
+    for b in spec.extra_blocks {
+        tf = tf.add_block(b.clone());
+    }
+    format!("{header}\n{}", fmt_block(&tf.build()))
 }
 
 /// `providers.tf`: the project's own provider configuration, followed by the aliased ones
@@ -152,13 +165,6 @@ pub fn render_providers(header: &str, blocks: &[Block]) -> String {
         out.push_str(&fmt_block(b));
     }
     out
-}
-
-pub fn render_backend(header: &str, block: &Block) -> String {
-    format!(
-        "{header}# State backend configuration. Adjust before `init`.\n\n{}",
-        fmt_block(block)
-    )
 }
 
 pub fn render_manual_steps(
@@ -227,12 +233,98 @@ pub fn render_manual_steps(
     out
 }
 
+/// What the README says about the state.
+pub struct StateSummary {
+    /// `backend "<type>"` and where the state object is, or `None` for local state.
+    pub backend: Option<(String, String)>,
+    /// The local state file when there is no remote backend.
+    pub local_path: String,
+    /// How the state is encrypted, if it is.
+    pub encryption: Option<String>,
+    /// The bootstrap roots, as `(directory, what it creates)`.
+    pub bootstrap: Vec<(String, String)>,
+}
+
+impl StateSummary {
+    pub fn of(
+        p: &Project,
+        enc: Option<&crate::state::EncryptionPlan>,
+        roots: &[crate::state::BootstrapRoot],
+    ) -> StateSummary {
+        use crate::state::{self, KeySource};
+        let backend = state::configured_backend(p)
+            .filter(|b| b.backend_type != "local")
+            .map(|b| {
+                let at = match b.backend_type.as_str() {
+                    "s3" => format!(
+                        "s3://{}/{}",
+                        b.args.get("bucket").cloned().unwrap_or_default(),
+                        state::state_key(p, &b, None)
+                    ),
+                    "gcs" => format!(
+                        "gs://{}/{}/default.tfstate",
+                        b.args.get("bucket").cloned().unwrap_or_default(),
+                        state::state_prefix(p, &b, None)
+                    ),
+                    _ => format!(
+                        "storage account `{}`, container `{}`, blob `{}`",
+                        b.args.get("storage_account_name").cloned().unwrap_or_default(),
+                        b.args.get("container_name").cloned().unwrap_or_default(),
+                        state::state_key(p, &b, None)
+                    ),
+                };
+                (b.backend_type.clone(), at)
+            });
+        let key_name = |id: &Option<String>| {
+            id.as_deref()
+                .and_then(|k| p.entity(k))
+                .map(|e| e.name.to_string())
+                .unwrap_or_default()
+        };
+        let encryption = enc.map(|e| match e.source {
+            KeySource::AwsKms => format!(
+                "AES-GCM with data keys from the AWS KMS key \"{}\" (`aws_kms` key provider)",
+                key_name(&e.key)
+            ),
+            KeySource::GcpKms => format!(
+                "AES-GCM with a key wrapped by the Cloud KMS key \"{}\" (`gcp_kms` key provider)",
+                key_name(&e.key)
+            ),
+            KeySource::Passphrase => format!(
+                "AES-GCM with a key derived from the `{}` variable (`pbkdf2` key provider)",
+                state::PASSPHRASE_VAR
+            ),
+        });
+        let bootstrap = roots
+            .iter()
+            .map(|r| {
+                let what = match (r.store, &r.key) {
+                    (true, Some(_)) => format!("the state store and the key \"{}\"", key_name(&r.key)),
+                    (true, None) => "the state store".to_string(),
+                    (false, _) => format!("the key \"{}\"", key_name(&r.key)),
+                };
+                (r.dir.clone(), what)
+            })
+            .collect();
+        let local_path = state::configured_backend(p)
+            .and_then(|b| b.args.get("path").cloned())
+            .unwrap_or("terraform.tfstate".into());
+        StateSummary {
+            backend,
+            local_path,
+            encryption,
+            bootstrap,
+        }
+    }
+}
+
 pub fn render_readme(
     p: &Project,
     profile: &Profile,
     pdef: &ProviderDef,
     has_manual: bool,
     has_manifests: bool,
+    state: &StateSummary,
 ) -> String {
     let bin = profile.binary();
     let mut s = format!(
@@ -246,7 +338,7 @@ pub fn render_readme(
         profile.display_name(),
         pdef.provider.display_name,
         profile.provider_source(&pdef.provider.source_namespace, &pdef.provider.source_name),
-        pdef.provider.version_constraint,
+        crate::versions::constraint(p, pdef),
         profile.registry_url(&pdef.provider.source_namespace, &pdef.provider.source_name),
     );
     if has_manual {
@@ -260,6 +352,48 @@ pub fn render_readme(
              only Terraform knows — they are the `k8s_*` outputs in `outputs.tf` — then \
              `kubectl apply -f k8s/rendered/`. See `k8s/README.md`.\n"
         ));
+    }
+    s.push_str("\n## State\n\n");
+    match &state.backend {
+        Some((kind, at)) => s.push_str(&format!(
+            "The state is kept remotely (`backend \"{kind}\"` in `versions.tf`): {at}.{}\n",
+            if kind == "s3" {
+                " Locking uses an S3 lock file (`use_lockfile`), so there is no DynamoDB table."
+            } else {
+                ""
+            }
+        )),
+        None => s.push_str(&format!(
+            "The state is a local file (`{}`). It records every attribute of every resource, \
+             generated secrets included: configure a remote backend and, with OpenTofu, state \
+             encryption in the app's Settings before sharing it.\n",
+            state.local_path
+        )),
+    }
+    match &state.encryption {
+        Some(how) => s.push_str(&format!(
+            "\nThe state and saved plans are encrypted by {} ({how}) and cannot be read or written \
+             unencrypted (`enforced = true`). To encrypt a state that already exists unencrypted, \
+             add `method \"unencrypted\" \"migrate\" {{}}` and `fallback {{ method = \
+             method.unencrypted.migrate }}` to the `state` block for one apply, then remove them.\n",
+            profile.display_name()
+        )),
+        None if p.settings.state_encryption => s.push_str(&format!(
+            "\nState encryption is on in the project, but {} has no `encryption` block: the \
+             state is not encrypted. Export for OpenTofu to encrypt it.\n",
+            profile.display_name()
+        )),
+        None => {}
+    }
+    if !state.bootstrap.is_empty() {
+        s.push_str(
+            "\n### Bootstrap\n\nWhat the state needs must exist before this configuration can use \
+             it, so it is created by a separate configuration, applied first (see \
+             `MANUAL_STEPS.md`):\n\n",
+        );
+        for (dir, what) in &state.bootstrap {
+            s.push_str(&format!("- `{dir}/` creates {what}.\n"));
+        }
     }
     s
 }

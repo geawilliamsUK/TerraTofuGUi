@@ -2,10 +2,11 @@
 //!
 //! Resource, variable and output generation never branch on the tool. Everything that
 //! does differ — binary name, version constraint, registry source addresses, file
-//! headers, the OpenTofu-only state `encryption` block — is expressed through `Profile`.
+//! headers, whether the state can be encrypted — is expressed through `Profile`. What the
+//! `backend` and `encryption` blocks contain is `crate::state`'s business; it asks
+//! `supports_state_encryption` before writing the latter.
 
-use hcl::{Block, Expression, Traversal, Variable};
-use ttg_core::{BackendConfig, Tool};
+use ttg_core::Tool;
 
 #[derive(Debug, Clone, Copy)]
 pub struct Profile {
@@ -70,70 +71,9 @@ impl Profile {
         )
     }
 
-    /// Whether the tool supports the `terraform { encryption {} }` state-encryption block.
+    /// Whether the tool supports the `terraform { encryption {} }` state-encryption block
+    /// (OpenTofu 1.7+; Terraform has no equivalent).
     pub fn supports_state_encryption(&self) -> bool {
         matches!(self.tool, Tool::OpenTofu)
     }
-
-    /// The `terraform { backend "<type>" { ... } }` block (both tools use the
-    /// `terraform` keyword). Adds an OpenTofu `encryption` block when requested.
-    pub fn backend_block(&self, backend: Option<&BackendConfig>, encrypt: bool) -> Option<Block> {
-        let want_encrypt = encrypt && self.supports_state_encryption();
-        if backend.is_none() && !want_encrypt {
-            return None;
-        }
-        let mut b = Block::builder("terraform");
-        if let Some(cfg) = backend {
-            let mut bb = Block::builder("backend").add_label(cfg.backend_type.as_str());
-            for (k, v) in &cfg.args {
-                bb = bb.add_attribute((k.as_str(), v.as_str()));
-            }
-            b = b.add_block(bb.build());
-        }
-        if want_encrypt {
-            let kp = Block::builder("key_provider")
-                .add_label("pbkdf2")
-                .add_label("main")
-                .add_attribute(("passphrase", var("state_passphrase")))
-                .build();
-            let method = Block::builder("method")
-                .add_label("aes_gcm")
-                .add_label("main")
-                .add_attribute((
-                    "keys",
-                    Expression::Traversal(Box::new(
-                        Traversal::builder(Variable::unchecked("key_provider"))
-                            .attr("pbkdf2")
-                            .attr("main")
-                            .build(),
-                    )),
-                ))
-                .build();
-            let state = Block::builder("state")
-                .add_attribute((
-                    "method",
-                    Expression::Traversal(Box::new(
-                        Traversal::builder(Variable::unchecked("method"))
-                            .attr("aes_gcm")
-                            .attr("main")
-                            .build(),
-                    )),
-                ))
-                .build();
-            b = b.add_block(
-                Block::builder("encryption")
-                    .add_block(kp)
-                    .add_block(method)
-                    .add_block(state)
-                    .build(),
-            );
-        }
-        Some(b.build())
-    }
-}
-
-fn var(name: &str) -> Expression {
-    Expression::Traversal(Box::new(
-        Traversal::builder(Variable::unchecked("var")).attr(name).build(),
-    ))
 }

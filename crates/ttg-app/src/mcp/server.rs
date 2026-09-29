@@ -263,13 +263,7 @@ pub fn command_from_json(tool: &str, args: serde_json::Value) -> Result<AgentCom
         }
         "settings_set" => {
             let a: SettingsArgs = parse(args)?;
-            AgentCommand::SettingsSet {
-                tool: a.tool,
-                provider: a.provider,
-                provider_settings: a.provider_settings,
-                tags: a.tags,
-                kubernetes_manifests: a.kubernetes_manifests,
-            }
+            a.into_command()?
         }
         other => {
             return Err(format!(
@@ -730,6 +724,73 @@ pub struct SettingsArgs {
         description = "Also write Kubernetes manifests (k8s/: per workload a ServiceAccount, Deployment, Service, volumes, KEDA / HPA autoscaling, TargetGroupBinding) beside the Terraform on every export"
     )]
     pub kubernetes_manifests: Option<bool>,
+    #[schemars(
+        description = "Where the state lives; null for local state. {\"type\": \"s3\", \"bucket\": \"acme-tfstate\", \"region\": \"eu-west-2\"} (optional key_prefix or key, kms_key_id; locking by S3 lock file), {\"type\": \"azurerm\", \"resource_group_name\": …, \"storage_account_name\": …, \"container_name\": …} (optional key_prefix or key), {\"type\": \"gcs\", \"bucket\": …} (optional key_prefix), {\"type\": \"local\"} (optional path). The state key is <key_prefix>/terraform.tfstate, key_prefix defaulting to the project name. The export adds a bootstrap/ root that creates the bucket. Replaces the whole backend"
+    )]
+    #[serde(default, deserialize_with = "present")]
+    pub backend: Option<serde_json::Value>,
+    #[schemars(
+        description = "Encrypt the state and plans (OpenTofu only; with Terraform it only produces a warning)"
+    )]
+    pub state_encryption: Option<bool>,
+    #[schemars(
+        description = "Id or name of the Encryption Key entity whose key encrypts the state (aws_kms on AWS, gcp_kms on Google Cloud; Azure uses a passphrase). The export moves that key to the bootstrap/ root. null clears it (passphrase encryption)"
+    )]
+    #[serde(default, deserialize_with = "present")]
+    pub state_encryption_key: Option<serde_json::Value>,
+    #[schemars(
+        description = "Provider version constraints for required_providers: { \"aws\": \"~> 6.0\" }. Merged into the existing pins; null or \"\" removes a pin (back to the definition's default)"
+    )]
+    pub provider_versions: Option<serde_json::Map<String, serde_json::Value>>,
+    /// Anything else the caller sent: refused with the list of valid keys.
+    #[serde(flatten)]
+    #[schemars(skip)]
+    pub unknown: std::collections::BTreeMap<String, serde_json::Value>,
+}
+
+/// `Some(value)` for a key that is present, `null` included, so `"backend": null` (clear
+/// it) differs from leaving `backend` out (keep it).
+fn present<'de, D: serde::Deserializer<'de>>(d: D) -> Result<Option<serde_json::Value>, D::Error> {
+    <serde_json::Value as serde::Deserialize>::deserialize(d).map(Some)
+}
+
+/// The keys `settings_set` takes, for the message that refuses any other.
+pub const SETTINGS_KEYS: &[&str] = &[
+    "tool",
+    "provider",
+    "provider_settings",
+    "tags",
+    "kubernetes_manifests",
+    "backend",
+    "state_encryption",
+    "state_encryption_key",
+    "provider_versions",
+];
+
+impl SettingsArgs {
+    /// The command, or why the arguments are refused: a key `settings_set` does not
+    /// know is an error rather than something silently ignored.
+    pub fn into_command(self) -> Result<AgentCommand, String> {
+        if !self.unknown.is_empty() {
+            let names: Vec<String> = self.unknown.keys().map(|k| format!("`{k}`")).collect();
+            return Err(format!(
+                "settings_set does not take {}; valid keys: {}",
+                names.join(", "),
+                SETTINGS_KEYS.join(", ")
+            ));
+        }
+        Ok(AgentCommand::SettingsSet {
+            tool: self.tool,
+            provider: self.provider,
+            provider_settings: self.provider_settings,
+            tags: self.tags,
+            kubernetes_manifests: self.kubernetes_manifests,
+            backend: self.backend,
+            state_encryption: self.state_encryption,
+            state_encryption_key: self.state_encryption_key,
+            provider_versions: self.provider_versions,
+        })
+    }
 }
 
 #[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
@@ -1352,17 +1413,13 @@ impl TtgServer {
     }
 
     #[tool(
-        description = "Change the tool, target provider, provider variables or the project-wide default tags."
+        description = "Change the tool, target provider, provider variables, project-wide default tags, whether Kubernetes manifests are exported, the state backend, state encryption (and the key it uses) or provider version pins. Unknown keys are refused, listing the valid ones. project_get shows the result under `settings`."
     )]
     async fn settings_set(&self, Parameters(a): Parameters<SettingsArgs>) -> CallToolResult {
-        self.run(AgentCommand::SettingsSet {
-            tool: a.tool,
-            provider: a.provider,
-            provider_settings: a.provider_settings,
-            tags: a.tags,
-            kubernetes_manifests: a.kubernetes_manifests,
-        })
-        .await
+        match a.into_command() {
+            Ok(cmd) => self.run(cmd).await,
+            Err(e) => fail(e),
+        }
     }
 
     #[tool(

@@ -1145,24 +1145,80 @@ impl TtgApp {
                 provider_settings,
                 tags,
                 kubernetes_manifests,
+                backend,
+                state_encryption,
+                state_encryption_key,
+                provider_versions,
             } => {
+                // Everything is checked before anything changes, so a refused call leaves
+                // the settings as they were.
+                let tool: Option<Tool> = match tool {
+                    Some(t) => Some(
+                        serde_json::from_value(J::String(t.to_lowercase()))
+                            .map_err(|_| "tool must be terraform or opentofu".to_string())?,
+                    ),
+                    None => None,
+                };
+                if let Some(p) = &provider {
+                    if self.catalog.provider(p).is_none() {
+                        return Err(format!("unknown provider \"{p}\""));
+                    }
+                }
+                if let Some(ps) = &provider_settings {
+                    if let Some((pid, _)) = ps.iter().find(|(_, v)| !v.is_object()) {
+                        return Err(format!("provider_settings.{pid} must be an object"));
+                    }
+                }
+                let backend = match backend {
+                    Some(v) => Some(ttg_codegen::state::backend_from_json(&v)?),
+                    None => None,
+                };
+                let key = match state_encryption_key {
+                    None => None,
+                    Some(J::Null) => Some(None),
+                    Some(J::String(s)) if s.trim().is_empty() => Some(None),
+                    Some(J::String(s)) => {
+                        let id = self.resolve(&s)?;
+                        let e = self.project.entity(&id).unwrap();
+                        if e.resource_type != "encryption_key" {
+                            return Err(format!(
+                                "state_encryption_key must be an Encryption Key; \"{}\" is a {}",
+                                e.name, e.resource_type
+                            ));
+                        }
+                        Some(Some(id))
+                    }
+                    Some(_) => return Err("state_encryption_key must be an entity id or name, or null".into()),
+                };
+                let mut pins: Vec<(String, Option<String>)> = Vec::new();
+                for (pid, v) in provider_versions.unwrap_or_default() {
+                    if self.catalog.provider(&pid).is_none() {
+                        return Err(format!(
+                            "provider_versions: unknown provider \"{pid}\" (known: {})",
+                            self.catalog.provider_ids().join(", ")
+                        ));
+                    }
+                    match v {
+                        J::Null => pins.push((pid, None)),
+                        J::String(s) if s.trim().is_empty() => pins.push((pid, None)),
+                        J::String(s) => {
+                            ttg_codegen::versions::check_constraint(s.trim())
+                                .map_err(|e| format!("provider_versions.{pid}: {e}"))?;
+                            pins.push((pid, Some(s.trim().to_string())));
+                        }
+                        _ => return Err(format!("provider_versions.{pid} must be a string such as \"~> 6.0\"")),
+                    }
+                }
                 let before = self.snapshot();
                 if let Some(t) = tool {
-                    let t: Tool = serde_json::from_value(J::String(t.to_lowercase()))
-                        .map_err(|_| "tool must be terraform or opentofu".to_string())?;
                     self.project.settings.tool = t;
                 }
                 if let Some(p) = provider {
-                    if self.catalog.provider(&p).is_none() {
-                        return Err(format!("unknown provider \"{p}\""));
-                    }
                     self.project.settings.target_provider = p;
                 }
                 if let Some(ps) = provider_settings {
                     for (pid, vals) in ps {
-                        let J::Object(vals) = vals else {
-                            return Err(format!("provider_settings.{pid} must be an object"));
-                        };
+                        let J::Object(vals) = vals else { continue };
                         let m = self.project.settings.provider_settings.entry(pid).or_default();
                         for (k, v) in vals {
                             m.insert(k, v.as_str().map(|s| s.to_string()).unwrap_or(v.to_string()));
@@ -1179,12 +1235,36 @@ impl TtgApp {
                 if let Some(k) = kubernetes_manifests {
                     self.project.settings.kubernetes_manifests = k;
                 }
+                if let Some(b) = backend {
+                    self.project.settings.backend = b;
+                }
+                if let Some(on) = state_encryption {
+                    self.project.settings.state_encryption = on;
+                }
+                if let Some(k) = key {
+                    self.project.settings.state_encryption_key = k;
+                }
+                for (pid, pin) in pins {
+                    match pin {
+                        Some(c) => {
+                            self.project.settings.provider_versions.insert(pid, c);
+                        }
+                        None => {
+                            self.project.settings.provider_versions.remove(&pid);
+                        }
+                    }
+                }
                 self.finish(before);
+                let s = &self.project.settings;
                 Ok(json!({
                     "status": "settings updated",
-                    "tool": self.project.settings.tool,
-                    "provider": self.project.settings.target_provider,
-                    "kubernetes_manifests": self.project.settings.kubernetes_manifests,
+                    "tool": s.tool,
+                    "provider": s.target_provider,
+                    "kubernetes_manifests": s.kubernetes_manifests,
+                    "backend": s.backend,
+                    "state_encryption": s.state_encryption,
+                    "state_encryption_key": s.state_encryption_key,
+                    "provider_versions": s.provider_versions,
                 }))
             }
             AgentCommand::ProjectSave { path } => {

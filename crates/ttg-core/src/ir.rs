@@ -37,11 +37,18 @@ impl Tool {
     }
 }
 
-/// Remote/local state backend configuration. Rendered by the tool layer.
+/// Where the state lives. Rendered into the `terraform {}` block by `ttg-codegen::state`,
+/// which also owns the list of backend types and the keys each one takes (`s3`: `bucket`,
+/// `region`, optional `key_prefix`, `key` and `kms_key_id`; `azurerm`:
+/// `resource_group_name`, `storage_account_name`, `container_name`, optional `key_prefix`
+/// and `key`; `gcs`: `bucket`, optional `key_prefix` (or its own name, `prefix`); `local`:
+/// optional `path`). The state key is derived — `<key_prefix>/terraform.tfstate` — so a
+/// named environment can later slot in between; an explicit `key` gets it in front of its
+/// file name.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub struct BackendConfig {
-    /// `local`, `s3`, `azurerm`, ...
+    /// `local`, `s3`, `azurerm` or `gcs`.
     #[serde(rename = "type")]
     pub backend_type: String,
     #[serde(default)]
@@ -61,9 +68,20 @@ pub struct Settings {
     pub provider_settings: BTreeMap<ProviderId, BTreeMap<String, String>>,
     #[serde(default)]
     pub backend: Option<BackendConfig>,
-    /// OpenTofu-only: emit a state `encryption` block. Ignored for Terraform.
+    /// OpenTofu-only: emit a state `encryption` block. Terraform has none, so there it
+    /// only produces a warning.
     #[serde(default)]
     pub state_encryption: bool,
+    /// Id of the `encryption_key` entity whose key encrypts the state (AWS KMS / Google
+    /// Cloud KMS key provider). The key cannot live in the configuration whose state it
+    /// encrypts, so the export moves it to the separate `bootstrap/` root. Unset, or on a
+    /// provider without a KMS key provider, the state is encrypted with a passphrase.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub state_encryption_key: Option<Id>,
+    /// Per-provider version constraint for `required_providers` (`{ "aws": "~> 6.0" }`).
+    /// A provider without an entry uses its definition's `version_constraint`.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub provider_versions: BTreeMap<ProviderId, String>,
     /// Tags applied to every resource the project generates (cost allocation, ownership).
     /// How they reach the HCL is the provider definition's business: AWS `default_tags`,
     /// GCP `default_labels`, Azure a `tags` argument merged into each resource.
@@ -89,6 +107,8 @@ impl Default for Settings {
             provider_settings: BTreeMap::new(),
             backend: None,
             state_encryption: false,
+            state_encryption_key: None,
+            provider_versions: BTreeMap::new(),
             tags: BTreeMap::new(),
             kubernetes_manifests: false,
         }

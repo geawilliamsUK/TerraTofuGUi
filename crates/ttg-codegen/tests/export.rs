@@ -95,13 +95,17 @@ fn errors_block_export() {
 
 #[test]
 fn state_encryption_only_for_opentofu() {
+    // More in tests/state.rs: backends, KMS key providers, the bootstrap root.
     let cat = Catalog::builtin();
     let mut p = example("three-tier.ttg.json");
     p.settings.state_encryption = true;
     let tofu = generate(&p, &cat, "aws", Tool::OpenTofu).unwrap();
-    assert!(tofu.files["backend.tf"].contains("encryption {"));
+    assert!(tofu.files["versions.tf"].contains("encryption {"));
+    assert!(tofu.files["versions.tf"].contains(">= 1.7.0"));
     assert!(tofu.files["variables.tf"].contains("state_passphrase"));
+    assert!(!tofu.files.contains_key("backend.tf"));
     let tf = generate(&p, &cat, "aws", Tool::Terraform).unwrap();
+    assert!(!tf.files["versions.tf"].contains("encryption"));
     assert!(!tf.files.contains_key("backend.tf"));
 }
 

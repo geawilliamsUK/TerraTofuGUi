@@ -17,9 +17,12 @@ pub mod emit;
 pub mod files;
 pub mod k8s;
 pub mod layers;
+pub mod owned;
 pub mod reach;
+pub mod state;
 pub mod tool;
 pub mod validate;
+pub mod versions;
 pub mod views;
 
 pub use diagnostics::{Code, Diagnostic, Severity};
@@ -64,9 +67,10 @@ pub struct ExportReport {
 }
 
 /// Generate and write a single-provider project into `out_dir` (created if needed).
-/// Existing `.tf`, `MANUAL_STEPS.md` and `README.md` files in the directory are
-/// replaced, and so are the files directly inside `k8s/`; other files — including the
-/// render scripts' own `k8s/rendered/` — are left alone.
+/// The files the export owns (`owned`: the `.tf` files, `MANUAL_STEPS.md` and `README.md`
+/// at the top level and in the `bootstrap/` root, the files directly inside `k8s/`) are
+/// replaced, or removed when no longer generated; everything else — variable values,
+/// state, `.terraform/`, the render scripts' own `k8s/rendered/` — is left alone.
 pub fn export(
     project: &Project,
     catalog: &Catalog,
@@ -76,21 +80,9 @@ pub fn export(
 ) -> Result<ExportReport, GenError> {
     let generated = generate(project, catalog, provider, tool)?;
     std::fs::create_dir_all(out_dir)?;
-    // Remove previously generated .tf files so stale resources do not linger, and the
-    // manifests of workloads that are gone (or of an export that no longer has them).
-    if let Ok(rd) = std::fs::read_dir(out_dir) {
-        for e in rd.flatten() {
-            let p = e.path();
-            let name = p.file_name().and_then(|n| n.to_str()).unwrap_or("");
-            if name.ends_with(".tf") && !generated.files.contains_key(name) {
-                let _ = std::fs::remove_file(&p);
-            }
-        }
-    }
-    for stale in diff::stale_manifests(&generated, out_dir) {
-        let _ = std::fs::remove_file(out_dir.join(stale));
-    }
-    let _ = std::fs::remove_dir(out_dir.join(k8s::DIR)); // only succeeds when empty
+    // Stale resources, manifests of workloads that are gone, a bootstrap root after the
+    // backend was cleared: none of it may linger.
+    owned::remove_stale(&generated, out_dir);
     let mut written = Vec::new();
     for (name, content) in &generated.files {
         let path = out_dir.join(name);
@@ -104,11 +96,6 @@ pub fn export(
             std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755))?;
         }
         written.push(name.clone());
-    }
-    if !generated.manual_steps.is_empty() {
-        // MANUAL_STEPS.md is part of `files` already when non-empty; nothing extra.
-    } else {
-        let _ = std::fs::remove_file(out_dir.join("MANUAL_STEPS.md"));
     }
     Ok(ExportReport {
         provider: provider.to_string(),
