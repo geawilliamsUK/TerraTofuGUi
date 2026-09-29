@@ -1,0 +1,269 @@
+# Unit prices for the cost estimate (ttg_codegen::cost), Google Cloud.
+#
+# On-demand list prices in US dollars with no free tier, no sustained- or committed-use
+# discounts and no tax. Real bills differ; the estimate says so every time it is shown.
+# Layout: see the header of aws.toml and docs/PRICES.md. Every mapped type that is neither
+# `[free]` nor `[not_estimated]` must be priced by `crates/ttg-codegen/src/cost/gcp.rs`.
+
+schema_version = 1
+provider = "gcp"
+currency = "USD"
+retrieved = "2026-09-29"
+regions = ["us-central1", "europe-west1", "europe-west2"]
+fallback_region = "us-central1"
+basis = "Google Cloud on-demand list prices, USD, excluding tax, free tiers, sustained-use and committed-use discounts"
+
+[free]
+virtual_network = "VPC networks cost nothing."
+subnet = "Subnets cost nothing."
+security_group = "Firewall rules cost nothing."
+iam_role = "Service accounts and IAM bindings cost nothing."
+kubernetes_workload = "Pods run on the cluster's node pools, which are priced on the cluster and pool lines."
+budget = "Cloud Billing budgets cost nothing."
+dns_record = "Records are part of the managed zone; queries are priced on the zone's line."
+network_peering = "VPC peering costs nothing to create; traffic across zones or regions is billed per GB and is not estimated."
+tls_certificate = "Google-managed SSL certificates cost nothing."
+user_identity = "Identity Platform: the first 50,000 monthly active users (email, social sign-in) cost nothing; above that it is billed per user and not estimated."
+
+[not_estimated]
+audit_trail = "Data Access audit logs are billed as Cloud Logging ingestion, whose volume follows API traffic the diagram does not describe; Admin Activity logs are free."
+
+# ------------------------------------------------------------------ compute
+
+[tables.gce]
+unit = "hour"
+description = "Compute Engine on-demand VM (vCPU and memory together; g2 includes its L4 GPU)"
+source = "Google Compute Engine pricing (cloud.google.com/products/compute/pricing)"
+checked = "2026-09-29: every row and region against the price data embedded in cloud.google.com/products/compute/pricing/general-purpose and .../accelerator-optimized (the per-region on-demand tables; the Cloud Billing Catalog API needs a key)"
+
+[tables.gce.rows]
+e2-micro       = { us-central1 = 0.008376428, europe-west1 = 0.009214433, europe-west2 = 0.010792 }
+e2-small       = { us-central1 = 0.016753, europe-west1 = 0.018429, europe-west2 = 0.021584 }
+e2-medium      = { us-central1 = 0.033506, europe-west1 = 0.036858, europe-west2 = 0.043168 }
+e2-standard-2  = { us-central1 = 0.067011, europe-west1 = 0.073715, europe-west2 = 0.086336 }
+e2-standard-4  = { us-central1 = 0.134023, europe-west1 = 0.147431, europe-west2 = 0.172671 }
+e2-standard-8  = { us-central1 = 0.268046, europe-west1 = 0.294862, europe-west2 = 0.345342 }
+e2-standard-16 = { us-central1 = 0.536091, europe-west1 = 0.589724, europe-west2 = 0.690684 }
+n1-standard-4  = { us-central1 = 0.189999, europe-west1 = 0.209007, europe-west2 = 0.24479 }
+n1-standard-8  = { us-central1 = 0.379998, europe-west1 = 0.418014, europe-west2 = 0.48958 }
+n2-standard-2  = { us-central1 = 0.097118, europe-west1 = 0.106834, europe-west2 = 0.125124 }
+n2-standard-4  = { us-central1 = 0.194236, europe-west1 = 0.213668, europe-west2 = 0.250248 }
+g2-standard-4  = { us-central1 = 0.706832, europe-west1 = 0.778293, europe-west2 = 0.804789 }
+g2-standard-8  = { us-central1 = 0.853624, europe-west1 = 0.939926, europe-west2 = 0.971925 }
+
+[tables.gpu]
+unit = "GPU-hour"
+description = "GPU attached to an N1 VM, per GPU-hour"
+source = "Google Compute Engine GPU pricing (cloud.google.com/products/compute/pricing/accelerator-optimized)"
+checked = "2026-09-29: against the price data embedded in cloud.google.com/products/compute/pricing/accelerator-optimized (on-demand GPU rows). V100 is not offered in europe-west1 and P4 not in europe-west2, so those columns are gone"
+
+[tables.gpu.rows]
+nvidia-tesla-t4   = { us-central1 = 0.35, europe-west1 = 0.35, europe-west2 = 0.41 }
+nvidia-tesla-v100 = { us-central1 = 2.48 }
+nvidia-tesla-p4   = { us-central1 = 0.6 }
+
+[tables.persistent_disk]
+unit = "GB-month"
+description = "Persistent disk (node and VM boot disks)"
+source = "Google Cloud disk pricing (cloud.google.com/compute/disks-image-pricing)"
+checked = "2026-09-29: all rows and regions against the price data embedded in cloud.google.com/compute/disks-image-pricing (monthly 'Persistent Disk and Hyperdisk pricing' tables)"
+
+[tables.persistent_disk.rows]
+pd-standard = { us-central1 = 0.04, europe-west1 = 0.04, europe-west2 = 0.048 }
+pd-balanced = { us-central1 = 0.10, europe-west1 = 0.10, europe-west2 = 0.12 }
+pd-ssd      = { us-central1 = 0.17, europe-west1 = 0.17, europe-west2 = 0.204 }
+
+[tables.gke]
+unit = "hour"
+description = "GKE cluster management fee (Standard edition), per cluster-hour; the monthly free-tier credit for one zonal or Autopilot cluster is not deducted"
+source = "Google Kubernetes Engine pricing (cloud.google.com/kubernetes-engine/pricing)"
+checked = "2026-09-29: the text of cloud.google.com/kubernetes-engine/pricing ('flat cluster management fee of $0.10 per cluster per hour')"
+
+[tables.gke.rows]
+cluster = { "*" = 0.10 }
+
+[tables.cloud_run]
+unit = "vCPU-second"
+description = "Cloud Run (and Cloud Run functions) by region tier: instance-based billing per vCPU-second and GiB-second (vcpu, memory; no request fee); request-based billing per active vCPU-second and GiB-second (vcpu_request, memory_request) plus requests per million"
+source = "Cloud Run pricing (cloud.google.com/run/pricing)"
+checked = "2026-09-29: all regions against the price data embedded in cloud.google.com/run/pricing ('Services (Instance-based billing)' tables; europe-west2 is a tier-2 region, 20% dearer). vcpu_request, memory_request and requests against the 'Services (Requests-based billing)' tables (active-time prices; the requests fee is $0.40 per million in all three regions). Instance-based billing charges no request fee"
+
+[tables.cloud_run.rows]
+vcpu           = { us-central1 = 0.000018, europe-west1 = 0.000018, europe-west2 = 0.0000216 }
+memory         = { unit = "GiB-second", us-central1 = 0.000002, europe-west1 = 0.000002, europe-west2 = 0.0000024 }
+vcpu_request   = { unit = "vCPU-second", us-central1 = 0.000024, europe-west1 = 0.000024, europe-west2 = 0.0000336 }
+memory_request = { unit = "GiB-second", us-central1 = 0.0000025, europe-west1 = 0.0000025, europe-west2 = 0.0000035 }
+requests       = { unit = "million requests", "*" = 0.40 }
+
+# ------------------------------------------------------------------ databases
+
+[tables.cloud_sql]
+unit = "hour"
+description = "Cloud SQL Enterprise edition: shared-core tiers per hour; custom tiers per vCPU-hour and per GB-hour of memory (regional HA is twice these)"
+source = "Cloud SQL pricing (cloud.google.com/sql/pricing)"
+checked = "2026-09-29: all rows and regions against the price data embedded in cloud.google.com/sql/pricing ('Instance pricing' shared-core, 'Enterprise edition - General Purpose machine series', 'Storage' SSD). HA is exactly twice each figure. europe-west1 is priced as us-central1"
+
+[tables.cloud_sql.rows]
+db-f1-micro = { us-central1 = 0.0105, europe-west1 = 0.0105, europe-west2 = 0.0126 }
+db-g1-small = { us-central1 = 0.035, europe-west1 = 0.035, europe-west2 = 0.042 }
+vcpu        = { unit = "vCPU-hour", us-central1 = 0.0413, europe-west1 = 0.0413, europe-west2 = 0.0496 }
+memory      = { unit = "GB-hour", us-central1 = 0.007, europe-west1 = 0.007, europe-west2 = 0.0084 }
+ssd         = { unit = "GB-month", us-central1 = 0.17, europe-west1 = 0.17, europe-west2 = 0.204 }
+
+[tables.memorystore]
+unit = "GB-hour"
+description = "Memorystore for Redis, Basic tier, per GB-hour by capacity tier (M1 1-4 GB, M2 5-10 GB, M3 11-35 GB)"
+source = "Memorystore for Redis pricing (cloud.google.com/memorystore/docs/redis/pricing)"
+checked = "2026-09-29: all rows and regions against the price data embedded in cloud.google.com/memorystore/docs/redis/pricing (Basic tier, hourly)"
+
+[tables.memorystore.rows]
+basic_M1 = { us-central1 = 0.049, europe-west1 = 0.051, europe-west2 = 0.053 }
+basic_M2 = { us-central1 = 0.027, europe-west1 = 0.032, europe-west2 = 0.034 }
+basic_M3 = { us-central1 = 0.023, europe-west1 = 0.026, europe-west2 = 0.027 }
+
+[tables.firestore]
+unit = "100,000 operations"
+description = "Firestore (Native mode), regional location: document reads and writes, stored data"
+source = "Firestore pricing (cloud.google.com/firestore/pricing)"
+checked = "2026-09-29: all rows and regions against the price data embedded in cloud.google.com/firestore/pricing ('Pricing by location'). The page lists europe-west2 stored data at $0.117/GiB-month, below us-central1's $0.15"
+
+[tables.firestore.rows]
+read    = { us-central1 = 0.03, europe-west1 = 0.033, europe-west2 = 0.039 }
+write   = { us-central1 = 0.09, europe-west1 = 0.099, europe-west2 = 0.117 }
+storage = { unit = "GiB-month", us-central1 = 0.15, europe-west1 = 0.165, europe-west2 = 0.117 }
+
+# ------------------------------------------------------------------ storage and messaging
+
+[tables.gcs]
+unit = "GB-month"
+description = "Cloud Storage, Standard class, regional bucket; Class A and B operations per 1,000"
+source = "Cloud Storage pricing (cloud.google.com/storage/pricing)"
+checked = "2026-09-29: storage against the price data embedded in cloud.google.com/storage/pricing ('Data storage' table, Standard, per region); Class A / B from the page's regional-bucket operations table (flat namespace)"
+
+[tables.gcs.rows]
+standard = { us-central1 = 0.020, europe-west1 = 0.020, europe-west2 = 0.023 }
+class_a  = { unit = "1,000 operations", "*" = 0.005 }
+class_b  = { unit = "1,000 operations", "*" = 0.0004 }
+
+[tables.filestore]
+unit = "GiB-month"
+description = "Filestore Basic, provisioned capacity (HDD minimum 1 TiB, SSD minimum 2.5 TiB); Basic HDD also has a per-instance charge"
+source = "Filestore pricing (cloud.google.com/filestore/pricing)"
+checked = "2026-09-29: all rows and regions against the price data embedded in cloud.google.com/filestore/pricing (the per-region tier table, 'Per GiB' and 'Per Instance' columns). Basic HDD now carries a per-instance charge (BASIC_HDD_instance, $33-45.54 a month)"
+
+[tables.filestore.rows]
+BASIC_HDD          = { us-central1 = 0.16, europe-west1 = 0.18, europe-west2 = 0.19 }
+BASIC_SSD          = { us-central1 = 0.3, europe-west1 = 0.33, europe-west2 = 0.36 }
+BASIC_HDD_instance = { unit = "instance-month", us-central1 = 33.0, europe-west1 = 36.3, europe-west2 = 45.54 }
+
+[tables.artifact_registry]
+unit = "GB-month"
+description = "Artifact Registry storage (the first 0.5 GB free is not deducted)"
+source = "Artifact Registry pricing (cloud.google.com/artifact-registry/pricing)"
+checked = "2026-09-29: the text of cloud.google.com/artifact-registry/pricing ($0.000136986 per GiB-hour past 0.5 GiB = $0.10 a month; same for regional and multi-regional)"
+
+[tables.artifact_registry.rows]
+storage = { "*" = 0.10 }
+
+[tables.pubsub]
+unit = "TiB"
+description = "Pub/Sub message delivery throughput (each message counts at least 1 KB; the first 10 GiB a month free is not deducted)"
+source = "Pub/Sub pricing (cloud.google.com/pubsub/pricing)"
+checked = "2026-09-29: the text of cloud.google.com/pubsub/pricing ('$40 per TiB in all Google Cloud regions')"
+
+[tables.pubsub.rows]
+throughput = { "*" = 40.0 }
+
+# ------------------------------------------------------------------ networking
+
+[tables.cloud_nat]
+unit = "hour"
+description = "Cloud NAT: per VM using the gateway per hour (capped at 32 VMs), per GB processed"
+source = "Cloud NAT pricing (cloud.google.com/nat/pricing)"
+checked = "2026-09-29: the text of cloud.google.com/nat/pricing ($0.0014 per VM-hour up to 32 VMs, $0.044 an hour flat above; $0.045 per GiB processed in every region). Each NAT IP address also costs $0.005 an hour (not modelled)"
+
+[tables.cloud_nat.rows]
+vm   = { "*" = 0.0014 }
+data = { unit = "GB", "*" = 0.045 }
+
+[tables.load_balancing]
+unit = "hour"
+description = "Cloud Load Balancing: forwarding rule (first five per hour), data processed"
+source = "Cloud Load Balancing pricing (cloud.google.com/vpc/network-pricing#lb)"
+checked = "2026-09-29: all rows and regions against the price data embedded in cloud.google.com/vpc/network-pricing (regional forwarding-rule and data-processing table; data processing is $0.01 in europe-west2)"
+
+[tables.load_balancing.rows]
+forwarding_rule = { us-central1 = 0.025, europe-west1 = 0.025, europe-west2 = 0.03 }
+data            = { unit = "GB", us-central1 = 0.008, europe-west1 = 0.008, europe-west2 = 0.01 }
+
+[tables.cloud_cdn]
+unit = "GB"
+description = "Cloud CDN cache egress (North America and Europe, first 10 TB) and cache lookups"
+source = "Cloud CDN pricing (cloud.google.com/cdn/pricing)"
+checked = "2026-09-29: the text of cloud.google.com/cdn/pricing (North America and Europe first 10 TiB $0.08, cache lookups $0.0075 per 10,000)"
+
+[tables.cloud_cdn.rows]
+egress  = { "*" = 0.08 }
+lookups = { unit = "10,000 requests", "*" = 0.0075 }
+
+[tables.cloud_armor]
+unit = "month"
+description = "Cloud Armor Standard: per policy, per rule, per million requests"
+source = "Cloud Armor pricing (cloud.google.com/armor/pricing)"
+checked = "2026-09-29: the text of cloud.google.com/armor/pricing (Standard: security policy and rule per hour x 730, $0.75 per million requests on globally scoped policies; $0.60 regional)"
+
+[tables.cloud_armor.rows]
+policy   = { "*" = 5.00 }
+rule     = { "*" = 1.00 }
+requests = { unit = "million requests", "*" = 0.75 }
+
+[tables.cloud_dns]
+unit = "month"
+description = "Cloud DNS managed zone (first 25) and queries"
+source = "Cloud DNS pricing (cloud.google.com/dns/pricing)"
+checked = "2026-09-29: the text of cloud.google.com/dns/pricing (managed zones 0-25 per hour x 730; regular queries first billion)"
+
+[tables.cloud_dns.rows]
+zone    = { "*" = 0.20 }
+queries = { unit = "million queries", "*" = 0.40 }
+
+# ------------------------------------------------------------------ security and monitoring
+
+[tables.secret_manager]
+unit = "month"
+description = "Secret Manager: active secret version per month, access operations per 10,000"
+source = "Secret Manager pricing (cloud.google.com/secret-manager/pricing)"
+checked = "2026-09-29: the text of cloud.google.com/secret-manager/pricing (active secret versions past 6 per hour x 730; access operations past 10,000)"
+
+[tables.secret_manager.rows]
+version = { "*" = 0.06 }
+access  = { unit = "10,000 operations", "*" = 0.03 }
+
+[tables.cloud_kms]
+unit = "month"
+description = "Cloud KMS software key: per active key version per month, cryptographic operations per 10,000"
+source = "Cloud KMS pricing (cloud.google.com/kms/pricing)"
+checked = "2026-09-29: the text of cloud.google.com/kms/pricing (SOFTWARE symmetric key version per hour x 730; cryptographic operations)"
+
+[tables.cloud_kms.rows]
+key_version = { "*" = 0.06 }
+operations  = { unit = "10,000 operations", "*" = 0.03 }
+
+[tables.logging]
+unit = "GiB"
+description = "Cloud Logging: ingestion (first 50 GiB per project a month free, not deducted); retention past 30 days per GiB-month"
+source = "Google Cloud Observability pricing (cloud.google.com/stackdriver/pricing)"
+checked = "2026-09-29: the text of cloud.google.com/stackdriver/pricing ('$0.50/GiB' storage/ingestion, '$0.01 per GiB per month' retention past 30 days)"
+
+[tables.logging.rows]
+ingest    = { "*" = 0.50 }
+retention = { unit = "GiB-month", "*" = 0.01 }
+
+[tables.monitoring]
+unit = "month"
+description = "Cloud Monitoring alerting: free until Google starts charging (announced for no sooner than 1 September 2027: $0.35 a month per metric reference in a policy plus $0.50 per million points returned)"
+source = "Google Cloud Observability pricing, alerting section"
+checked = "2026-09-29: the text of cloud.google.com/stackdriver/pricing: alerting is not charged yet ('Starting no sooner than September 1, 2027, Cloud Monitoring will begin charging for alerting'), so the condition price is 0 (it was 1.50)"
+
+[tables.monitoring.rows]
+condition = { "*" = 0.0 }

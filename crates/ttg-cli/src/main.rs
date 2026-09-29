@@ -6,7 +6,10 @@
 //! ttg export-all <project.ttg.json> --tool opentofu --out ./out [--zip] [--validate] [--k8s]
 //! ttg catalog    [--definitions ./definitions]
 //! ttg view       export <project.ttg.json> <view> [--format md|mermaid] [--out doc.md]
+//! ttg cost       <project.ttg.json> [--provider aws] [--region eu-west-2] [--by type] [--json]
 //! ```
+
+mod cost;
 
 use anyhow::{bail, Context, Result};
 use clap::{Parser, Subcommand, ValueEnum};
@@ -127,6 +130,24 @@ enum Cmd {
     View {
         #[command(subcommand)]
         cmd: ViewCmd,
+    },
+    /// Estimated monthly cost from bundled list prices (see docs/PRICES.md).
+    Cost {
+        project: PathBuf,
+        #[arg(long)]
+        provider: Option<String>,
+        /// Price for this region instead of the project's.
+        #[arg(long)]
+        region: Option<String>,
+        /// Rows per entity (default) or per abstract type.
+        #[arg(long, value_enum, default_value = "entity")]
+        by: cost::By,
+        /// Print each line's charges and notes too.
+        #[arg(long)]
+        detail: bool,
+        /// The whole estimate as JSON.
+        #[arg(long)]
+        json: bool,
     },
     /// Re-lay out a project file automatically (columns by dependency, containers fitted).
     Tidy {
@@ -447,6 +468,24 @@ fn main() -> Result<()> {
                 }
             }
         },
+        Cmd::Cost {
+            project,
+            provider,
+            region,
+            by,
+            detail,
+            json,
+        } => cost::run(
+            &mut cat,
+            cost::Args {
+                project: &project,
+                provider,
+                region,
+                json,
+                by,
+                detail,
+            },
+        )?,
         Cmd::Tidy { project, out } => {
             let mut p = ttg_core::project::load(&project)?;
             cat.ensure_native_types(&p);

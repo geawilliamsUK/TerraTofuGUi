@@ -54,6 +54,8 @@ pub enum Code {
     State,
     /// Provider version constraints against the bundled schema (`crate::versions`).
     Version,
+    /// The cost estimate exceeds a budget's limit (`cost::budget_diagnostics`).
+    Cost,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -670,6 +672,9 @@ pub fn run(full: &Project, cat: &Catalog, provider: &str) -> Vec<Diagnostic> {
     extra_checks(p, cat, provider, &mut out);
     out.extend(crate::state::checks(full, p, cat, provider, full.settings.tool));
     out.extend(crate::versions::checks(p, cat, provider));
+    // A budget the cost estimate exceeds. Cheap enough to run with the rest (it is
+    // skipped outright without a budget entity); see `cost::budget_diagnostics`.
+    out.extend(crate::cost::budget_diagnostics(p, cat, provider));
 
     for e in &p.edges {
         if is_redundant_edge(p, cat, e) {

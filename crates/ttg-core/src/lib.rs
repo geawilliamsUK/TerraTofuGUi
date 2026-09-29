@@ -5,6 +5,7 @@
 //! *intent* ("a subnet inside this network, attached to that role") so that
 //! `ttg-catalog` and `ttg-codegen` can map that intent to concrete provider resources.
 
+pub mod cost;
 pub mod graph;
 pub mod ir;
 #[cfg(feature = "schema")]
@@ -15,6 +16,7 @@ pub mod validate;
 pub mod value;
 pub mod view;
 
+pub use cost::{CostAssumptions, DisplayCurrency};
 pub use ir::*;
 pub use value::{Record, Value};
 

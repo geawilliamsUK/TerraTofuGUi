@@ -1,0 +1,320 @@
+# Unit prices for the cost estimate (ttg_codegen::cost), Microsoft Azure.
+#
+# Pay-as-you-go retail list prices in US dollars, Linux, with no free grants, no reserved
+# instances or savings plans, no Azure Hybrid Benefit and no tax. Real bills differ; the
+# estimate says so every time it is shown. Layout: see the header of aws.toml and
+# docs/PRICES.md. Every mapped type that is neither `[free]` nor `[not_estimated]` must be
+# priced by `crates/ttg-codegen/src/cost/azure.rs`.
+
+schema_version = 1
+provider = "azure"
+currency = "USD"
+retrieved = "2026-09-29"
+regions = ["eastus", "westeurope", "uksouth"]
+fallback_region = "eastus"
+basis = "Azure pay-as-you-go retail prices (Linux), USD, excluding tax, free grants, reservations and savings plans"
+
+[free]
+resource_group = "Resource groups cost nothing."
+virtual_network = "Virtual networks cost nothing; peering and gateways are billed separately."
+subnet = "Subnets cost nothing."
+route_table = "Route tables cost nothing."
+security_group = "Network security groups cost nothing."
+iam_role = "Managed identities and role assignments cost nothing."
+kubernetes_workload = "Pods run on the cluster's node pools, which are priced on the cluster and pool lines."
+budget = "Cost Management budgets cost nothing."
+dns_record = "Records are part of the DNS zone; queries are priced on the zone's line."
+network_peering = "Peering costs nothing to create; traffic across it is billed per GB in each direction and is not estimated."
+key_vault = "A vault costs nothing by itself; the keys and secrets in it are priced on their own lines (per operation)."
+
+[not_estimated]
+web_application_firewall = "A WAF policy is free by itself; WAF is billed through the Application Gateway (WAF_v2) or Front Door it is attached to, which the diagram does not model."
+tls_certificate = "Key Vault charges per certificate renewal request plus whatever the issuing certificate authority charges; neither depends on the diagram."
+
+# ------------------------------------------------------------------ compute
+
+[tables.vm]
+unit = "hour"
+description = "Virtual machine, Linux, pay-as-you-go"
+source = "Azure retail prices API (prices.azure.com/api/retail/prices), serviceName 'Virtual Machines'"
+checked = "2026-09-29: every row, eastus/westeurope/uksouth, via prices.azure.com retail API (serviceName 'Virtual Machines', armSkuName, the Linux meter: productName without 'Windows', skuName without Spot / Low Priority)"
+
+[tables.vm.rows]
+Standard_B1s    = { eastus = 0.0104, westeurope = 0.012, uksouth = 0.0118 }
+Standard_B1ms   = { eastus = 0.0207, westeurope = 0.024, uksouth = 0.0236 }
+Standard_B2s    = { eastus = 0.0416, westeurope = 0.048, uksouth = 0.0472 }
+Standard_B2ms   = { eastus = 0.0832, westeurope = 0.096, uksouth = 0.0944 }
+Standard_D2s_v3 = { eastus = 0.096, westeurope = 0.12, uksouth = 0.116 }
+Standard_D4s_v3 = { eastus = 0.192, westeurope = 0.24, uksouth = 0.232 }
+Standard_D8s_v3 = { eastus = 0.384, westeurope = 0.48, uksouth = 0.464 }
+Standard_D16s_v3 = { eastus = 0.768, westeurope = 0.96, uksouth = 0.928 }
+Standard_D2s_v5 = { eastus = 0.096, westeurope = 0.115, uksouth = 0.111 }
+Standard_D4s_v5 = { eastus = 0.192, westeurope = 0.23, uksouth = 0.222 }
+Standard_NC4as_T4_v3  = { eastus = 0.526, westeurope = 0.658, uksouth = 0.615 }
+Standard_NC8as_T4_v3  = { eastus = 0.752, westeurope = 0.94, uksouth = 0.88 }
+Standard_NC16as_T4_v3 = { eastus = 1.204, westeurope = 1.505, uksouth = 1.409 }
+Standard_NC6s_v3      = { eastus = 3.06, westeurope = 3.823, uksouth = 3.589 }
+Standard_NC24ads_A100_v4 = { eastus = 3.673, westeurope = 4.775, uksouth = 4.591 }
+
+[tables.managed_disk]
+unit = "disk-month"
+description = "Managed disk, per disk per month by size tier (S = Standard HDD, P = Premium SSD)"
+source = "Azure managed disks pricing (azure.microsoft.com/pricing/details/managed-disks)"
+checked = "2026-09-29: every row and region via prices.azure.com retail API (productName 'Standard HDD Managed Disks' / 'Premium SSD Managed Disks', meter '<tier> LRS Disk'). Standard HDD also bills $0.0005 per 10,000 transactions, not modelled"
+
+[tables.managed_disk.rows]
+S4  = { eastus = 1.536, westeurope = 1.536, uksouth = 1.69 }
+S6  = { eastus = 3.008, westeurope = 3.008, uksouth = 3.309 }
+S10 = { eastus = 5.888, westeurope = 5.888, uksouth = 6.477 }
+S15 = { eastus = 11.328, westeurope = 11.328, uksouth = 12.45926 }
+P4  = { eastus = 5.2795, westeurope = 5.8072, uksouth = 6.3879 }
+P6  = { eastus = 10.207, westeurope = 11.2272, uksouth = 12.3499 }
+P10 = { eastus = 19.71, westeurope = 21.68, uksouth = 23.848 }
+P15 = { eastus = 38.012142, westeurope = 41.811428, uksouth = 45.992571 }
+P20 = { eastus = 73.22, westeurope = 80.54, uksouth = 88.594 }
+
+[tables.aks]
+unit = "hour"
+description = "AKS control plane: the Free tier costs nothing, the Standard tier is charged per cluster-hour"
+source = "Azure Kubernetes Service pricing (azure.microsoft.com/pricing/details/kubernetes-service)"
+checked = "2026-09-29: standard via prices.azure.com retail API (serviceName 'Azure Kubernetes Service', meter 'Standard Uptime SLA'), $0.10 in all three regions; free has no meter. The Long Term Support meter is $0.60 an hour (not modelled)"
+
+[tables.aks.rows]
+free     = { "*" = 0.0 }
+standard = { "*" = 0.10 }
+
+[tables.container_apps]
+unit = "vCPU-second"
+description = "Container Apps consumption plan, active usage (monthly free grants not deducted)"
+source = "Azure Container Apps pricing (azure.microsoft.com/pricing/details/container-apps)"
+checked = "2026-09-29: all rows and regions via prices.azure.com retail API (meters 'Standard vCPU Active Usage', 'Standard Memory Active Usage', 'Standard Requests'). westeurope and uksouth are dearer than eastus, and requests cost $0.56 per million in westeurope, so that row is now per region. Idle vCPU ($0.000003-0.000004 per vCPU-second) is not modelled"
+
+[tables.container_apps.rows]
+vcpu     = { eastus = 0.000024, westeurope = 0.000034, uksouth = 0.000034 }
+memory   = { unit = "GiB-second", eastus = 0.000003, westeurope = 0.000004, uksouth = 0.000004 }
+requests = { unit = "million requests", eastus = 0.4, westeurope = 0.56, uksouth = 0.4 }
+
+[tables.functions]
+unit = "GB-second"
+description = "Azure Functions: Consumption plan (Y1) per GB-second and per million executions; Elastic Premium EP1 per instance-hour"
+source = "Azure Functions pricing (azure.microsoft.com/pricing/details/functions)"
+checked = "2026-09-29: via prices.azure.com retail API: Consumption meters 'Standard Execution Time' and 'Standard Total Executions' (priced per 10, converted) past the free grants, the same in all three regions; EP1 = 'Premium vCPU Duration' + 3.5 x 'Premium Memory Duration' per region"
+
+[tables.functions.rows]
+duration   = { "*" = 0.000016 }
+executions = { unit = "million executions", "*" = 0.20 }
+EP1        = { unit = "hour", eastus = 0.21605, westeurope = 0.21135, uksouth = 0.2312 }
+
+# ------------------------------------------------------------------ databases
+
+[tables.postgres_flexible]
+unit = "hour"
+description = "Azure Database for PostgreSQL flexible server compute (zone-redundant HA is twice this)"
+source = "Azure retail prices API, serviceName 'Azure Database for PostgreSQL'"
+checked = "2026-09-29: every row and region via prices.azure.com retail API: burstable meters B1MS / B2S; General Purpose from the per-vCore meter of each series ('General Purpose Dsv3 / Ddsv4 / Ddsv5 Series Compute', skuName 'vCore') times the vCores"
+
+[tables.postgres_flexible.rows]
+B_Standard_B1ms     = { eastus = 0.017, westeurope = 0.0199, uksouth = 0.019 }
+B_Standard_B2s      = { eastus = 0.068, westeurope = 0.0796, uksouth = 0.076 }
+GP_Standard_D2s_v3  = { eastus = 0.171, westeurope = 0.203, uksouth = 0.198 }
+GP_Standard_D4s_v3  = { eastus = 0.342, westeurope = 0.406, uksouth = 0.396 }
+GP_Standard_D2ds_v4 = { eastus = 0.178, westeurope = 0.212, uksouth = 0.206 }
+GP_Standard_D4ds_v4 = { eastus = 0.356, westeurope = 0.424, uksouth = 0.412 }
+GP_Standard_D2ds_v5 = { eastus = 0.178, westeurope = 0.212, uksouth = 0.206 }
+GP_Standard_D4ds_v5 = { eastus = 0.356, westeurope = 0.424, uksouth = 0.412 }
+
+[tables.mysql_flexible]
+unit = "hour"
+description = "Azure Database for MySQL flexible server compute (zone-redundant HA is twice this)"
+source = "Azure retail prices API, serviceName 'Azure Database for MySQL'"
+checked = "2026-09-29: every row and region via prices.azure.com retail API: burstable meters B1MS / B2S (now the same as PostgreSQL); General Purpose per vCore: 'General Purpose Ddsv5 Series Compute', and for Ddsv4 the unnamed 'General Purpose Series Compute' meter (MySQL's original series, same price)"
+
+[tables.mysql_flexible.rows]
+B_Standard_B1ms     = { eastus = 0.017, westeurope = 0.0199, uksouth = 0.019 }
+B_Standard_B2s      = { eastus = 0.068, westeurope = 0.0796, uksouth = 0.076 }
+GP_Standard_D2ds_v4 = { eastus = 0.171, westeurope = 0.203, uksouth = 0.198 }
+GP_Standard_D4ds_v4 = { eastus = 0.342, westeurope = 0.406, uksouth = 0.396 }
+GP_Standard_D2ds_v5 = { eastus = 0.171, westeurope = 0.203, uksouth = 0.198 }
+GP_Standard_D4ds_v5 = { eastus = 0.342, westeurope = 0.406, uksouth = 0.396 }
+
+[tables.flexible_storage]
+unit = "GB-month"
+description = "Flexible server storage (zone-redundant HA is twice this)"
+source = "Azure retail prices API, flexible server storage meters"
+checked = "2026-09-29: both rows, all regions, via prices.azure.com retail API ('Azure Database for PostgreSQL Flex Server Storage' / 'Azure Database for MySQL Flexible Server Storage', meter 'Storage Data Stored')"
+
+[tables.flexible_storage.rows]
+postgres = { eastus = 0.115, westeurope = 0.1369, uksouth = 0.133 }
+mysql    = { eastus = 0.115, westeurope = 0.1369, uksouth = 0.133 }
+
+[tables.redis]
+unit = "hour"
+description = "Azure Cache for Redis, per cache-hour by tier and size"
+source = "Azure Cache for Redis pricing (azure.microsoft.com/pricing/details/cache)"
+checked = "2026-09-29: every row and region via prices.azure.com retail API (productName 'Azure Redis Cache Basic' / 'Standard', meter '<size> Cache'; the Standard meter covers both nodes)"
+
+[tables.redis.rows]
+Basic_C0    = { eastus = 0.022, westeurope = 0.022, uksouth = 0.028 }
+Basic_C1    = { eastus = 0.055, westeurope = 0.055, uksouth = 0.069 }
+Basic_C2    = { eastus = 0.09, westeurope = 0.09, uksouth = 0.113 }
+Standard_C0 = { eastus = 0.055, westeurope = 0.055, uksouth = 0.069 }
+Standard_C1 = { eastus = 0.138, westeurope = 0.138, uksouth = 0.173 }
+Standard_C2 = { eastus = 0.225, westeurope = 0.225, uksouth = 0.281 }
+
+[tables.cosmos]
+unit = "100 RU/s-hour"
+description = "Cosmos DB for NoSQL, provisioned throughput (400 RU/s is the minimum a container gets) and storage"
+source = "Azure Cosmos DB pricing (azure.microsoft.com/pricing/details/cosmos-db)"
+checked = "2026-09-29: via prices.azure.com retail API (productName 'Azure Cosmos DB', skuName 'RUs', meters '100 RU/s' and 'Data Stored'), the same in all three regions"
+
+[tables.cosmos.rows]
+throughput = { eastus = 0.008, westeurope = 0.008, uksouth = 0.008 }
+storage    = { unit = "GB-month", eastus = 0.25, westeurope = 0.25, uksouth = 0.25 }
+
+# ------------------------------------------------------------------ storage and messaging
+
+[tables.blob]
+unit = "GB-month"
+description = "Blob storage, general-purpose v2, Hot tier, first 50 TB, by redundancy; operations per 10,000"
+source = "Azure Blob Storage pricing (azure.microsoft.com/pricing/details/storage/blobs)"
+checked = "2026-09-29: every row and region via prices.azure.com retail API (productName 'General Block Blob v2': 'Hot LRS/ZRS/GRS Data Stored' first 50 TB, 'Hot LRS Write Operations', 'Hot Read Operations'). Write operations cost more on ZRS and GRS (eastus 0.0625 / 0.10); the rows are LRS"
+
+[tables.blob.rows]
+hot_LRS = { eastus = 0.0208, westeurope = 0.0196, uksouth = 0.0192 }
+hot_ZRS = { eastus = 0.026, westeurope = 0.024, uksouth = 0.024 }
+hot_GRS = { eastus = 0.0458, westeurope = 0.0392, uksouth = 0.0384 }
+write   = { unit = "10,000 operations", eastus = 0.05, westeurope = 0.054, uksouth = 0.059 }
+read    = { unit = "10,000 operations", eastus = 0.004, westeurope = 0.0043, uksouth = 0.0047 }
+
+[tables.files]
+unit = "GiB-month"
+description = "Azure Files premium (FileStorage) share, provisioned capacity"
+source = "Azure Files pricing (azure.microsoft.com/pricing/details/storage/files)"
+checked = "2026-09-29: all regions via prices.azure.com retail API (productName 'Premium Files', meter 'Premium LRS Provisioned')"
+
+[tables.files.rows]
+premium_LRS = { eastus = 0.16, westeurope = 0.192, uksouth = 0.176 }
+
+[tables.queue_storage]
+unit = "GB-month"
+description = "Queue Storage (general-purpose v2, LRS): capacity and operations per 10,000"
+source = "Azure Queue Storage pricing (azure.microsoft.com/pricing/details/storage/queues)"
+checked = "2026-09-29: via prices.azure.com retail API (productName 'Queues v2', meters 'LRS Data Stored' and 'LRS Class 1 Operations'; Class 2 is the same price), all three regions"
+
+[tables.queue_storage.rows]
+capacity   = { eastus = 0.045, westeurope = 0.045, uksouth = 0.045 }
+operations = { unit = "10,000 operations", "*" = 0.004 }
+
+[tables.service_bus]
+unit = "million operations"
+description = "Service Bus: Basic per million operations; Standard base charge per hour (13 million operations included) plus operations above that; Premium per messaging unit-hour"
+source = "Azure Service Bus pricing (azure.microsoft.com/pricing/details/service-bus)"
+checked = "2026-09-29: via prices.azure.com retail API (meters 'Basic Messaging Operations', 'Standard Base Unit' per hour, 'Standard Messaging Operations' 13M-100M tier, 'Premium Messaging Unit'), all rows and regions; premium is 0.9275 in all three"
+
+[tables.service_bus.rows]
+basic_operations    = { "*" = 0.05 }
+standard_base       = { unit = "hour", "*" = 0.013441 }
+standard_operations = { "*" = 0.80 }
+premium_unit        = { unit = "hour", eastus = 0.9275, westeurope = 0.9275, uksouth = 0.9275 }
+
+[tables.acr]
+unit = "day"
+description = "Container Registry, per registry-day by tier (includes 10 GB on Basic)"
+source = "Azure Container Registry pricing (azure.microsoft.com/pricing/details/container-registry)"
+checked = "2026-09-29: via prices.azure.com retail API (meters 'Basic / Standard / Premium Registry Unit', per day), the same in all three regions"
+
+[tables.acr.rows]
+Basic    = { "*" = 0.1666 }
+Standard = { "*" = 0.6666 }
+Premium  = { "*" = 1.6666 }
+
+# ------------------------------------------------------------------ networking
+
+[tables.nat_gateway]
+unit = "hour"
+description = "NAT gateway, per hour and per GB processed"
+source = "Azure NAT Gateway pricing (azure.microsoft.com/pricing/details/azure-nat-gateway)"
+checked = "2026-09-29: via prices.azure.com retail API (serviceName 'NAT Gateway', armRegionName 'Global': 'Standard Gateway', 'Standard Data Processed')"
+
+[tables.nat_gateway.rows]
+hour = { "*" = 0.045 }
+data = { unit = "GB", "*" = 0.045 }
+
+[tables.public_ip]
+unit = "hour"
+description = "Standard static public IPv4 address"
+source = "Azure public IP address pricing (azure.microsoft.com/pricing/details/ip-addresses)"
+checked = "2026-09-29: via prices.azure.com retail API (meter 'Standard IPv4 Static Public IP'), $0.005 in all three regions"
+
+[tables.public_ip.rows]
+standard_static = { "*" = 0.005 }
+
+[tables.load_balancer]
+unit = "hour"
+description = "Standard Load Balancer: first five rules per hour, and data processed"
+source = "Azure Load Balancer pricing (azure.microsoft.com/pricing/details/load-balancer)"
+checked = "2026-09-29: via prices.azure.com retail API (serviceName 'Load Balancer', armRegionName 'Global': 'Standard Included LB Rules and Outbound Rules', 'Standard Data Processed'). Rules past the first five cost $0.01 an hour each (not modelled)"
+
+[tables.load_balancer.rows]
+rules = { eastus = 0.025, westeurope = 0.025, uksouth = 0.025 }
+data  = { unit = "GB", "*" = 0.005 }
+
+[tables.private_endpoint]
+unit = "hour"
+description = "Private Link private endpoint, per hour and per GB processed (ingress and egress are each billed at this rate)"
+source = "Azure Private Link pricing (azure.microsoft.com/pricing/details/private-link)"
+checked = "2026-09-29: via prices.azure.com retail API (armRegionName 'Global': 'Standard Private Endpoint', 'Standard Data Processed - Ingress' first 1 PB; egress is the same)"
+
+[tables.private_endpoint.rows]
+hour = { "*" = 0.01 }
+data = { unit = "GB", "*" = 0.01 }
+
+[tables.cdn]
+unit = "GB"
+description = "Azure CDN Standard from Microsoft (classic), data transfer out, zone 1, first 10 TB"
+source = "Azure CDN pricing (azure.microsoft.com/pricing/details/cdn)"
+checked = "2026-09-29: via prices.azure.com retail API (productName 'Azure CDN from Microsoft', meter 'Standard Data Transfer', armRegionName 'Zone 1', first 10 TB)"
+
+[tables.cdn.rows]
+data_out = { "*" = 0.081 }
+
+[tables.dns]
+unit = "month"
+description = "Azure DNS public zone and queries"
+source = "Azure DNS pricing (azure.microsoft.com/pricing/details/dns)"
+checked = "2026-09-29: via prices.azure.com retail API (serviceName 'Azure DNS', armRegionName 'Zone 1': 'Public Zone' first 25, 'Public Queries' first billion)"
+
+[tables.dns.rows]
+zone    = { "*" = 0.50 }
+queries = { unit = "million queries", "*" = 0.40 }
+
+# ------------------------------------------------------------------ security and monitoring
+
+[tables.key_vault]
+unit = "10,000 operations"
+description = "Key Vault Standard: operations on secrets and software keys; automated key rotation per rotation"
+source = "Azure Key Vault pricing (azure.microsoft.com/pricing/details/key-vault)"
+checked = "2026-09-29: via prices.azure.com retail API (productName 'Key Vault', skuName 'Standard': 'Operations', 'Automated Key Rotation'), the same in all three regions"
+
+[tables.key_vault.rows]
+operations = { "*" = 0.03 }
+rotation   = { unit = "rotation", "*" = 1.00 }
+
+[tables.log_analytics]
+unit = "GB"
+description = "Log Analytics workspace, Analytics logs pay-as-you-go ingestion; retention past the included 31 days per GB-month"
+source = "Azure Monitor pricing (azure.microsoft.com/pricing/details/monitor)"
+checked = "2026-09-29: via prices.azure.com retail API (serviceName 'Log Analytics': 'Analytics Logs Data Ingestion' past the free 5 GB, 'Analytics Logs Data Retention'), all three regions"
+
+[tables.log_analytics.rows]
+ingest    = { eastus = 2.3, westeurope = 2.99, uksouth = 2.88 }
+retention = { unit = "GB-month", eastus = 0.10, westeurope = 0.13, uksouth = 0.13 }
+
+[tables.monitor_alerts]
+unit = "month"
+description = "Azure Monitor metric alert rule, per monitored time series"
+source = "Azure Monitor pricing, alert rules section"
+checked = "2026-09-29: via prices.azure.com retail API (serviceName 'Azure Monitor', meter 'Alerts Metric Monitored' past the free 10), the same in all three regions"
+
+[tables.monitor_alerts.rows]
+metric_alert = { "*" = 0.10 }

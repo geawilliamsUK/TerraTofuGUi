@@ -93,6 +93,13 @@ pub struct Settings {
     /// out of the file while off so older projects do not change on save.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub kubernetes_manifests: bool,
+    /// Usage assumptions behind the cost estimate (`ttg_codegen::cost`): project-wide
+    /// values and per-entity overrides. Empty means every default.
+    #[serde(default, skip_serializing_if = "crate::CostAssumptions::is_empty")]
+    pub cost_assumptions: crate::CostAssumptions,
+    /// Also show cost estimates in this currency, at a fixed rate. Prices are USD.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cost_currency: Option<crate::DisplayCurrency>,
 }
 
 fn default_provider() -> String {
@@ -111,6 +118,8 @@ impl Default for Settings {
             provider_versions: BTreeMap::new(),
             tags: BTreeMap::new(),
             kubernetes_manifests: false,
+            cost_assumptions: Default::default(),
+            cost_currency: None,
         }
     }
 }

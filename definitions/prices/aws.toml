@@ -1,0 +1,381 @@
+# Unit prices for the cost estimate (ttg_codegen::cost), Amazon Web Services.
+#
+# List prices, in US dollars, for the few things the curated types turn into on AWS. They
+# are on-demand, Linux, shared-tenancy prices with no free tier, no Savings Plans, no
+# reserved capacity, no enterprise discount and no tax. Real bills differ; the estimate
+# says so every time it is shown.
+#
+# Layout (see docs/PRICES.md):
+#   [tables.<name>]           one table per service and unit
+#     unit / description / source / checked
+#   [tables.<name>.rows]      one row per SKU: `"<sku>" = { <region> = price, ... }`
+#                             `"*"` is a price that is the same in every region; a row may
+#                             carry its own `unit` when it differs from the table's.
+# `[free]` and `[not_estimated]` name the abstract types that have no priced model on
+# this provider, with the reason shown in the estimate. Every other mapped type must be
+# priced by `crates/ttg-codegen/src/cost/aws.rs`; a test fails when one is missing.
+
+schema_version = 1
+provider = "aws"
+currency = "USD"
+retrieved = "2026-09-29"
+regions = ["us-east-1", "eu-west-1", "eu-west-2"]
+# Prices used when the project's region has no column here (the estimate says so).
+fallback_region = "us-east-1"
+basis = "AWS on-demand list prices (Linux, shared tenancy), USD, excluding tax, free tier, Savings Plans and reserved capacity"
+
+[free]
+virtual_network = "VPCs cost nothing. Flow logs are billed as ingestion on the log group they write to."
+subnet = "Subnets cost nothing."
+route_table = "Route tables cost nothing."
+security_group = "Security groups cost nothing."
+internet_gateway = "Internet gateways cost nothing; data transfer out to the internet is billed per GB and is not estimated."
+iam_role = "IAM roles and policies cost nothing."
+kubernetes_workload = "Pods run on the cluster's node pools, which are priced on the cluster and pool lines."
+budget = "AWS Budgets: monitoring budgets cost nothing (the first two action-enabled budgets are free too)."
+tls_certificate = "Public ACM certificates cost nothing."
+dns_record = "Records are part of the hosted zone; queries are priced on the zone's line."
+network_peering = "A peering connection costs nothing to create; traffic across it is billed per GB and is not estimated."
+
+[not_estimated]
+
+# ------------------------------------------------------------------ compute
+
+[tables.ec2]
+unit = "hour"
+description = "EC2 on-demand instance, Linux, shared tenancy"
+source = "AWS EC2 on-demand pricing (aws.amazon.com/ec2/pricing/on-demand)"
+checked = "2026-09-29: every row and region against the EC2 pricing page's JSON (b0.p.awsstatic.com meteredUnitMaps ec2-ondemand-without-sec-sel, Linux). g6 is not offered in eu-west-1, so that column is gone (the estimate falls back to us-east-1 there)"
+
+[tables.ec2.rows]
+"t3.micro"     = { us-east-1 = 0.0104, eu-west-1 = 0.0114, eu-west-2 = 0.0118 }
+"t3.small"     = { us-east-1 = 0.0208, eu-west-1 = 0.0228, eu-west-2 = 0.0236 }
+"t3.medium"    = { us-east-1 = 0.0416, eu-west-1 = 0.0456, eu-west-2 = 0.0472 }
+"t3.large"     = { us-east-1 = 0.0832, eu-west-1 = 0.0912, eu-west-2 = 0.0944 }
+"t3.xlarge"    = { us-east-1 = 0.1664, eu-west-1 = 0.1824, eu-west-2 = 0.1888 }
+"t3.2xlarge"   = { us-east-1 = 0.3328, eu-west-1 = 0.3648, eu-west-2 = 0.3776 }
+"m5.large"     = { us-east-1 = 0.096, eu-west-1 = 0.107, eu-west-2 = 0.111 }
+"m5.xlarge"    = { us-east-1 = 0.192, eu-west-1 = 0.214, eu-west-2 = 0.222 }
+"m5.2xlarge"   = { us-east-1 = 0.384, eu-west-1 = 0.428, eu-west-2 = 0.444 }
+"m6i.large"    = { us-east-1 = 0.096, eu-west-1 = 0.107, eu-west-2 = 0.111 }
+"m6i.xlarge"   = { us-east-1 = 0.192, eu-west-1 = 0.214, eu-west-2 = 0.222 }
+"m6i.2xlarge"  = { us-east-1 = 0.384, eu-west-1 = 0.428, eu-west-2 = 0.444 }
+"c5.large"     = { us-east-1 = 0.085, eu-west-1 = 0.096, eu-west-2 = 0.101 }
+"c5.xlarge"    = { us-east-1 = 0.17, eu-west-1 = 0.192, eu-west-2 = 0.202 }
+"g4dn.xlarge"  = { us-east-1 = 0.526, eu-west-1 = 0.587, eu-west-2 = 0.615 }
+"g4dn.2xlarge" = { us-east-1 = 0.752, eu-west-1 = 0.838, eu-west-2 = 0.88 }
+"g5.xlarge"    = { us-east-1 = 1.006, eu-west-1 = 1.123, eu-west-2 = 1.277 }
+"g5.2xlarge"   = { us-east-1 = 1.212, eu-west-1 = 1.35296, eu-west-2 = 1.53849 }
+"g5.4xlarge"   = { us-east-1 = 1.624, eu-west-1 = 1.81287, eu-west-2 = 2.06148 }
+"g6.xlarge"    = { us-east-1 = 0.8048, eu-west-2 = 1.0216 }
+"g6.2xlarge"   = { us-east-1 = 0.9776, eu-west-2 = 1.24095 }
+"p3.2xlarge"   = { us-east-1 = 3.06, eu-west-1 = 3.305, eu-west-2 = 3.589 }
+
+[tables.ebs]
+unit = "GB-month"
+description = "EBS volume storage (node and instance root volumes)"
+source = "AWS EBS pricing (aws.amazon.com/ebs/pricing)"
+checked = "2026-09-29: both rows, all regions, against b0.p.awsstatic.com meteredUnitMaps ec2/ebs.json ('Storage General Purpose gp3/gp2 GB Mo'). gp3 IOPS above 3,000 and throughput above 125 MB/s are billed extra and not modelled"
+
+[tables.ebs.rows]
+gp3 = { us-east-1 = 0.08, eu-west-1 = 0.088, eu-west-2 = 0.0928 }
+gp2 = { us-east-1 = 0.10, eu-west-1 = 0.11, eu-west-2 = 0.116 }
+
+[tables.eks]
+unit = "hour"
+description = "EKS cluster control plane, standard support"
+source = "AWS EKS pricing (aws.amazon.com/eks/pricing)"
+checked = "2026-09-29: Price List Bulk API (pricing.us-east-1.amazonaws.com) region offers, AmazonEKS usage type AmazonEKS-Hours:perCluster, all three regions. A cluster on a version in extended support adds $0.50 an hour (AmazonEKS-Hours:extendedSupport; not modelled)"
+
+[tables.eks.rows]
+cluster = { "*" = 0.10 }
+
+[tables.fargate]
+unit = "hour"
+description = "ECS on Fargate, Linux/x86, per vCPU-hour and per GB-hour"
+source = "AWS Fargate pricing (aws.amazon.com/fargate/pricing)"
+checked = "2026-09-29: Price List Bulk API (pricing.us-east-1.amazonaws.com) region offers, AmazonECS Fargate-vCPU-Hours:perCPU and Fargate-GB-Hours, all three regions"
+
+[tables.fargate.rows]
+vcpu = { unit = "vCPU-hour", us-east-1 = 0.04048, eu-west-1 = 0.04048, eu-west-2 = 0.04656 }
+gb   = { unit = "GB-hour", us-east-1 = 0.004445, eu-west-1 = 0.004445, eu-west-2 = 0.00511 }
+
+[tables.lambda]
+unit = "GB-second"
+description = "Lambda, x86, per GB-second of duration and per million requests"
+source = "AWS Lambda pricing (aws.amazon.com/lambda/pricing)"
+checked = "2026-09-29: Price List Bulk API (pricing.us-east-1.amazonaws.com) region offers, AWSLambda Lambda-GB-Second (first tier, up to 6 billion GB-seconds a month) and Request; the same in all three regions"
+
+[tables.lambda.rows]
+duration = { "*" = 0.0000166667 }
+requests = { unit = "million requests", "*" = 0.20 }
+
+# ------------------------------------------------------------------ databases
+
+[tables.rds_postgres]
+unit = "hour"
+description = "RDS for PostgreSQL, single-AZ on-demand instance (Multi-AZ is twice this)"
+source = "AWS RDS for PostgreSQL pricing (aws.amazon.com/rds/postgresql/pricing)"
+checked = "2026-09-29: every row and region against b0.p.awsstatic.com meteredUnitMaps rds/rds-postgresql-ondemand.json, 'Single-AZ' instance entries. The Multi-AZ list price is at or slightly above twice single-AZ (db.t4g.medium eu-west-2: 0.145 vs 2 x 0.072)"
+
+[tables.rds_postgres.rows]
+"db.t3.micro"  = { us-east-1 = 0.018, eu-west-1 = 0.02, eu-west-2 = 0.021 }
+"db.t3.small"  = { us-east-1 = 0.036, eu-west-1 = 0.039, eu-west-2 = 0.041 }
+"db.t3.medium" = { us-east-1 = 0.072, eu-west-1 = 0.078, eu-west-2 = 0.082 }
+"db.t3.large"  = { us-east-1 = 0.145, eu-west-1 = 0.156, eu-west-2 = 0.164 }
+"db.t4g.micro"  = { us-east-1 = 0.016, eu-west-1 = 0.017, eu-west-2 = 0.018 }
+"db.t4g.small"  = { us-east-1 = 0.032, eu-west-1 = 0.035, eu-west-2 = 0.036 }
+"db.t4g.medium" = { us-east-1 = 0.065, eu-west-1 = 0.069, eu-west-2 = 0.072 }
+"db.t4g.large"  = { us-east-1 = 0.129, eu-west-1 = 0.138, eu-west-2 = 0.145 }
+"db.m5.large"   = { us-east-1 = 0.178, eu-west-1 = 0.197, eu-west-2 = 0.206 }
+"db.m6g.large"  = { us-east-1 = 0.159, eu-west-1 = 0.176, eu-west-2 = 0.184 }
+"db.m6i.large"  = { us-east-1 = 0.178, eu-west-1 = 0.197, eu-west-2 = 0.206 }
+"db.m7g.large"  = { us-east-1 = 0.168, eu-west-1 = 0.186, eu-west-2 = 0.1952 }
+"db.r6g.large"  = { us-east-1 = 0.225, eu-west-1 = 0.252, eu-west-2 = 0.264 }
+
+[tables.rds_mysql]
+unit = "hour"
+description = "RDS for MySQL, single-AZ on-demand instance (Multi-AZ is twice this)"
+source = "AWS RDS for MySQL pricing (aws.amazon.com/rds/mysql/pricing)"
+checked = "2026-09-29: every row and region against b0.p.awsstatic.com meteredUnitMaps rds/rds-mysql-ondemand.json, 'Single-AZ' instance entries"
+
+[tables.rds_mysql.rows]
+"db.t3.micro"  = { us-east-1 = 0.017, eu-west-1 = 0.018, eu-west-2 = 0.019 }
+"db.t3.small"  = { us-east-1 = 0.034, eu-west-1 = 0.036, eu-west-2 = 0.038 }
+"db.t3.medium" = { us-east-1 = 0.068, eu-west-1 = 0.072, eu-west-2 = 0.076 }
+"db.t3.large"  = { us-east-1 = 0.136, eu-west-1 = 0.144, eu-west-2 = 0.152 }
+"db.t4g.micro"  = { us-east-1 = 0.016, eu-west-1 = 0.017, eu-west-2 = 0.018 }
+"db.t4g.small"  = { us-east-1 = 0.032, eu-west-1 = 0.035, eu-west-2 = 0.036 }
+"db.t4g.medium" = { us-east-1 = 0.065, eu-west-1 = 0.069, eu-west-2 = 0.072 }
+"db.t4g.large"  = { us-east-1 = 0.129, eu-west-1 = 0.138, eu-west-2 = 0.145 }
+"db.m5.large"   = { us-east-1 = 0.171, eu-west-1 = 0.189, eu-west-2 = 0.198 }
+"db.m6g.large"  = { us-east-1 = 0.152, eu-west-1 = 0.168, eu-west-2 = 0.176 }
+"db.m6i.large"  = { us-east-1 = 0.171, eu-west-1 = 0.189, eu-west-2 = 0.198 }
+"db.m7g.large"  = { us-east-1 = 0.168, eu-west-1 = 0.186, eu-west-2 = 0.1952 }
+"db.r6g.large"  = { us-east-1 = 0.215, eu-west-1 = 0.237, eu-west-2 = 0.251 }
+
+[tables.rds_storage]
+unit = "GB-month"
+description = "RDS storage, single-AZ (Multi-AZ is twice this). Backup storage up to the database size is free"
+source = "AWS RDS pricing, storage section"
+checked = "2026-09-29: all rows and regions against b0.p.awsstatic.com meteredUnitMaps rds/rds-postgresql-ondemand.json ('Database Storage Single AZ General Purpose-GP3' / 'General Purpose' / 'Provisioned IOPS' / 'Provisioned IOPS-IO2'); Multi-AZ storage is exactly twice. Provisioned IOPS and gp3 IOPS/throughput above the baseline are billed separately and not modelled"
+
+[tables.rds_storage.rows]
+gp3 = { us-east-1 = 0.115, eu-west-1 = 0.127, eu-west-2 = 0.133 }
+gp2 = { us-east-1 = 0.115, eu-west-1 = 0.127, eu-west-2 = 0.133 }
+io1 = { us-east-1 = 0.125, eu-west-1 = 0.138, eu-west-2 = 0.145 }
+io2 = { us-east-1 = 0.125, eu-west-1 = 0.138, eu-west-2 = 0.145 }
+
+[tables.elasticache]
+unit = "hour"
+description = "ElastiCache for Redis OSS, on-demand node"
+source = "AWS ElastiCache pricing (aws.amazon.com/elasticache/pricing)"
+checked = "2026-09-29: Price List Bulk API (pricing.us-east-1.amazonaws.com) region offers, AmazonElastiCache NodeUsage:<node> with operation CreateCacheCluster:0002 (Redis OSS), all rows and regions. Valkey nodes are about 20% cheaper (cache.t4g.medium us-east-1: 0.052)"
+
+[tables.elasticache.rows]
+"cache.t3.micro"  = { us-east-1 = 0.017, eu-west-1 = 0.018, eu-west-2 = 0.019 }
+"cache.t3.small"  = { us-east-1 = 0.034, eu-west-1 = 0.036, eu-west-2 = 0.038 }
+"cache.t3.medium" = { us-east-1 = 0.068, eu-west-1 = 0.072, eu-west-2 = 0.076 }
+"cache.t4g.micro"  = { us-east-1 = 0.016, eu-west-1 = 0.017, eu-west-2 = 0.018 }
+"cache.t4g.medium" = { us-east-1 = 0.065, eu-west-1 = 0.068, eu-west-2 = 0.072 }
+"cache.m5.large"  = { us-east-1 = 0.156, eu-west-1 = 0.172, eu-west-2 = 0.18 }
+"cache.m6g.large" = { us-east-1 = 0.149, eu-west-1 = 0.164, eu-west-2 = 0.171 }
+
+[tables.dynamodb]
+unit = "million requests"
+description = "DynamoDB on-demand (pay per request) table, Standard table class"
+source = "AWS DynamoDB on-demand pricing (aws.amazon.com/dynamodb/pricing/on-demand)"
+checked = "2026-09-29: Price List Bulk API (pricing.us-east-1.amazonaws.com) region offers, AmazonDynamoDB WriteRequestUnits / ReadRequestUnits (Standard class, on-demand) and TimedStorage-ByteHrs past the free 25 GB, all three regions"
+
+[tables.dynamodb.rows]
+write   = { us-east-1 = 0.625, eu-west-1 = 0.705, eu-west-2 = 0.7423 }
+read    = { us-east-1 = 0.125, eu-west-1 = 0.1415, eu-west-2 = 0.1487 }
+storage = { unit = "GB-month", us-east-1 = 0.25, eu-west-1 = 0.283, eu-west-2 = 0.29715 }
+
+# ------------------------------------------------------------------ storage
+
+[tables.s3]
+unit = "GB-month"
+description = "S3 Standard storage and requests"
+source = "AWS S3 pricing (aws.amazon.com/s3/pricing)"
+checked = "2026-09-29: Price List Bulk API (pricing.us-east-1.amazonaws.com) region offers, AmazonS3 TimedStorage-ByteHrs (first 50 TB), Requests-Tier1 (PUT/COPY/POST/LIST) and Requests-Tier2 (GET), all three regions"
+
+[tables.s3.rows]
+standard = { us-east-1 = 0.023, eu-west-1 = 0.023, eu-west-2 = 0.024 }
+put      = { unit = "1,000 requests", us-east-1 = 0.005, eu-west-1 = 0.005, eu-west-2 = 0.0053 }
+get      = { unit = "1,000 requests", us-east-1 = 0.0004, eu-west-1 = 0.0004, eu-west-2 = 0.00042 }
+
+[tables.efs]
+unit = "GB-month"
+description = "EFS Standard storage (elastic throughput charges are not included)"
+source = "AWS EFS pricing (aws.amazon.com/efs/pricing)"
+checked = "2026-09-29: Price List Bulk API (pricing.us-east-1.amazonaws.com) region offers, AmazonEFS TimedStorage-ByteHrs (Standard), all three regions"
+
+[tables.efs.rows]
+standard = { us-east-1 = 0.30, eu-west-1 = 0.33, eu-west-2 = 0.33 }
+
+[tables.ecr]
+unit = "GB-month"
+description = "ECR private repository storage"
+source = "AWS ECR pricing (aws.amazon.com/ecr/pricing)"
+checked = "2026-09-29: Price List Bulk API (pricing.us-east-1.amazonaws.com) region offers, AmazonECR TimedStorage-ByteHrs; $0.10 in all three regions"
+
+[tables.ecr.rows]
+storage = { "*" = 0.10 }
+
+# ------------------------------------------------------------------ messaging
+
+[tables.sqs]
+unit = "million requests"
+description = "SQS requests (a message is about three: send, receive, delete)"
+source = "AWS SQS pricing (aws.amazon.com/sqs/pricing)"
+checked = "2026-09-29: Price List Bulk API (pricing.us-east-1.amazonaws.com) region offers, AWSQueueService first-tier Requests-RBP / Requests-Tier1 (standard) and Requests-FIFO-* (FIFO); the same in all three regions"
+
+[tables.sqs.rows]
+standard = { "*" = 0.40 }
+fifo     = { "*" = 0.50 }
+
+[tables.sns]
+unit = "million requests"
+description = "SNS publishes and email deliveries"
+source = "AWS SNS pricing (aws.amazon.com/sns/pricing)"
+checked = "2026-09-29: Price List Bulk API (pricing.us-east-1.amazonaws.com) region offers, AmazonSNS Requests-Tier1 and DeliveryAttempts-SMTP past the free tier; the same in all three regions"
+
+[tables.sns.rows]
+publish = { "*" = 0.50 }
+email   = { unit = "100,000 notifications", "*" = 2.00 }
+
+# ------------------------------------------------------------------ networking
+
+[tables.nat_gateway]
+unit = "hour"
+description = "NAT gateway, per hour and per GB processed"
+source = "Amazon VPC pricing (aws.amazon.com/vpc/pricing)"
+checked = "2026-09-29: both rows, all regions, against b0.p.awsstatic.com meteredUnitMaps ec2/natgateway.json ('Hourly charge for NAT Gateways', 'Charge for per GB data processed by NatGateways')"
+
+[tables.nat_gateway.rows]
+hour = { us-east-1 = 0.045, eu-west-1 = 0.048, eu-west-2 = 0.050 }
+data = { unit = "GB", us-east-1 = 0.045, eu-west-1 = 0.048, eu-west-2 = 0.050 }
+
+[tables.public_ipv4]
+unit = "hour"
+description = "Public IPv4 address in use (an Elastic IP on a NAT gateway, one per load balancer zone)"
+source = "Amazon VPC pricing, public IPv4 address section"
+checked = "2026-09-29: b0.p.awsstatic.com meteredUnitMaps vpc/vpc.json 'Hourly charge for In use Public IPv4 Addresses'; $0.005 in all three regions"
+
+[tables.public_ipv4.rows]
+address = { "*" = 0.005 }
+
+[tables.elb]
+unit = "hour"
+description = "Elastic Load Balancing: Application and Network Load Balancer hours and capacity units"
+source = "AWS Elastic Load Balancing pricing (aws.amazon.com/elasticloadbalancing/pricing)"
+checked = "2026-09-29: Price List Bulk API (pricing.us-east-1.amazonaws.com) region offers, AWSELB LoadBalancerUsage and LCUUsage with operation LoadBalancing:Application / LoadBalancing:Network, all rows and regions (NLCU in eu-west-2 is 0.006, not 0.0063)"
+
+[tables.elb.rows]
+alb      = { us-east-1 = 0.0225, eu-west-1 = 0.0252, eu-west-2 = 0.02646 }
+alb_lcu  = { unit = "LCU-hour", us-east-1 = 0.008, eu-west-1 = 0.008, eu-west-2 = 0.0084 }
+nlb      = { us-east-1 = 0.0225, eu-west-1 = 0.0252, eu-west-2 = 0.02646 }
+nlb_nlcu = { unit = "NLCU-hour", us-east-1 = 0.006, eu-west-1 = 0.006, eu-west-2 = 0.006 }
+
+[tables.vpc_endpoint]
+unit = "hour"
+description = "Interface VPC endpoint (PrivateLink), per endpoint per availability zone and per GB processed. Gateway endpoints (S3, DynamoDB) are free"
+source = "AWS PrivateLink pricing (aws.amazon.com/privatelink/pricing)"
+checked = "2026-09-29: b0.p.awsstatic.com meteredUnitMaps vpc/vpc.json 'Hourly charge for VPC Endpoints' and the first data tier (0-1 PB, then 0.006 and 0.004), all three regions"
+
+[tables.vpc_endpoint.rows]
+interface = { us-east-1 = 0.01, eu-west-1 = 0.011, eu-west-2 = 0.011 }
+data      = { unit = "GB", "*" = 0.01 }
+
+[tables.cloudfront]
+unit = "GB"
+description = "CloudFront data transfer out (first 10 TB) and HTTPS requests, for viewers on the region's continent (United States edge for us-east-1, Europe for the eu- regions)"
+source = "Amazon CloudFront pricing (aws.amazon.com/cloudfront/pricing)"
+checked = "2026-09-29: Price List Bulk API (pricing.us-east-1.amazonaws.com) region offers (aws-other offer), US-/EU-DataTransfer-Out-Bytes first tier and US-/EU-Requests-Tier2-HTTPS; HTTPS requests cost $0.012 per 10,000 in Europe, so that row is now per region"
+
+[tables.cloudfront.rows]
+data_out = { "*" = 0.085 }
+https    = { unit = "10,000 requests", us-east-1 = 0.01, eu-west-1 = 0.012, eu-west-2 = 0.012 }
+
+[tables.wafv2]
+unit = "month"
+description = "AWS WAF: per web ACL, per rule (a managed rule group counts as one), per million requests"
+source = "AWS WAF pricing (aws.amazon.com/waf/pricing)"
+checked = "2026-09-29: Price List Bulk API (pricing.us-east-1.amazonaws.com) region offers, awswaf WebACLV2, RuleV2 and RequestV2-Tier1 (up to 1,500 WCU; more WCU costs more per request); the same in all three regions"
+
+[tables.wafv2.rows]
+web_acl  = { "*" = 5.00 }
+rule     = { "*" = 1.00 }
+requests = { unit = "million requests", "*" = 0.60 }
+
+[tables.route53]
+unit = "month"
+description = "Route 53 hosted zone and standard queries"
+source = "Amazon Route 53 pricing (aws.amazon.com/route53/pricing)"
+checked = "2026-09-29: Price List Bulk API (pricing.us-east-1.amazonaws.com) region offers (aws-other offer), HostedZone (first 25 zones; $0.10 after) and DNS-Queries (first billion)"
+
+[tables.route53.rows]
+hosted_zone = { "*" = 0.50 }
+queries     = { unit = "million queries", "*" = 0.40 }
+
+# ------------------------------------------------------------------ security
+
+[tables.kms]
+unit = "month"
+description = "KMS customer managed key and API requests"
+source = "AWS KMS pricing (aws.amazon.com/kms/pricing)"
+checked = "2026-09-29: Price List Bulk API (pricing.us-east-1.amazonaws.com) region offers, awskms <region>-KMS-Keys and <region>-KMS-Requests (symmetric); the same in all three regions"
+
+[tables.kms.rows]
+key      = { "*" = 1.00 }
+requests = { unit = "10,000 requests", "*" = 0.03 }
+
+[tables.secrets_manager]
+unit = "month"
+description = "Secrets Manager secret and API calls"
+source = "AWS Secrets Manager pricing (aws.amazon.com/secrets-manager/pricing)"
+checked = "2026-09-29: Price List Bulk API (pricing.us-east-1.amazonaws.com) region offers, AWSSecretsManager secrets and API requests; the same in all three regions"
+
+[tables.secrets_manager.rows]
+secret = { "*" = 0.40 }
+api    = { unit = "10,000 API calls", "*" = 0.05 }
+
+[tables.cognito]
+unit = "MAU"
+description = "Cognito user pool, Essentials tier, per monthly active user above the free 10,000"
+source = "Amazon Cognito pricing (aws.amazon.com/cognito/pricing)"
+checked = "2026-09-29: Price List Bulk API (pricing.us-east-1.amazonaws.com) region offers, AmazonCognito CognitoEssentialsMAU (first tier); the same in all three regions"
+
+[tables.cognito.rows]
+essentials_mau = { "*" = 0.015 }
+
+[tables.cloudtrail]
+unit = "100,000 events"
+description = "CloudTrail: the first copy of management events is free; data events are charged"
+source = "AWS CloudTrail pricing (aws.amazon.com/cloudtrail/pricing)"
+checked = "2026-09-29: Price List Bulk API (pricing.us-east-1.amazonaws.com) region offers, AWSCloudTrail DataEventsRecorded ($0.000001 per event); the same in all three regions"
+
+[tables.cloudtrail.rows]
+data_events = { "*" = 0.10 }
+
+# ------------------------------------------------------------------ monitoring
+
+[tables.cloudwatch_logs]
+unit = "GB"
+description = "CloudWatch Logs standard class: ingestion per GB and storage per GB-month"
+source = "Amazon CloudWatch pricing (aws.amazon.com/cloudwatch/pricing)"
+checked = "2026-09-29: Price List Bulk API (pricing.us-east-1.amazonaws.com) region offers, AmazonCloudWatch DataProcessing-Bytes (operation PutLogEvents, Standard class) and TimedStorage-ByteHrs, all three regions"
+
+[tables.cloudwatch_logs.rows]
+ingest  = { us-east-1 = 0.50, eu-west-1 = 0.57, eu-west-2 = 0.5985 }
+storage = { unit = "GB-month", us-east-1 = 0.03, eu-west-1 = 0.03, eu-west-2 = 0.0315 }
+
+[tables.cloudwatch_alarms]
+unit = "month"
+description = "CloudWatch standard-resolution metric alarm"
+source = "Amazon CloudWatch pricing, alarms section"
+checked = "2026-09-29: Price List Bulk API (pricing.us-east-1.amazonaws.com) region offers, AmazonCloudWatch CW:AlarmMonitorUsage; the same in all three regions"
+
+[tables.cloudwatch_alarms.rows]
+standard = { "*" = 0.10 }

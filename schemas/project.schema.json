@@ -118,6 +118,21 @@
         "kubernetes_manifests": {
           "description": "Also write a `k8s/` directory of Kubernetes manifests beside the Terraform: per\nworkload a Namespace, ServiceAccount, Deployment, Service, volumes and autoscaling,\nfilled in from `terraform output` by a small render script. Off by default; left\nout of the file while off so older projects do not change on save.",
           "type": "boolean"
+        },
+        "cost_assumptions": {
+          "description": "Usage assumptions behind the cost estimate (`ttg_codegen::cost`): project-wide\nvalues and per-entity overrides. Empty means every default.",
+          "$ref": "#/$defs/CostAssumptions"
+        },
+        "cost_currency": {
+          "description": "Also show cost estimates in this currency, at a fixed rate. Prices are USD.",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/DisplayCurrency"
+            },
+            {
+              "type": "null"
+            }
+          ]
         }
       }
     },
@@ -147,6 +162,54 @@
       },
       "required": [
         "type"
+      ]
+    },
+    "CostAssumptions": {
+      "description": "Usage assumptions behind the cost estimate, keyed by assumption name\n(`bucket_gb`, `pool_node_hours_per_day`, …; `ttg_codegen::cost::ASSUMPTIONS` lists\nthem with their defaults). A key that is absent takes the estimator's default, so an\nempty value is the common case and is not written to the file.",
+      "type": "object",
+      "properties": {
+        "values": {
+          "description": "Project-wide values, e.g. `{ \"bucket_gb\": 200, \"log_ingest_gb\": 2 }`.",
+          "type": "object",
+          "additionalProperties": {
+            "type": "number",
+            "format": "double"
+          }
+        },
+        "entities": {
+          "description": "Per-entity overrides: entity id → assumption → value, e.g. one bucket that holds\ntwo terabytes of recordings. They win over `values`. Entries for entities that no\nlonger exist are ignored.",
+          "type": "object",
+          "additionalProperties": {
+            "type": "object",
+            "additionalProperties": {
+              "type": "number",
+              "format": "double"
+            }
+          }
+        }
+      }
+    },
+    "DisplayCurrency": {
+      "description": "Show estimates in another currency too. Prices are bundled in US dollars; this is a\nfixed rate the user sets and dates, never fetched.",
+      "type": "object",
+      "properties": {
+        "code": {
+          "description": "ISO code shown next to the converted figures, e.g. `GBP`.",
+          "type": "string"
+        },
+        "rate": {
+          "description": "Units of `code` per US dollar, e.g. `0.75`.",
+          "type": "number",
+          "format": "double"
+        },
+        "date": {
+          "description": "When the rate was taken, free text (e.g. `2026-09-29`), shown beside it.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "code",
+        "rate"
       ]
     },
     "Container": {
