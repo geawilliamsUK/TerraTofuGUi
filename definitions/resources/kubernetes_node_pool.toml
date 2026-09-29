@@ -4,14 +4,17 @@
 # default pool; every other pool — the spot pool, the GPU pool that scales to zero — is a
 # node pool node drawn next to it and linked with 'Runs on'.
 #
-#   AWS:   aws_eks_node_group, reusing the cluster's node IAM role (its `node_role` block).
+#   AWS:   aws_eks_node_group, reusing the cluster's node IAM role (its `node_role` block),
+#          on a launch template of its own (IMDSv2, encrypted root volume, node groups).
 #   Azure: azurerm_kubernetes_cluster_node_pool on the linked cluster.
 #   GCP:   google_container_node_pool on the linked cluster.
 #
 # The pool's subnets default to the cluster's: a relation source cannot reach the target's
 # own relations, so the fallback reads the subnet ids straight off the emitted cluster
 # resource (`vpc_config.0.subnet_ids` / `default_node_pool.0.vnet_subnet_id`). Link
-# 'Subnets' explicitly only to pin the pool to a smaller set than the cluster's.
+# 'Subnets' explicitly only to pin the pool to a smaller set than the cluster's. Security
+# groups default to the cluster's the same way, read off the cluster's default-pool launch
+# template (AWS) or node pool (GCP).
 
 schema_version = 2
 
@@ -99,11 +102,34 @@ required = true
 options = ["NoSchedule", "PreferNoSchedule", "NoExecute"]
 default = "NoSchedule"
 
+[[fields]]
+name = "disk_size_gb"
+label = "Node disk size (GiB)"
+type = "int"
+description = "Root disk of each node. Empty keeps the provider's default (20 GiB from the EKS node image, a size-dependent default on AKS, 100 GB on GKE); GPU images and large model caches usually want more."
+
 [[relations]]
 kind = "attachment"
 label = "Runs on"
 targets = ["kubernetes_cluster"]
 cardinality = "one"
+
+# Like the subnets, the security groups default to the cluster's: link groups here only to
+# give this pool a different set. On AWS the cluster's own security group stays on the
+# nodes either way. Azure attaches network security groups to subnets, not to pools.
+[[relations]]
+kind = "attribute_reference"
+label = "Uses security group (defaults to the cluster's)"
+providers = ["aws", "gcp"]
+targets = ["security_group"]
+cardinality = "many"
+
+[[relations]]
+kind = "encrypted_with"
+label = "Encrypt node disks with"
+providers = ["aws", "gcp"]
+targets = ["encryption_key"]
+cardinality = "optional"
 
 [[relations]]
 kind = "network_membership"
@@ -128,6 +154,43 @@ description = "Overrides the size class. GPU pools need a GPU family (g5, g6, p4
 [[providers.aws.checks]]
 when = { all = [ { field = "gpu" }, { provider_field = "instance_type", absent = true } ] }
 message = "\"{name}\" asks for GPU nodes but no AWS instance type is set; the size class only picks CPU machines, so set 'Instance type' to a GPU family such as g5.xlarge"
+
+# The same launch template the cluster gives its default pool: IMDSv2 only (hop limit 2
+# for the pods), an encrypted gp3 root volume, and the node security groups. With groups
+# of its own the pool lists the cluster security group first (EKS leaves it off nodes
+# whose template names groups); without, it takes the cluster's default-pool template's
+# list, which already does.
+[[providers.aws.blocks]]
+key = "lt"
+resource = "aws_launch_template"
+
+[providers.aws.blocks.args]
+name_prefix            = { func = "format", args = [ { value = "%s-%s-" }, { relation = "attachment", target_type = "kubernetes_cluster", field = "name", transform = "kebab" }, { field = "name", transform = "kebab" } ] }
+vpc_security_group_ids = { if = { relation = "attribute_reference", target_type = "security_group" }, then = { func = "concat", args = [ { relation = "attachment", target_type = "kubernetes_cluster", attr = "vpc_config.0.cluster_security_group_id", wrap = "list" }, { relation = "attribute_reference", target_type = "security_group", attr = "id", wrap = "list" } ] }, else = { relation = "attachment", target_type = "kubernetes_cluster", block = "nodes_lt", attr = "vpc_security_group_ids" } }
+
+[[providers.aws.blocks.nested]]
+block = "metadata_options"
+
+[providers.aws.blocks.nested.args]
+http_endpoint               = { value = "enabled" }
+http_tokens                 = { value = "required" }
+http_put_response_hop_limit = { value = 2 }
+
+[[providers.aws.blocks.nested]]
+block = "block_device_mappings"
+
+[providers.aws.blocks.nested.args]
+device_name = { value = "/dev/xvda" }
+
+[[providers.aws.blocks.nested.nested]]
+block = "ebs"
+
+[providers.aws.blocks.nested.nested.args]
+volume_size           = { field = "disk_size_gb", optional = true }
+volume_type           = { value = "gp3" }
+encrypted             = { value = true }
+kms_key_id            = { relation = "encrypted_with", attr = "arn", optional = true }
+delete_on_termination = { value = true }
 
 [[providers.aws.blocks]]
 key = "main"
@@ -154,6 +217,14 @@ block = "scaling_config"
 desired_size = { field = "desired_nodes" }
 min_size     = { field = "min_nodes" }
 max_size     = { field = "max_nodes" }
+
+# The disk size lives in the template: EKS rejects `disk_size` next to a launch template.
+[[providers.aws.blocks.nested]]
+block = "launch_template"
+
+[providers.aws.blocks.nested.args]
+id      = { self_block = "lt", attr = "id" }
+version = { self_block = "lt", attr = "latest_version" }
 
 [[providers.aws.blocks.nested]]
 block = "taint"
@@ -202,6 +273,14 @@ description = "Overrides the size class, e.g. Standard_NC6s_v3 for a GPU pool."
 when = { all = [ { field = "gpu" }, { provider_field = "instance_type", absent = true } ] }
 message = "\"{name}\" asks for GPU nodes but no Azure VM size is set; set 'VM size' to an N-series size such as Standard_NC6s_v3"
 
+[[providers.azure.checks]]
+when = { relation = "attribute_reference", target_type = "security_group" }
+message = "\"{name}\" uses a Security Group, which Azure cannot attach to a node pool: a network security group guards a subnet. Nothing is generated for the link; associate the group with the pool's subnet instead"
+
+[[providers.azure.checks]]
+when = { relation = "encrypted_with" }
+message = "\"{name}\" is linked to an Encryption Key, which the Azure mapping cannot use: customer-managed node disks need a disk encryption set with its own identity and Key Vault access, which the diagram does not model. The node disks keep platform-managed encryption"
+
 [[providers.azure.blocks]]
 key = "main"
 resource = "azurerm_kubernetes_cluster_node_pool"
@@ -215,6 +294,7 @@ auto_scaling_enabled  = { value = true }
 min_count             = { field = "min_nodes" }
 max_count             = { field = "max_nodes" }
 vnet_subnet_id        = { relation = "network_membership", attr = "id", fallback = { relation = "attachment", target_type = "kubernetes_cluster", attr = "default_node_pool.0.vnet_subnet_id" } }
+os_disk_size_gb       = { field = "disk_size_gb", optional = true }
 node_labels           = { field = "labels", wrap = "map" }
 node_taints           = { if = { field = "taints" }, then = { func = "formatlist", args = [ { value = "%s=%s:%s" }, { field = "taints", column = "key" }, { field = "taints", column = "value" }, { field = "taints", column = "effect" } ] } }
 # `gpu_driver` installs the NVIDIA driver; `gpu_instance` is the MIG partition profile and
@@ -273,10 +353,15 @@ max_node_count = { field = "max_nodes" }
 block = "node_config"
 
 [providers.gcp.blocks.nested.args]
-machine_type = { provider_field = "instance_type", fallback = { map = "size", table = { small = "e2-medium", medium = "e2-standard-4", large = "e2-standard-8", xlarge = "e2-standard-16" } } }
-oauth_scopes = { value = ["https://www.googleapis.com/auth/cloud-platform"] }
-spot         = { field = "spot" }
-labels       = { field = "labels", wrap = "map" }
+machine_type      = { provider_field = "instance_type", fallback = { map = "size", table = { small = "e2-medium", medium = "e2-standard-4", large = "e2-standard-8", xlarge = "e2-standard-16" } } }
+oauth_scopes      = { value = ["https://www.googleapis.com/auth/cloud-platform"] }
+spot              = { field = "spot" }
+labels            = { field = "labels", wrap = "map" }
+# The cluster's node tag plus the linked groups' tags; without groups of its own the pool
+# carries exactly what the cluster's default pool does.
+tags              = { if = { relation = "attribute_reference", target_type = "security_group" }, then = { func = "concat", args = [ { relation = "attachment", target_type = "kubernetes_cluster", block = "node_tag", attr = "output", wrap = "list" }, { relation = "attribute_reference", target_type = "security_group", block = "tag", attr = "output", wrap = "list" } ] }, else = { relation = "attachment", target_type = "kubernetes_cluster", block = "nodes", attr = "node_config.0.tags" } }
+disk_size_gb      = { field = "disk_size_gb", optional = true }
+boot_disk_kms_key = { relation = "encrypted_with", attr = "id", optional = true }
 
 [[providers.gcp.blocks.nested.nested]]
 block = "guest_accelerator"

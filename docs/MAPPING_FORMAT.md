@@ -251,7 +251,7 @@ a single item `value`). Top-level repeated resources are named `<slug>_<key>_<n>
 | `{ item_index = { base = 100, step = 10 } }` | `base + step × row index`, e.g. NSG priorities |
 | `{ map = "protocol", table = … }` | `map` looks in the row first, then in the entity's fields |
 | `{ template = "{item.from}-{item.to}" }` | `item.` placeholders; `{item.index}` is the row index |
-| `when = { item = "direction", equals = "ingress" }` | row filter; `not_equals` and `equals_item = "other"` also work |
+| `when = { item = "direction", equals = "ingress" }` | row filter; `not_equals` and `equals_item = "other"` also work, and `ref_type` on an `entity_ref` item (below) |
 
 A `self_block` reference to a repeated block yields the list of all instances.
 
@@ -415,6 +415,23 @@ holds the id of another node (the inspector shows a dropdown). Inside the row,
 `{ item_ref = "source_group", attr = "id" }` is a traversal to that node's primary block
 (`block = "…"` for a secondary one). Used by Security Group rules whose source is another
 group.
+
+An `entity_ref` item may name more than one target type, and the types usually render
+differently. The condition `{ item = "source_group", ref_type = "kubernetes_cluster" }`
+holds when the item points at an entity of that type, so a mapping branches on it with
+`if` / `when`. The item must be an `entity_ref` and the type one of its `targets`; both
+are checked at load time. A Security Group rule's source may be another group or a
+Kubernetes Cluster, meaning the cluster's nodes:
+
+```toml
+# AWS: the security group EKS creates for the cluster, which every node carries.
+referenced_security_group_id = { if = { item = "source_group", ref_type = "kubernetes_cluster" }, then = { item_ref = "source_group", attr = "vpc_config.0.cluster_security_group_id" }, else = { item_ref = "source_group", attr = "id" } }
+```
+
+On Azure the same rule reads the cluster's `node_ranges` block (a `terraform_data`
+holding its node subnets' address ranges) and on Google Cloud its `node_tag`: a rule sees
+the entity it names, not that entity's own links, so a type that is named this way keeps
+what the rule needs in a block of its own.
 
 **Conditional manual steps.** `[[providers.<id>.manual_steps]]` may carry `when = <condition>`;
 a `partial` mapping only warns when at least one step applies. When that condition names a

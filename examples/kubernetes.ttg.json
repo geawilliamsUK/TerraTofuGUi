@@ -238,7 +238,11 @@
           "metrics_server",
           "cluster_autoscaler"
         ],
-        "container_insights": true
+        "container_insights": true,
+        "public_access_cidrs": [
+          "203.0.113.0/24"
+        ],
+        "disk_size_gb": 50
       },
       "provider_config": {},
       "position": {
@@ -268,7 +272,8 @@
             "value": "present",
             "effect": "NoSchedule"
           }
-        ]
+        ],
+        "disk_size_gb": 200
       },
       "provider_config": {
         "aws": {
@@ -539,6 +544,132 @@
       },
       "parent": "rg-k8s",
       "manual": false
+    },
+    "sg-nodes": {
+      "id": "sg-nodes",
+      "name": "nodes sg",
+      "resource_type": "security_group",
+      "config": {
+        "rules": [
+          {
+            "name": "node-to-node",
+            "direction": "ingress",
+            "protocol": "all",
+            "from_port": 0,
+            "to_port": 0,
+            "cidr": "",
+            "source_group": "sg-nodes",
+            "description": "pods and nodes talk to each other"
+          },
+          {
+            "name": "all-out",
+            "direction": "egress",
+            "protocol": "all",
+            "from_port": 0,
+            "to_port": 0,
+            "cidr": "0.0.0.0/0",
+            "source_group": "",
+            "description": ""
+          }
+        ]
+      },
+      "provider_config": {},
+      "position": {
+        "x": 960,
+        "y": 380
+      },
+      "parent": "vnet-core",
+      "manual": false
+    },
+    "sg-db": {
+      "id": "sg-db",
+      "name": "db sg",
+      "resource_type": "security_group",
+      "config": {
+        "rules": [
+          {
+            "name": "pg-from-nodes",
+            "direction": "ingress",
+            "protocol": "tcp",
+            "from_port": 5432,
+            "to_port": 5432,
+            "cidr": "",
+            "source_group": "sg-nodes",
+            "description": "PostgreSQL from the cluster nodes only"
+          }
+        ]
+      },
+      "provider_config": {},
+      "position": {
+        "x": 960,
+        "y": 700
+      },
+      "parent": "vnet-core",
+      "manual": false
+    },
+    "sg-fs": {
+      "id": "sg-fs",
+      "name": "fs sg",
+      "resource_type": "security_group",
+      "config": {
+        "rules": [
+          {
+            "name": "nfs-from-cluster",
+            "direction": "ingress",
+            "protocol": "tcp",
+            "from_port": 2049,
+            "to_port": 2049,
+            "cidr": "",
+            "source_group": "k8s-platform",
+            "description": "NFS from every node of the cluster"
+          }
+        ]
+      },
+      "provider_config": {},
+      "position": {
+        "x": 960,
+        "y": 560
+      },
+      "parent": "vnet-core",
+      "manual": false
+    },
+    "key-nodes": {
+      "id": "key-nodes",
+      "name": "node disks",
+      "resource_type": "encryption_key",
+      "config": {
+        "rotation_days": "90",
+        "deletion_window_days": 30
+      },
+      "provider_config": {},
+      "position": {
+        "x": 400,
+        "y": 990
+      },
+      "parent": "kv-platform",
+      "manual": false
+    },
+    "reg-images": {
+      "id": "reg-images",
+      "name": "images",
+      "resource_type": "container_registry",
+      "config": {
+        "repositories": [
+          "api",
+          "asr-worker"
+        ]
+      },
+      "provider_config": {
+        "azure": {
+          "registry_name": "k8simagesx7q2"
+        }
+      },
+      "position": {
+        "x": 1560,
+        "y": 680
+      },
+      "parent": "rg-k8s",
+      "manual": false
     }
   },
   "edges": [
@@ -726,6 +857,36 @@
       "source": "wl-report",
       "target": "wl-api",
       "relation": "calls"
+    },
+    {
+      "source": "k8s-platform",
+      "target": "sg-nodes",
+      "relation": "attribute_reference"
+    },
+    {
+      "source": "pool-gpu",
+      "target": "sg-nodes",
+      "relation": "attribute_reference"
+    },
+    {
+      "source": "db-core",
+      "target": "sg-db",
+      "relation": "attribute_reference"
+    },
+    {
+      "source": "fs-models",
+      "target": "sg-fs",
+      "relation": "attribute_reference"
+    },
+    {
+      "source": "k8s-platform",
+      "target": "key-nodes",
+      "relation": "encrypted_with"
+    },
+    {
+      "source": "pool-gpu",
+      "target": "key-nodes",
+      "relation": "encrypted_with"
     }
   ]
 }

@@ -576,6 +576,9 @@ fn check_condition(ctx: &mut SourceCtx, c: &Condition, errs: &mut Vec<String>) {
             if let Some(other) = &i.equals_item {
                 check_item_ref(ctx, "when equals_item", other, errs);
             }
+            if let Some(ty) = &i.ref_type {
+                check_ref_type(ctx, &i.item, ty, errs);
+            }
         }
         Condition::All(a) => {
             ctx.v2 = true;
@@ -589,6 +592,29 @@ fn check_condition(ctx: &mut SourceCtx, c: &Condition, errs: &mut Vec<String>) {
                 check_condition(ctx, c, errs);
             }
         }
+    }
+}
+
+/// `ref_type` asks what an `entity_ref` item points at, so the item must be one and the
+/// type must be among the ones it may point at.
+fn check_ref_type(ctx: &SourceCtx, item: &str, ty: &str, errs: &mut Vec<String>) {
+    let refs: Vec<&FieldDef> = ctx
+        .fields
+        .iter()
+        .chain(ctx.provider_fields.iter())
+        .flat_map(|f| f.items.iter())
+        .filter(|sub| sub.name == item && sub.field_type == FieldType::EntityRef)
+        .collect();
+    if refs.is_empty() {
+        errs.push(format!(
+            "{}when ref_type: item '{item}' is not an entity_ref",
+            ctx.what
+        ));
+    } else if !refs.iter().any(|sub| sub.targets.iter().any(|t| t == ty)) {
+        errs.push(format!(
+            "{}when ref_type: '{ty}' is not a target of the entity_ref item '{item}'",
+            ctx.what
+        ));
     }
 }
 

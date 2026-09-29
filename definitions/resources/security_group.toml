@@ -9,6 +9,11 @@
 # A rule's source is either a CIDR or another Security Group on the canvas
 # (`source_group`, an `entity_ref` item). AWS references the group directly; Azure has
 # no group-to-group rules, so a group source becomes the `VirtualNetwork` service tag.
+#
+# `source_group` may also name a Kubernetes Cluster, meaning "the cluster's nodes": the
+# security group EKS creates for the cluster (every node carries it), the address ranges
+# of the cluster's node subnets on Azure, and the network tag GKE nodes carry on Google
+# Cloud. The rules tell the two apart with `{ item = "source_group", ref_type = … }`.
 
 schema_version = 2
 
@@ -78,8 +83,8 @@ description = "Leave empty when using a source security group."
 name = "source_group"
 label = "From security group"
 type = "entity_ref"
-targets = ["security_group"]
-description = "Allow traffic from members of another security group instead of a CIDR (AWS: referenced directly; Azure: VirtualNetwork tag)."
+targets = ["security_group", "kubernetes_cluster"]
+description = "Allow traffic from members of another security group instead of a CIDR (AWS: referenced directly; Azure: VirtualNetwork tag). A Kubernetes cluster here means its nodes: the cluster security group on AWS, the node subnets on Azure, the node network tag on Google Cloud."
 
 [[fields.items]]
 name = "description"
@@ -125,7 +130,8 @@ tags        = { object = { Name = { field = "name" } } }
 
 # Rules are standalone resources (not inline blocks) so that two groups may reference
 # each other without creating a dependency cycle. `from_port` / `to_port` must be omitted
-# when the protocol is `-1` (all).
+# when the protocol is `-1` (all). A cluster source is the security group EKS made for
+# the cluster, which every node carries (the launch templates keep it on them).
 [[providers.aws.blocks]]
 key = "ingress"
 resource = "aws_vpc_security_group_ingress_rule"
@@ -139,7 +145,7 @@ ip_protocol                  = { map = "protocol", table = { tcp = "tcp", udp = 
 from_port                    = { if = { item = "protocol", not_equals = "all" }, then = { item = "from_port" } }
 to_port                      = { if = { item = "protocol", not_equals = "all" }, then = { item = "to_port" } }
 cidr_ipv4                    = { item = "cidr", optional = true }
-referenced_security_group_id = { item_ref = "source_group", attr = "id" }
+referenced_security_group_id = { if = { item = "source_group", ref_type = "kubernetes_cluster" }, then = { item_ref = "source_group", attr = "vpc_config.0.cluster_security_group_id" }, else = { item_ref = "source_group", attr = "id" } }
 tags                         = { object = { Name = { item = "name" } } }
 
 [[providers.aws.blocks]]
@@ -155,7 +161,7 @@ ip_protocol                  = { map = "protocol", table = { tcp = "tcp", udp = 
 from_port                    = { if = { item = "protocol", not_equals = "all" }, then = { item = "from_port" } }
 to_port                      = { if = { item = "protocol", not_equals = "all" }, then = { item = "to_port" } }
 cidr_ipv4                    = { item = "cidr", optional = true }
-referenced_security_group_id = { item_ref = "source_group", attr = "id" }
+referenced_security_group_id = { if = { item = "source_group", ref_type = "kubernetes_cluster" }, then = { item_ref = "source_group", attr = "vpc_config.0.cluster_security_group_id" }, else = { item_ref = "source_group", attr = "id" } }
 tags                         = { object = { Name = { item = "name" } } }
 
 [providers.aws.outputs]
@@ -164,7 +170,7 @@ id = { attr = "id", description = "Security group id" }
 # ---------------------------------------------------------------- Azure
 [providers.azure]
 status = "full"
-notes = "Rules whose source is another security group use the VirtualNetwork service tag; Azure has no group-to-group rules."
+notes = "Rules whose source is another security group use the VirtualNetwork service tag; Azure has no group-to-group rules. A rule whose source is a Kubernetes cluster uses the address ranges of the cluster's node subnets."
 
 [[providers.azure.checks]]
 for_each_field = "rules"
@@ -210,16 +216,26 @@ if = { item = "from_port", equals_item = "to_port" }
 then = { item = "from_port" }
 else = { template = "{item.from_port}-{item.to_port}" }
 
-# Ingress: source is the CIDR, or the VirtualNetwork tag when a source group is used.
+# Ingress: source is the CIDR, or the VirtualNetwork tag when a source group is used. A
+# Kubernetes Cluster source is the address ranges of its node subnets instead, which
+# goes in the plural argument (the two cannot be combined).
 [providers.azure.blocks.args.source_address_prefix]
 if = { item = "direction", equals = "ingress" }
-then = { if = { item = "cidr", not_equals = "" }, then = { item = "cidr" }, else = { value = "VirtualNetwork" } }
+then = { if = { item = "cidr", not_equals = "" }, then = { item = "cidr" }, else = { if = { item = "source_group", ref_type = "security_group" }, then = { value = "VirtualNetwork" } } }
 else = { value = "*" }
+
+[providers.azure.blocks.args.source_address_prefixes]
+if = { all = [ { item = "direction", equals = "ingress" }, { item = "cidr", equals = "" }, { item = "source_group", ref_type = "kubernetes_cluster" } ] }
+then = { item_ref = "source_group", block = "node_ranges", attr = "output" }
 
 [providers.azure.blocks.args.destination_address_prefix]
 if = { item = "direction", equals = "egress" }
-then = { if = { item = "cidr", not_equals = "" }, then = { item = "cidr" }, else = { value = "VirtualNetwork" } }
+then = { if = { item = "cidr", not_equals = "" }, then = { item = "cidr" }, else = { if = { item = "source_group", ref_type = "security_group" }, then = { value = "VirtualNetwork" } } }
 else = { value = "*" }
+
+[providers.azure.blocks.args.destination_address_prefixes]
+if = { all = [ { item = "direction", equals = "egress" }, { item = "cidr", equals = "" }, { item = "source_group", ref_type = "kubernetes_cluster" } ] }
+then = { item_ref = "source_group", block = "node_ranges", attr = "output" }
 
 [providers.azure.outputs]
 id = { attr = "id", description = "Network security group id" }
@@ -227,7 +243,7 @@ id = { attr = "id", description = "Network security group id" }
 # ---------------------------------------------------------------- GCP
 [providers.gcp]
 status = "full"
-notes = "Firewall rules are network-level. Membership is a network tag: instances that link the group carry it (target_tags), and a rule whose source is another group matches that group's tag (source_tags)."
+notes = "Firewall rules are network-level. Membership is a network tag: instances that link the group carry it (target_tags), and a rule whose source is another group matches that group's tag (source_tags). A rule whose source is a Kubernetes cluster matches the tag every node of that cluster carries."
 
 [[providers.gcp.checks]]
 for_each_field = "rules"
@@ -264,7 +280,9 @@ network            = { relation = "network_membership", attr = "id" }
 direction          = { if = { item = "direction", equals = "ingress" }, then = { value = "INGRESS" }, else = { value = "EGRESS" } }
 source_ranges      = { if = { all = [ { item = "direction", equals = "ingress" }, { item = "cidr", not_equals = "" } ] }, then = { item = "cidr", wrap = "list" } }
 destination_ranges = { if = { all = [ { item = "direction", equals = "egress" }, { item = "cidr", not_equals = "" } ] }, then = { item = "cidr", wrap = "list" } }
-source_tags        = { if = { all = [ { item = "direction", equals = "ingress" }, { item = "source_group", not_equals = "" } ] }, then = { item_ref = "source_group", block = "tag", attr = "output", wrap = "list" } }
+# A group source matches the group's tag; a cluster source the tag every node of the
+# cluster carries (its `node_tag`).
+source_tags        = { if = { all = [ { item = "direction", equals = "ingress" }, { item = "source_group", not_equals = "" } ] }, then = { if = { item = "source_group", ref_type = "kubernetes_cluster" }, then = { item_ref = "source_group", block = "node_tag", attr = "output", wrap = "list" }, else = { item_ref = "source_group", block = "tag", attr = "output", wrap = "list" } } }
 target_tags        = { self_block = "tag", attr = "output", wrap = "list" }
 
 [[providers.gcp.blocks.nested]]

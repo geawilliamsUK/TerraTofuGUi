@@ -1000,6 +1000,13 @@ pub fn condition_holds_for(
             let Some((record, _)) = item else {
                 return false;
             };
+            if let Some(ty) = &i.ref_type {
+                return record
+                    .get(&i.item)
+                    .and_then(|v| v.as_str())
+                    .and_then(|id| p.entity(id))
+                    .is_some_and(|t| t.resource_type == ty);
+            }
             if let Some(other) = &i.equals_item {
                 let a = record.get(&i.item).map(|v| v.display());
                 let b = record.get(other).map(|v| v.display());
@@ -1593,6 +1600,64 @@ fn network_checks(p: &Project, cat: &Catalog, provider: &str, out: &mut Vec<Diag
                 ),
             );
         }
+    }
+
+    // 5. A security group that rules admit traffic from, but that nothing carries: every
+    //    one of those rules admits no one.
+    for (group, users) in crate::reach::memberless_sources(p, cat) {
+        let users: Vec<String> = users.iter().map(|u| name_of(u)).collect();
+        push(
+            &group,
+            Severity::Warning,
+            format!(
+                "is the source of rules in {} but nothing is a member of it, so those rules admit no one; link the resources that should carry it with 'Uses security group' (a Kubernetes cluster or node pool, an instance, a function), or make the rules name them another way",
+                quoted_list(&users, 4)
+            ),
+        );
+    }
+
+    // 6. An AWS interface endpoint with private DNS answers for its service's public name
+    //    across the whole network, so one whose security group admits nobody there breaks
+    //    every call to that service, not just the calls meant for it.
+    if provider == "aws" {
+        for pe in entities.iter().filter(|e| e.resource_type == "private_endpoint") {
+            let service = field_or_default(cat, provider, pe, "service", true)
+                .map(|v| v.display())
+                .unwrap_or_default();
+            if matches!(service.as_str(), "s3" | "dynamodb") {
+                continue; // gateway endpoints: routes, no interface, no group
+            }
+            let Some(refused) = crate::reach::endpoint_refuses_all(p, cat, pe) else {
+                continue;
+            };
+            let refused: Vec<String> = refused.iter().map(|r| name_of(r)).collect();
+            let consequence = match service.as_str() {
+                "ecr.api" | "ecr.dkr" => "image pulls from ECR will fail".to_string(),
+                "sts" => "pod identity and every role assumption will fail".to_string(),
+                _ => format!("calls to {service} from the network will fail"),
+            };
+            push(
+                pe.id,
+                Severity::Error,
+                format!(
+                    "has private DNS on, so everything in its network reaches {service} through it, but its security group admits none of {} on port 443: {consequence}. Add an ingress rule for 443 from their subnets or a security group they carry",
+                    quoted_list(&refused, 4)
+                ),
+            );
+        }
+    }
+}
+
+/// `"a"`, `"a" and "b"`, `"a", "b" and "c"`; past `max` names, `… and N more`.
+fn quoted_list(names: &[String], max: usize) -> String {
+    let mut shown: Vec<String> = names.iter().take(max).map(|n| format!("\"{n}\"")).collect();
+    if names.len() > max {
+        shown.push(format!("{} more", names.len() - max));
+    }
+    match shown.split_last() {
+        Some((last, rest)) if !rest.is_empty() => format!("{} and {last}", rest.join(", ")),
+        Some((only, _)) => only.clone(),
+        None => String::new(),
     }
 }
 

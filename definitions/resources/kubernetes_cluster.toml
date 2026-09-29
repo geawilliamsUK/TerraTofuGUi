@@ -1,7 +1,8 @@
 # Abstract type: Kubernetes Cluster
 #
 # AWS: EKS — cluster IAM role + policy, aws_eks_cluster, node IAM role + 3 policies,
-#      aws_eks_node_group (the default pool) and one aws_eks_addon per add-on.
+#      aws_eks_node_group (the default pool) on a launch template (IMDSv2, encrypted
+#      root volume, node security groups) and one aws_eks_addon per add-on.
 #      Link two subnets in different availability zones.
 # Azure: AKS — azurerm_kubernetes_cluster with a system-assigned identity and an
 #      autoscaling default node pool in the first linked subnet (Azure CNI).
@@ -66,11 +67,20 @@ label = "Public API access from"
 type = "string_list"
 description = "CIDR ranges allowed to reach the public API endpoint. Empty means anywhere (the provider default)."
 
+# `options` turns an unknown add-on into a refused write rather than an error found at
+# export time.
 [[fields]]
 name = "addons"
 label = "Add-ons"
 type = "string_list"
-description = "Cluster add-ons to install: ebs_csi, efs_csi, pod_identity_agent, metrics_server, coredns, kube_proxy, vpc_cni, cluster_autoscaler. Only AWS installs them as resources; the others say what applies in MANUAL_STEPS. cluster_autoscaler is not an EKS add-on: on AWS it generates the discovery tags, a role and a pod identity for the Helm chart, and on AKS / GKE it is already built in."
+options = ["ebs_csi", "efs_csi", "pod_identity_agent", "metrics_server", "coredns", "kube_proxy", "vpc_cni", "cluster_autoscaler"]
+description = "Cluster add-ons to install. Only AWS installs them as resources; the others say what applies in MANUAL_STEPS. cluster_autoscaler is not an EKS add-on: on AWS it generates the discovery tags, a role and a pod identity for the Helm chart, and on AKS / GKE it is already built in."
+
+[[fields]]
+name = "disk_size_gb"
+label = "Node disk size (GiB)"
+type = "int"
+description = "Root disk of each node in the default pool. Empty keeps the provider's default (20 GiB from the EKS node image, a size-dependent default on AKS, 100 GB on GKE)."
 
 [[fields]]
 name = "container_insights"
@@ -91,6 +101,25 @@ label = "Logs to"
 targets = ["log_group"]
 cardinality = "optional"
 
+# The groups the nodes carry (and, on AWS, the control plane's network interfaces too).
+# Node pools without groups of their own inherit these. Azure attaches network security
+# groups to subnets, not to clusters, so the link is not Azure's business.
+[[relations]]
+kind = "attribute_reference"
+label = "Uses security group"
+providers = ["aws", "gcp"]
+targets = ["security_group"]
+cardinality = "many"
+
+# The default pool's root disks. Azure needs a disk encryption set with an identity of its
+# own for that, which the diagram does not model.
+[[relations]]
+kind = "encrypted_with"
+label = "Encrypt node disks with"
+providers = ["aws", "gcp"]
+targets = ["encryption_key"]
+cardinality = "optional"
+
 # ---------------------------------------------------------------- AWS
 [providers.aws]
 status = "partial"
@@ -104,10 +133,8 @@ pattern_hint = "major.minor, e.g. 1.33"
 description = "Leave empty to take the EKS default for the region. Pinning a version that the region has retired makes apply fail, which is why there is no default here."
 
 [[providers.aws.checks]]
-for_each_field = "addons"
-severity = "error"
-when = { all = [ { item = "value", not_equals = "ebs_csi" }, { item = "value", not_equals = "efs_csi" }, { item = "value", not_equals = "pod_identity_agent" }, { item = "value", not_equals = "metrics_server" }, { item = "value", not_equals = "coredns" }, { item = "value", not_equals = "kube_proxy" }, { item = "value", not_equals = "vpc_cni" }, { item = "value", not_equals = "cluster_autoscaler" } ] }
-message = "\"{name}\": unknown add-on '{item.value}'; use ebs_csi, efs_csi, pod_identity_agent, metrics_server, coredns, kube_proxy, vpc_cni or cluster_autoscaler"
+when = { all = [ { field = "private_endpoint", equals = "false" }, { field = "public_access_cidrs", absent = true } ] }
+message = "\"{name}\": the Kubernetes API endpoint is public and accepts connections from any address; set 'Public API access from' to the ranges that administer the cluster, or turn on 'Private API endpoint'"
 
 [[providers.aws.blocks]]
 key = "cluster_role"
@@ -157,6 +184,9 @@ block = "vpc_config"
 
 [providers.aws.blocks.nested.args]
 subnet_ids              = { relation = "network_membership", attr = "id", wrap = "list" }
+# Additional groups for the control plane's network interfaces. The nodes get them through
+# their launch templates below.
+security_group_ids      = { relation = "attribute_reference", target_type = "security_group", attr = "id", wrap = "list", optional = true }
 endpoint_private_access = { field = "private_endpoint" }
 endpoint_public_access  = { if = { field = "private_endpoint" }, then = { value = false }, else = { value = true } }
 public_access_cidrs     = { field = "public_access_cidrs", optional = true }
@@ -210,6 +240,49 @@ resource = "aws_iam_role_policy_attachment"
 role       = { self_block = "node_role", attr = "name" }
 policy_arn = { value = "arn:aws:iam::aws:policy/AmazonEC2ContainerRegistryReadOnly" }
 
+# The default pool's launch template. Instance metadata only through IMDSv2 tokens, with
+# a hop limit of 2 because pods sit one hop behind the node; a root volume that is always
+# encrypted, with the linked key when there is one; and the node security groups. EKS
+# leaves its own cluster security group off nodes whose launch template names groups, so
+# it goes first in the list: nodes and control plane talk through it, and it is what a
+# rule whose source is this cluster refers to. Without linked groups the template names
+# none and EKS applies the cluster group itself.
+[[providers.aws.blocks]]
+key = "nodes_lt"
+resource = "aws_launch_template"
+
+[providers.aws.blocks.args]
+# A prefix, not a name: AWS appends a unique suffix, so two clusters never collide. (The
+# kebab transform would trim the trailing hyphen off a template.)
+name_prefix            = { func = "format", args = [ { value = "%s-nodes-" }, { field = "name", transform = "kebab" } ] }
+vpc_security_group_ids = { if = { relation = "attribute_reference", target_type = "security_group" }, then = { func = "concat", args = [ { self_block = "main", attr = "vpc_config.0.cluster_security_group_id", wrap = "list" }, { relation = "attribute_reference", target_type = "security_group", attr = "id", wrap = "list" } ] } }
+
+[[providers.aws.blocks.nested]]
+block = "metadata_options"
+
+[providers.aws.blocks.nested.args]
+http_endpoint               = { value = "enabled" }
+http_tokens                 = { value = "required" }
+http_put_response_hop_limit = { value = 2 }
+
+# The EKS-optimised AL2023 images (standard and NVIDIA) boot from /dev/xvda. The node
+# group must not set `disk_size` as well: EKS rejects a disk size next to a launch template.
+[[providers.aws.blocks.nested]]
+block = "block_device_mappings"
+
+[providers.aws.blocks.nested.args]
+device_name = { value = "/dev/xvda" }
+
+[[providers.aws.blocks.nested.nested]]
+block = "ebs"
+
+[providers.aws.blocks.nested.nested.args]
+volume_size           = { field = "disk_size_gb", optional = true }
+volume_type           = { value = "gp3" }
+encrypted             = { value = true }
+kms_key_id            = { relation = "encrypted_with", attr = "arn", optional = true }
+delete_on_termination = { value = true }
+
 [[providers.aws.blocks]]
 key = "nodes"
 resource = "aws_eks_node_group"
@@ -233,6 +306,13 @@ block = "scaling_config"
 desired_size = { field = "node_count" }
 min_size     = { field = "min_nodes" }
 max_size     = { field = "max_nodes" }
+
+[[providers.aws.blocks.nested]]
+block = "launch_template"
+
+[providers.aws.blocks.nested.args]
+id      = { self_block = "nodes_lt", attr = "id" }
+version = { self_block = "nodes_lt", attr = "latest_version" }
 
 # One add-on resource per entry of the abstract list. `cluster_autoscaler` is not an EKS
 # add-on at all — it is a Helm chart with an IAM identity, generated below.
@@ -371,6 +451,19 @@ pod identity association binds. A pool may then scale to zero.
 # ---------------------------------------------------------------- Azure
 [providers.azure]
 status = "partial"
+notes = "Network security groups guard subnets on Azure, not clusters: a rule whose source is this cluster admits its node subnets' address ranges, and the NSG that guards the nodes is whichever one is associated with their subnet."
+
+[[providers.azure.checks]]
+when = { all = [ { field = "private_endpoint", equals = "false" }, { field = "public_access_cidrs", absent = true } ] }
+message = "\"{name}\": the Kubernetes API endpoint is public and accepts connections from any address; set 'Public API access from' to the ranges that administer the cluster, or turn on 'Private API endpoint'"
+
+[[providers.azure.checks]]
+when = { relation = "attribute_reference", target_type = "security_group" }
+message = "\"{name}\" uses a Security Group, which Azure cannot attach to a cluster: a network security group guards a subnet. Nothing is generated for the link; associate the group with the node subnets, or admit the nodes elsewhere with a rule whose source is this cluster"
+
+[[providers.azure.checks]]
+when = { relation = "encrypted_with" }
+message = "\"{name}\" is linked to an Encryption Key, which the Azure mapping cannot use: customer-managed node disks need a disk encryption set with its own identity and Key Vault access, which the diagram does not model. The node disks keep platform-managed encryption"
 
 [[providers.azure.fields]]
 name = "version"
@@ -406,6 +499,7 @@ auto_scaling_enabled = { value = true }
 min_count            = { field = "min_nodes" }
 max_count            = { field = "max_nodes" }
 vnet_subnet_id       = { relation = "network_membership", attr = "id" }
+os_disk_size_gb      = { field = "disk_size_gb", optional = true }
 
 [[providers.azure.blocks.nested]]
 block = "identity"
@@ -458,6 +552,15 @@ block = "enabled_log"
 [providers.azure.blocks.nested.args]
 category = { value = "kube-audit" }
 
+# The address ranges of the node subnets, held where a Security Group rule whose source is
+# this cluster can reach them (a rule sees the cluster, not the cluster's links).
+[[providers.azure.blocks]]
+key = "node_ranges"
+resource = "terraform_data"
+
+[providers.azure.blocks.args]
+input = { func = "flatten", args = [ { relation = "network_membership", attr = "address_prefixes", wrap = "list" } ] }
+
 [providers.azure.outputs]
 fqdn        = { attr = "fqdn", description = "Kubernetes API host name" }
 oidc_issuer = { attr = "oidc_issuer_url", description = "OIDC issuer URL used by workload identity" }
@@ -484,7 +587,11 @@ identity (switched on here) and Azure CNI (the network profile) do the same jobs
 # ---------------------------------------------------------------- GCP
 [providers.gcp]
 status = "partial"
-notes = "A regional GKE Standard cluster with one autoscaling node pool on the linked subnet's network."
+notes = "A regional GKE Standard cluster with one autoscaling node pool on the linked subnet's network. Every node carries the network tag <cluster>-nodes plus the tags of the linked Security Groups, which is how firewall rules find them."
+
+[[providers.gcp.checks]]
+when = { all = [ { field = "private_endpoint", equals = "false" }, { field = "public_access_cidrs", absent = true } ] }
+message = "\"{name}\": the Kubernetes API endpoint is public and accepts connections from any address; set 'Public API access from' to the ranges that administer the cluster, or turn on 'Private API endpoint'"
 
 [[providers.gcp.fields]]
 name = "version"
@@ -581,8 +688,20 @@ max_node_count = { field = "max_nodes" }
 block = "node_config"
 
 [providers.gcp.blocks.nested.args]
-machine_type = { map = "node_size", table = { small = "e2-medium", medium = "e2-standard-4", large = "e2-standard-8" } }
-oauth_scopes = { value = ["https://www.googleapis.com/auth/cloud-platform"] }
+machine_type      = { map = "node_size", table = { small = "e2-medium", medium = "e2-standard-4", large = "e2-standard-8" } }
+oauth_scopes      = { value = ["https://www.googleapis.com/auth/cloud-platform"] }
+tags              = { if = { relation = "attribute_reference", target_type = "security_group" }, then = { func = "concat", args = [ { self_block = "node_tag", attr = "output", wrap = "list" }, { relation = "attribute_reference", target_type = "security_group", block = "tag", attr = "output", wrap = "list" } ] }, else = { self_block = "node_tag", attr = "output", wrap = "list" } }
+disk_size_gb      = { field = "disk_size_gb", optional = true }
+boot_disk_kms_key = { relation = "encrypted_with", attr = "id", optional = true }
+
+# The network tag every node of this cluster carries: what a Security Group rule whose
+# source is the cluster matches, and what extra node pools add to their own tags.
+[[providers.gcp.blocks]]
+key = "node_tag"
+resource = "terraform_data"
+
+[providers.gcp.blocks.args]
+input = { template = "{name}-nodes", transform = "kebab" }
 
 [providers.gcp.outputs]
 endpoint = { attr = "endpoint", description = "Cluster API endpoint" }

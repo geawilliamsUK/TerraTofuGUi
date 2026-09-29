@@ -318,6 +318,55 @@ status = "logical"
         .expect("a declared relation names its own subjects");
 }
 
+/// `ref_type` asks what an `entity_ref` item points at, so it must be asked of an
+/// `entity_ref` item and about a type that item may point at.
+#[test]
+fn ref_type_conditions_are_checked_against_the_item() {
+    let head = r#"
+schema_version = 2
+[resource]
+type = "thing"
+category = "network"
+display_name = "Thing"
+[[fields]]
+name = "rules"
+type = "struct_list"
+[[fields.items]]
+name = "label"
+type = "string"
+[[fields.items]]
+name = "peer"
+type = "entity_ref"
+targets = ["thing"]
+[providers.aws]
+[[providers.aws.blocks]]
+key = "main"
+resource = "aws_thing"
+for_each_field = "rules"
+when = "#;
+    let aws = include_str!("../../../definitions/providers/aws.toml");
+    let load = |cond: &str| {
+        let def = format!("{head}{cond}\n");
+        Catalog::from_sources(
+            [("thing.toml", def.as_str())].into_iter(),
+            [("aws.toml", aws)].into_iter(),
+        )
+        .map(|_| ())
+    };
+    load(r#"{ item = "peer", ref_type = "thing" }"#).expect("an entity_ref item and one of its targets");
+    let err = load(r#"{ item = "label", ref_type = "thing" }"#).expect_err("not an entity_ref");
+    assert!(
+        err.to_string().contains("item 'label' is not an entity_ref"),
+        "{err}"
+    );
+    let err = load(r#"{ item = "peer", ref_type = "subnet" }"#).expect_err("not a target");
+    assert!(
+        err.to_string()
+            .contains("'subnet' is not a target of the entity_ref item 'peer'"),
+        "{err}"
+    );
+}
+
 /// An `incoming` relation source reads the edges that point *at* an entity, so there is no
 /// declaration of the kind on this type to check against — only the kind itself and the
 /// other end's type. `field` takes a value off that other entity instead of a reference to
@@ -1903,6 +1952,296 @@ fn kubernetes_example_node_pools_and_workload_identity() {
             g.manual_steps.iter().map(|s| &s.title).collect::<Vec<_>>()
         );
     }
+}
+
+/// R3.1: the nodes of a cluster carry its security groups — on EKS through launch
+/// templates that keep the cluster security group first — a rule may name the cluster
+/// itself, and a workload has the groups of the nodes it runs on. A group nothing carries
+/// and an interface endpoint that admits nobody in its network are reported.
+#[test]
+fn kubernetes_nodes_carry_their_security_groups() {
+    use ttg_codegen::reach::{analyse, paths_to, Status};
+    let cat = Catalog::builtin();
+    let p = example("kubernetes.ttg.json");
+    let path_to = |p: &ttg_core::Project, target: &str, source: &str| {
+        let r = analyse(p, &cat, "aws");
+        paths_to(p, &cat, &r, target)
+            .into_iter()
+            .find(|(s, _)| s == source)
+            .map(|(_, path)| path)
+            .unwrap_or_else(|| panic!("no path from {source} to {target}"))
+    };
+
+    // A workload has its cluster's groups, the cluster's own included, and its subnets.
+    let r = analyse(&p, &cat, "aws");
+    assert_eq!(r.posture["wl-api"].security_groups, ["sg-nodes", "k8s-platform"]);
+    assert_eq!(r.posture["wl-api"].subnets, ["subnet-nodes-a", "subnet-nodes-b"]);
+    // The database admits the nodes' group; the file system admits the cluster itself.
+    let api = path_to(&p, "db-core", "wl-api");
+    assert_eq!(api.status, Status::Ok, "{}", api.reason);
+    assert!(
+        api.reason
+            .contains("\"db sg\": rule from security group \"nodes sg\""),
+        "{}",
+        api.reason
+    );
+    assert_eq!(
+        ttg_codegen::reach::listening_port(&p.entity("fs-models").unwrap()),
+        Some(2049)
+    );
+    let asr = path_to(&p, "fs-models", "wl-asr");
+    assert_eq!(asr.status, Status::Ok, "{}", asr.reason);
+    assert!(
+        asr.reason.contains("the cluster security group of \"platform\""),
+        "{}",
+        asr.reason
+    );
+    let d = ttg_codegen::diagnostics::run(&p, &cat, "aws");
+    assert!(
+        !d.iter().any(|x| x.message.contains("nothing is a member")),
+        "{:?}",
+        d.iter().map(|x| &x.message).collect::<Vec<_>>()
+    );
+
+    // A workload scheduled on a pool has that pool's groups. This pool has a group of
+    // its own the database does not admit; the cluster security group stays on it, so
+    // the file system still does.
+    let mut pinned = p.clone();
+    let mut gpu_sg = pinned.nodes["sg-nodes"].clone();
+    gpu_sg.id = "sg-gpu".into();
+    gpu_sg.name = "gpu sg".into();
+    pinned.nodes.insert(gpu_sg.id.clone(), gpu_sg);
+    pinned
+        .edges
+        .retain(|e| !(e.source == "pool-gpu" && e.target == "sg-nodes"));
+    pinned.add_edge("pool-gpu", "sg-gpu", ttg_core::Relation::AttributeReference);
+    pinned.add_edge("wl-asr", "pool-gpu", ttg_core::Relation::Attachment);
+    let r = analyse(&pinned, &cat, "aws");
+    assert_eq!(r.posture["wl-asr"].security_groups, ["sg-gpu", "k8s-platform"]);
+    let db = path_to(&pinned, "db-core", "wl-asr");
+    assert_eq!(db.status, Status::Blocked, "{}", db.reason);
+    assert_eq!(path_to(&pinned, "fs-models", "wl-asr").status, Status::Ok);
+
+    // Nothing carries the nodes' group: the database's rule admits no one, which is both
+    // a blocked path and a warning on the group.
+    let mut orphan = p.clone();
+    orphan.edges.retain(|e| e.target != "sg-nodes");
+    let api = path_to(&orphan, "db-core", "wl-api");
+    assert_eq!(api.status, Status::Blocked, "{}", api.reason);
+    assert!(
+        api.reason
+            .contains("\"db sg\" has no ingress rule allowing port 5432 from \"api\""),
+        "{}",
+        api.reason
+    );
+    let d = ttg_codegen::diagnostics::run(&orphan, &cat, "aws");
+    assert!(
+        d.iter().any(|x| x.entity.as_deref() == Some("sg-nodes")
+            && x.severity == Severity::Warning
+            && x.message.contains(
+                "is the source of rules in \"db sg\" and \"nodes sg\" but nothing is a member of it"
+            )),
+        "{:?}",
+        d.iter().map(|x| &x.message).collect::<Vec<_>>()
+    );
+
+    // An ECR endpoint with private DNS whose group admits only the nodes' group: fine
+    // while the nodes carry it, an export-blocking error when nothing does.
+    let with_endpoint = |mut p: ttg_core::Project| {
+        let sg: ttg_core::Node = serde_json::from_value(serde_json::json!({
+            "id": "sg-endpoints", "name": "endpoints sg", "resource_type": "security_group",
+            "parent": "vnet-core",
+            "config": { "rules": [ { "name": "https-from-nodes", "direction": "ingress", "protocol": "tcp",
+                "from_port": 443, "to_port": 443, "cidr": "", "source_group": "sg-nodes" } ] }
+        }))
+        .unwrap();
+        let pe: ttg_core::Node = serde_json::from_value(serde_json::json!({
+            "id": "pe-ecr", "name": "ecr api", "resource_type": "private_endpoint",
+            "parent": "vnet-core", "config": { "subresource": "blob" },
+            "provider_config": { "aws": { "service": "ecr.api" } }
+        }))
+        .unwrap();
+        p.nodes.insert(sg.id.clone(), sg);
+        p.nodes.insert(pe.id.clone(), pe);
+        p.add_edge("pe-ecr", "subnet-nodes-a", ttg_core::Relation::NetworkMembership);
+        p.add_edge("pe-ecr", "subnet-nodes-b", ttg_core::Relation::NetworkMembership);
+        p.add_edge("pe-ecr", "sg-endpoints", ttg_core::Relation::Attachment);
+        ttg_codegen::diagnostics::run(&p, &cat, "aws")
+    };
+    let refused = |d: &[ttg_codegen::Diagnostic]| {
+        d.iter()
+            .find(|x| x.entity.as_deref() == Some("pe-ecr") && x.severity == Severity::Error)
+            .map(|x| x.message.clone())
+    };
+    assert_eq!(refused(&with_endpoint(p.clone())), None);
+    let msg = refused(&with_endpoint(orphan)).expect("an endpoint nobody may use is an error");
+    assert!(
+        msg.contains("has private DNS on") && msg.contains("image pulls from ECR will fail"),
+        "{msg}"
+    );
+}
+
+/// R3.1 / R3.3 in the AWS export: the cluster and both node groups carry the nodes'
+/// security group, every node group has a launch template with IMDSv2 required and an
+/// encrypted gp3 root volume on the linked key (whose policy lets EC2 Auto Scaling use
+/// it), a rule may name the cluster, and the destructive defaults are gone.
+#[test]
+fn kubernetes_example_node_groups_are_hardened() {
+    let cat = Catalog::builtin();
+    let p = example("kubernetes.ttg.json");
+    let aws = generate(&p, &cat, "aws", Tool::OpenTofu).unwrap();
+    let c = norm(&aws.files["container.tf"]);
+    assert!(
+        c.contains("security_group_ids = [ aws_security_group.nodes_sg.id ] endpoint_private_access"),
+        "the control plane carries the linked group: {c}"
+    );
+    assert_eq!(c.matches("resource \"aws_launch_template\"").count(), 2, "{c}");
+    assert_eq!(
+        c.matches("vpc_security_group_ids = concat([aws_eks_cluster.platform.vpc_config[0].cluster_security_group_id], [aws_security_group.nodes_sg.id])").count(),
+        2,
+        "both templates keep the cluster security group first: {c}"
+    );
+    assert_eq!(
+        c.matches("metadata_options { http_endpoint = \"enabled\" http_tokens = \"required\" http_put_response_hop_limit = 2 }").count(),
+        2,
+        "{c}"
+    );
+    assert!(
+        c.contains("ebs { volume_size = 50 volume_type = \"gp3\" encrypted = true kms_key_id = aws_kms_key.node_disks.arn delete_on_termination = true }"),
+        "{c}"
+    );
+    assert!(c.contains("volume_size = 200"), "{c}");
+    assert!(
+        c.contains("launch_template { id = aws_launch_template.platform_nodes_lt.id version = aws_launch_template.platform_nodes_lt.latest_version }")
+            && c.contains("launch_template { id = aws_launch_template.gpu_lt.id version = aws_launch_template.gpu_lt.latest_version }"),
+        "{c}"
+    );
+    assert!(
+        !c.contains("disk_size ="),
+        "EKS refuses a disk size next to a launch template: {c}"
+    );
+    assert!(
+        c.contains("name_prefix = format(\"%s-nodes-\", \"platform\")")
+            && c.contains("name_prefix = format(\"%s-%s-\", \"platform\", \"gpu\")"),
+        "{c}"
+    );
+    // A pool with no groups of its own takes the default pool's list.
+    let mut inherit = p.clone();
+    inherit
+        .edges
+        .retain(|e| !(e.source == "pool-gpu" && e.target == "sg-nodes"));
+    let c2 = norm(&generate(&inherit, &cat, "aws", Tool::OpenTofu).unwrap().files["container.tf"]);
+    assert!(
+        c2.contains("vpc_security_group_ids = aws_launch_template.platform_nodes_lt.vpc_security_group_ids"),
+        "{c2}"
+    );
+
+    // The rule whose source is the cluster refers to the cluster security group.
+    let net = &aws.files["network.tf"];
+    assert!(
+        net.contains(
+            "referenced_security_group_id = aws_eks_cluster.platform.vpc_config[0].cluster_security_group_id"
+        ),
+        "{net}"
+    );
+    assert!(
+        net.contains("referenced_security_group_id = aws_security_group.nodes_sg.id"),
+        "{net}"
+    );
+    let key = norm(&aws.files["security.tf"]);
+    assert!(
+        key.contains("Sid = \"AutoScalingVolumeGrants\"")
+            && key.contains("role/aws-service-role/autoscaling.amazonaws.com/AWSServiceRoleForAutoScaling"),
+        "{key}"
+    );
+    assert!(
+        aws.manual_steps
+            .iter()
+            .any(|s| s.title.contains("service-linked role must exist")),
+        "{:?}",
+        aws.manual_steps.iter().map(|s| &s.title).collect::<Vec<_>>()
+    );
+    // Registries keep their images through a destroy; the database is on gp3.
+    let reg = norm(&aws.files["container.tf"]);
+    assert_eq!(reg.matches("force_delete = false").count(), 2, "{reg}");
+    assert!(!reg.contains("force_delete = true"), "{reg}");
+    assert!(
+        norm(&aws.files["database.tf"]).contains("storage_type = \"gp3\""),
+        "{}",
+        aws.files["database.tf"]
+    );
+
+    // Azure: a cluster source is its node subnets' ranges; GCP: the node network tag,
+    // which every node pool carries with its groups' tags.
+    let az = generate(&p, &cat, "azure", Tool::OpenTofu).unwrap();
+    let net = norm(&az.files["network.tf"]);
+    assert!(
+        net.contains("source_address_prefixes = terraform_data.platform_node_ranges.output"),
+        "{net}"
+    );
+    assert!(
+        norm(&az.files["container.tf"]).contains(
+            "input = flatten([azurerm_subnet.nodes_a.address_prefixes, azurerm_subnet.nodes_b.address_prefixes])"
+        ),
+        "{}",
+        az.files["container.tf"]
+    );
+    let gcp = generate(&p, &cat, "gcp", Tool::OpenTofu).unwrap();
+    let c = norm(&gcp.files["container.tf"]);
+    assert_eq!(
+        c.matches(
+            "tags = concat([terraform_data.platform_node_tag.output], [terraform_data.nodes_sg_tag.output])"
+        )
+        .count(),
+        2,
+        "{c}"
+    );
+    assert!(
+        c.contains("boot_disk_kms_key = google_kms_crypto_key.node_disks.id"),
+        "{c}"
+    );
+    assert!(
+        norm(&gcp.files["network.tf"]).contains("source_tags = [ terraform_data.platform_node_tag.output ]"),
+        "{}",
+        gcp.files["network.tf"]
+    );
+}
+
+/// R3.3 / R3.18: a public API with no allow-list is a warning on every provider, and an
+/// unknown add-on is refused as a field value rather than by an export-time check.
+#[test]
+fn kubernetes_cluster_api_warning_and_addon_options() {
+    let cat = Catalog::builtin();
+    let mut p = example("kubernetes.ttg.json");
+    let cluster = p.nodes.get_mut("k8s-platform").unwrap();
+    cluster.config.remove("public_access_cidrs");
+    cluster.config.insert(
+        "addons".into(),
+        ttg_core::Value::List(vec!["ebs_csi".into(), "istio".into()]),
+    );
+    for provider in ["aws", "azure", "gcp"] {
+        let d = ttg_codegen::diagnostics::run(&p, &cat, provider);
+        assert!(
+            d.iter().any(|x| x.severity == Severity::Warning
+                && x.message.contains("the Kubernetes API endpoint is public")),
+            "{provider}: {:?}",
+            d.iter().map(|x| &x.message).collect::<Vec<_>>()
+        );
+        let bad: Vec<&String> = d
+            .iter()
+            .filter(|x| x.severity == Severity::Error && x.message.contains("istio"))
+            .map(|x| &x.message)
+            .collect();
+        assert_eq!(bad.len(), 1, "{provider}: one error, from the field: {bad:?}");
+        assert!(bad[0].contains("\"istio\" is not one of: ebs_csi"), "{}", bad[0]);
+    }
+    let def = cat.resource("kubernetes_cluster").unwrap();
+    let addons = def.fields.iter().find(|f| f.name == "addons").unwrap();
+    assert!(ttg_catalog::fields::check_value(
+        addons,
+        Some(&ttg_core::Value::List(vec!["cluster_autoscaler".into()]))
+    )
+    .is_ok());
 }
 
 // ---------------------------------------------------------------- internet-facing edge

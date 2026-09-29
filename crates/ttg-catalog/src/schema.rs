@@ -426,6 +426,11 @@ pub struct CondItem {
     pub not_equals: Option<String>,
     #[serde(default)]
     pub equals_item: Option<String>,
+    /// `{ item = "source_group", ref_type = "kubernetes_cluster" }` — the `entity_ref`
+    /// item points at an entity of this abstract type (v2). How a rule tells a
+    /// security-group source from a cluster source when the two render differently.
+    #[serde(default)]
+    pub ref_type: Option<String>,
 }
 #[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]

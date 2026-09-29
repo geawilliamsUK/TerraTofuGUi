@@ -43,6 +43,13 @@ type = "int"
 default = 0
 description = "Expire older images automatically. 0 keeps every image for ever, which is what most registry bills are made of."
 
+[[fields]]
+name = "force_delete"
+label = "Delete even with images"
+type = "bool"
+default = false
+description = "Let `destroy` delete a repository that still holds images, release images and immutable tags included. Off, ECR refuses to delete a non-empty repository, so a stray destroy cannot take the images with it. Azure and Google Cloud have no such guard: deleting their registry always deletes its images."
+
 # ---------------------------------------------------------------- AWS
 [providers.aws]
 status = "full"
@@ -57,7 +64,7 @@ when = { field = "repositories", absent = true }
 [providers.aws.blocks.args]
 name                 = { field = "name", transform = "kebab" }
 image_tag_mutability = { if = { field = "immutable_tags" }, then = { value = "IMMUTABLE" }, else = { value = "MUTABLE" } }
-force_delete         = { value = true }
+force_delete         = { if = { field = "force_delete" }, then = { value = true }, else = { value = false } }
 tags                 = { object = { Name = { field = "name" } } }
 
 [[providers.aws.blocks.nested]]
@@ -74,7 +81,7 @@ for_each_field = "repositories"
 [providers.aws.blocks.args]
 name                 = { item = "value", transform = "kebab" }
 image_tag_mutability = { if = { field = "immutable_tags" }, then = { value = "IMMUTABLE" }, else = { value = "MUTABLE" } }
-force_delete         = { value = true }
+force_delete         = { if = { field = "force_delete" }, then = { value = true }, else = { value = false } }
 tags                 = { object = { Name = { item = "value" }, Registry = { field = "name" } } }
 
 [[providers.aws.blocks.nested]]

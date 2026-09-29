@@ -977,7 +977,7 @@ impl TtgServer {
     }
 
     #[tool(
-        description = "Network posture of every resource: subnets, security group, way out of the network, internet exposure, listening port."
+        description = "Network posture of every resource: subnets, security groups (a workload has its cluster's or pool's; '(cluster security group)' is the group the provider makes for a cluster), way out of the network, internet exposure, listening port."
     )]
     async fn reach_posture(&self) -> CallToolResult {
         self.run(AgentCommand::ReachPosture).await

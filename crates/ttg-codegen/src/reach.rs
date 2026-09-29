@@ -28,7 +28,10 @@ pub enum Egress {
 #[derive(Debug, Clone)]
 pub struct Posture {
     pub subnets: Vec<Id>,
-    pub security_group: Option<Id>,
+    /// The groups whose rules apply to it (see [`security_groups_of`]): Security Group
+    /// entities, and a Kubernetes Cluster's id for the security group its provider
+    /// creates for the cluster.
+    pub security_groups: Vec<Id>,
     pub egress: Egress,
     /// How the internet can reach it, if it can.
     pub exposed: Option<String>,
@@ -84,6 +87,7 @@ const NETWORKED: &[&str] = &[
     "autoscaling_group",
     "function",
     "container_app",
+    "file_system",
 ];
 
 pub(crate) fn is_managed(t: &str) -> bool {
@@ -151,26 +155,216 @@ fn cidr_covers(outer: &str, inner: &str) -> bool {
     }
 }
 
-fn subnets_of(p: &Project, cat: &Catalog, e: &EntityRef) -> Vec<Id> {
-    // A workload has no network of its own: its pods sit in the nodes of its cluster.
-    if e.resource_type == "kubernetes_workload" {
-        return relation_targets(p, cat, e, Relation::Attachment)
-            .into_iter()
-            .filter_map(|t| p.entity(&t))
-            .filter(|c| c.resource_type == "kubernetes_cluster")
-            .flat_map(|c| subnets_of(p, cat, &c))
-            .collect();
-    }
-    relation_targets(p, cat, e, Relation::NetworkMembership)
+/// Targets of a relation that are of one abstract type.
+fn targets_of_type<'p>(
+    p: &'p Project,
+    cat: &Catalog,
+    e: &EntityRef,
+    kind: Relation,
+    ty: &str,
+) -> Vec<EntityRef<'p>> {
+    relation_targets(p, cat, e, kind)
         .into_iter()
-        .filter(|t| p.entity(t).is_some_and(|x| x.resource_type == "subnet"))
+        .filter_map(|t| p.entity(&t))
+        .filter(|x| x.resource_type == ty)
         .collect()
 }
 
-fn sg_of(p: &Project, cat: &Catalog, e: &EntityRef) -> Option<Id> {
-    relation_targets(p, cat, e, Relation::AttributeReference)
+/// Where the nodes that run a pool or a workload come from. A node pool runs on its
+/// cluster; a workload runs on the pools it schedules on (any link to a node pool), or
+/// else on its cluster's nodes. Both have no network presence of their own.
+enum Hosts<'p> {
+    Pools(Vec<EntityRef<'p>>),
+    Clusters(Vec<EntityRef<'p>>),
+}
+
+fn hosts_of<'p>(p: &'p Project, cat: &Catalog, e: &EntityRef) -> Option<Hosts<'p>> {
+    match e.resource_type {
+        "kubernetes_node_pool" => Some(Hosts::Clusters(targets_of_type(
+            p,
+            cat,
+            e,
+            Relation::Attachment,
+            "kubernetes_cluster",
+        ))),
+        "kubernetes_workload" => {
+            let pools: Vec<EntityRef> = p
+                .edges_from(e.id)
+                .filter(|x| !matches!(x.relation, Relation::DependsOn | Relation::Calls))
+                .filter_map(|x| p.entity(&x.target))
+                .filter(|x| x.resource_type == "kubernetes_node_pool")
+                .collect();
+            Some(if pools.is_empty() {
+                Hosts::Clusters(targets_of_type(
+                    p,
+                    cat,
+                    e,
+                    Relation::Attachment,
+                    "kubernetes_cluster",
+                ))
+            } else {
+                Hosts::Pools(pools)
+            })
+        }
+        _ => None,
+    }
+}
+
+fn subnets_of(p: &Project, cat: &Catalog, e: &EntityRef) -> Vec<Id> {
+    let own: Vec<Id> = targets_of_type(p, cat, e, Relation::NetworkMembership, "subnet")
         .into_iter()
-        .find(|t| p.entity(t).is_some_and(|x| x.resource_type == "security_group"))
+        .map(|s| s.id.to_string())
+        .collect();
+    // A pool's own subnets win over its cluster's; a workload has none of its own.
+    if !own.is_empty() && e.resource_type != "kubernetes_workload" {
+        return own;
+    }
+    match hosts_of(p, cat, e) {
+        Some(Hosts::Pools(v) | Hosts::Clusters(v)) => v.iter().flat_map(|h| subnets_of(p, cat, h)).collect(),
+        None => own,
+    }
+}
+
+/// Security Group entities linked to `e`, whichever relation the type uses for it
+/// ("Uses security group" is `attribute_reference`; a private endpoint's is `attachment`).
+fn linked_groups(p: &Project, cat: &Catalog, e: &EntityRef) -> Vec<Id> {
+    [Relation::AttributeReference, Relation::Attachment]
+        .into_iter()
+        .flat_map(|k| targets_of_type(p, cat, e, k, "security_group"))
+        .map(|g| g.id.to_string())
+        .collect()
+}
+
+/// The groups whose rules apply to `e`. A Kubernetes Cluster carries its linked groups
+/// plus its own id, which stands for the security group the provider creates for the
+/// cluster (what a rule whose source is the cluster admits). A node pool carries its own
+/// linked groups, or else its cluster's, and always its cluster's own group; a workload
+/// carries the groups of the nodes it runs on.
+pub(crate) fn security_groups_of(p: &Project, cat: &Catalog, e: &EntityRef) -> Vec<Id> {
+    let mut out = linked_groups(p, cat, e);
+    match e.resource_type {
+        "kubernetes_cluster" => out.push(e.id.to_string()),
+        "kubernetes_node_pool" => {
+            for c in targets_of_type(p, cat, e, Relation::Attachment, "kubernetes_cluster") {
+                if out.is_empty() {
+                    out = security_groups_of(p, cat, &c);
+                } else {
+                    out.push(c.id.to_string());
+                }
+            }
+        }
+        "kubernetes_workload" => {
+            out = match hosts_of(p, cat, e) {
+                Some(Hosts::Pools(v) | Hosts::Clusters(v)) => {
+                    v.iter().flat_map(|h| security_groups_of(p, cat, h)).collect()
+                }
+                None => Vec::new(),
+            };
+        }
+        _ => {}
+    }
+    let mut seen = std::collections::HashSet::new();
+    out.retain(|g| seen.insert(g.clone()));
+    out
+}
+
+/// Does anything carry `group`? A cluster's own group always has its nodes.
+pub(crate) fn group_has_members(p: &Project, cat: &Catalog, group: &str) -> bool {
+    if p.entity(group)
+        .is_some_and(|g| g.resource_type == "kubernetes_cluster")
+    {
+        return true;
+    }
+    p.entities()
+        .iter()
+        .filter(|e| !e.is_container && e.id != group)
+        .any(|e| security_groups_of(p, cat, e).iter().any(|g| g == group))
+}
+
+/// Security Groups that some rule names as its source (`source_group`) although nothing
+/// carries them, each with the groups whose rules name it. Those rules admit no one.
+pub(crate) fn memberless_sources(p: &Project, cat: &Catalog) -> Vec<(Id, Vec<Id>)> {
+    let mut named: BTreeMap<Id, Vec<Id>> = BTreeMap::new();
+    for sg in p
+        .entities()
+        .iter()
+        .filter(|e| e.resource_type == "security_group")
+    {
+        for r in rules_of(p, sg.id) {
+            let is_group = p
+                .entity(&r.source_group)
+                .is_some_and(|s| s.resource_type == "security_group");
+            if is_group {
+                let users = named.entry(r.source_group.clone()).or_default();
+                if !users.iter().any(|u| u == sg.id) {
+                    users.push(sg.id.to_string());
+                }
+            }
+        }
+    }
+    named
+        .into_iter()
+        .filter(|(g, _)| !group_has_members(p, cat, g))
+        .collect()
+}
+
+/// The resources an interface endpoint refuses on 443 when it admits none of the ones in
+/// its network: none of its groups' ingress rules covers their subnets or names a group
+/// they carry. `None` when it admits one of them, when it has no group (the VPC default
+/// group applies, which the diagram cannot see), or when nothing in the network opens
+/// connections at all.
+pub(crate) fn endpoint_refuses_all(p: &Project, cat: &Catalog, pe: &EntityRef) -> Option<Vec<Id>> {
+    let groups = linked_groups(p, cat, pe);
+    let vnet = subnets_of(p, cat, pe)
+        .iter()
+        .find_map(|s| vnet_of_subnet(p, cat, s))
+        .or_else(|| p.ancestor_of_type(pe.id, "virtual_network").map(|c| c.id.clone()))?;
+    if groups.is_empty() {
+        return None;
+    }
+    let clients: Vec<(EntityRef, Vec<Id>)> = p
+        .entities()
+        .into_iter()
+        .filter(|e| !e.is_container && initiates(e.resource_type))
+        .map(|e| {
+            let subnets = subnets_of(p, cat, &e);
+            (e, subnets)
+        })
+        .filter(|(_, subnets)| {
+            subnets
+                .iter()
+                .any(|s| vnet_of_subnet(p, cat, s).as_deref() == Some(vnet.as_str()))
+        })
+        .collect();
+    if clients.is_empty() {
+        return None;
+    }
+    let admits = |r: &Rule, (client, subnets): &(EntityRef, Vec<Id>)| {
+        r.cidr == "0.0.0.0/0"
+            || (!r.cidr.is_empty()
+                && subnets
+                    .iter()
+                    .any(|s| subnet_cidr(p, s).is_some_and(|c| cidr_covers(&r.cidr, &c))))
+            || (!r.source_group.is_empty() && security_groups_of(p, cat, client).contains(&r.source_group))
+    };
+    let admitted = groups
+        .iter()
+        .flat_map(|g| rules_of(p, g))
+        .filter(|r| r.ingress && rule_matches_port(r, Some(443)))
+        .any(|r| clients.iter().any(|c| admits(&r, c)));
+    (!admitted).then(|| clients.iter().map(|(e, _)| e.id.to_string()).collect())
+}
+
+/// How a group is named in a reason: a Security Group by its name, a cluster's own group
+/// as that.
+fn group_label(p: &Project, id: &str) -> String {
+    match p.entity(id) {
+        Some(e) if e.resource_type == "kubernetes_cluster" => {
+            format!("the cluster security group of \"{}\"", e.name)
+        }
+        Some(e) => format!("\"{}\"", e.name),
+        None => format!("\"{id}\""),
+    }
 }
 
 fn vnet_of_subnet(p: &Project, cat: &Catalog, subnet: &str) -> Option<Id> {
@@ -270,8 +464,22 @@ struct Rule {
     source_group: String,
 }
 
+/// A group's rules. A cluster's own group is the one its provider makes: all traffic
+/// between its members, and all traffic out (EKS's cluster security group, GKE's
+/// intra-cluster firewall rules; on Azure the node subnets are what the rules admit).
 fn rules_of(p: &Project, sg: &str) -> Vec<Rule> {
     let Some(e) = p.entity(sg) else { return vec![] };
+    if e.resource_type == "kubernetes_cluster" {
+        let all = |ingress: bool, cidr: &str, source_group: &str| Rule {
+            ingress,
+            protocol: "all".into(),
+            from: 0,
+            to: 0,
+            cidr: cidr.into(),
+            source_group: source_group.into(),
+        };
+        return vec![all(true, "", sg), all(false, "0.0.0.0/0", "")];
+    }
     let Some(Value::Records(rows)) = e.field("rules") else {
         return vec![];
     };
@@ -312,6 +520,7 @@ pub fn listening_port(e: &EntityRef) -> Option<i64> {
         "load_balancer" => e.field("listener_port").and_then(|v| v.as_int()),
         "container_app" => e.field("port").and_then(|v| v.as_int()),
         "kubernetes_cluster" => Some(443),
+        "file_system" => Some(2049),
         _ => None,
     }
 }
@@ -414,7 +623,7 @@ pub fn analyse(full: &Project, cat: &Catalog, provider: &str) -> Reach {
             continue;
         }
         let subnets = subnets_of(p, cat, &e);
-        let security_group = sg_of(p, cat, &e);
+        let security_groups = security_groups_of(p, cat, &e);
         let egress = if subnets.is_empty() {
             Egress::Unrestricted
         } else if !initiates(e.resource_type) {
@@ -437,10 +646,10 @@ pub fn analyse(full: &Project, cat: &Catalog, provider: &str) -> Reach {
             match found {
                 None => Egress::Blocked(last_err),
                 Some(hops) => {
-                    // Security group must allow outbound (AWS); Azure allows by default.
+                    // Some security group must allow outbound (AWS); Azure allows by default.
                     let allowed = pol.egress_default_allow
-                        || security_group.is_none()
-                        || rules_of(p, security_group.as_deref().unwrap()).iter().any(|r| {
+                        || security_groups.is_empty()
+                        || security_groups.iter().flat_map(|g| rules_of(p, g)).any(|r| {
                             !r.ingress
                                 && (r.cidr == "0.0.0.0/0"
                                     || r.protocol == "all" && r.cidr.is_empty() && r.source_group.is_empty())
@@ -453,12 +662,12 @@ pub fn analyse(full: &Project, cat: &Catalog, provider: &str) -> Reach {
                 }
             }
         };
-        let exposed = exposure(p, cat, provider, &e, &subnets, security_group.as_deref());
+        let exposed = exposure(p, cat, provider, &e, &subnets, &security_groups);
         posture.insert(
             e.id.to_string(),
             Posture {
                 subnets,
-                security_group,
+                security_groups,
                 egress,
                 exposed,
                 networked,
@@ -478,7 +687,7 @@ fn exposure(
     provider: &str,
     e: &EntityRef,
     subnets: &[Id],
-    sg: Option<&str>,
+    groups: &[Id],
 ) -> Option<String> {
     match e.resource_type {
         "function" if e.field("http_trigger").and_then(|v| v.as_bool()).unwrap_or(false) => {
@@ -524,9 +733,9 @@ fn exposure(
     if !public_subnet {
         return None;
     }
-    let sg = sg?;
-    let open = rules_of(p, sg)
-        .into_iter()
+    let open = groups
+        .iter()
+        .flat_map(|g| rules_of(p, g))
         .find(|r| r.ingress && r.cidr == "0.0.0.0/0");
     open.map(|r| {
         if r.protocol == "all" {
@@ -758,21 +967,19 @@ fn direct_path(
     }
     let port = listening_port(tgt);
     let mut notes = Vec::new();
-    // Source egress rule (AWS only).
+    // Source egress rule (AWS only): any of the source's groups may allow it.
     let src_egress_ok = pol.egress_default_allow
-        || sp.security_group.is_none()
-        || rules_of(p, sp.security_group.as_deref().unwrap())
-            .iter()
-            .any(|r| {
-                !r.ingress
-                    && rule_matches_port(r, port)
-                    && (r.cidr == "0.0.0.0/0"
-                        || tp
-                            .subnets
-                            .iter()
-                            .any(|s| subnet_cidr(p, s).is_some_and(|c| cidr_covers(&r.cidr, &c)))
-                        || tp.security_group.as_deref() == Some(r.source_group.as_str()))
-            });
+        || sp.security_groups.is_empty()
+        || sp.security_groups.iter().flat_map(|g| rules_of(p, g)).any(|r| {
+            !r.ingress
+                && rule_matches_port(&r, port)
+                && (r.cidr == "0.0.0.0/0"
+                    || tp
+                        .subnets
+                        .iter()
+                        .any(|s| subnet_cidr(p, s).is_some_and(|c| cidr_covers(&r.cidr, &c)))
+                    || tp.security_groups.contains(&r.source_group))
+        });
     if !src_egress_ok {
         return path(
             Status::Blocked,
@@ -785,9 +992,35 @@ fn direct_path(
             notes,
         );
     }
-    // Target ingress rule.
-    let (status, reason) = match tp.security_group.as_deref() {
-        None => {
+    // Target ingress rule: any of the target's groups may admit it, by an open range, a
+    // group the source carries, or a range covering the source's subnet.
+    let matched = tp.security_groups.iter().find_map(|g| {
+        rules_of(p, g)
+            .into_iter()
+            .find(|r| {
+                r.ingress
+                    && rule_matches_port(r, port)
+                    && (r.cidr == "0.0.0.0/0"
+                        || (!r.source_group.is_empty() && sp.security_groups.contains(&r.source_group))
+                        || (!r.cidr.is_empty()
+                            && sp
+                                .subnets
+                                .iter()
+                                .any(|s| subnet_cidr(p, s).is_some_and(|c| cidr_covers(&r.cidr, &c)))))
+            })
+            .map(|r| (g.clone(), r))
+    });
+    // A cluster's own group can admit traffic but never decides a refusal: the provider
+    // and its controllers (the AWS Load Balancer Controller, GKE) add rules to it that
+    // the diagram cannot see. Without a Security Group entity the target counts as having
+    // no group.
+    let real_groups: Vec<&Id> = tp
+        .security_groups
+        .iter()
+        .filter(|g| p.entity(g).is_some_and(|x| x.resource_type == "security_group"))
+        .collect();
+    let (status, reason) = match (&matched, real_groups.is_empty()) {
+        (None, true) => {
             if pol.intra_network_default_allow {
                 (
                     Status::Ok,
@@ -803,39 +1036,36 @@ fn direct_path(
                 )
             }
         }
-        Some(tsg) => {
-            let matched = rules_of(p, tsg).into_iter().find(|r| {
-                r.ingress
-                    && rule_matches_port(r, port)
-                    && (r.cidr == "0.0.0.0/0"
-                        || (!r.source_group.is_empty()
-                            && sp.security_group.as_deref() == Some(r.source_group.as_str()))
-                        || (!r.cidr.is_empty()
-                            && sp
-                                .subnets
-                                .iter()
-                                .any(|s| subnet_cidr(p, s).is_some_and(|c| cidr_covers(&r.cidr, &c)))))
-            });
-            match matched {
-                Some(r) if !r.source_group.is_empty() => (
-                    Status::Ok,
-                    format!("allowed by \"{}\": rule from security group", name_of(tsg)),
-                ),
-                Some(r) => (
-                    Status::Ok,
-                    format!("allowed by \"{}\": rule from {}", name_of(tsg), r.cidr),
-                ),
-                None => (
-                    Status::Blocked,
-                    format!(
-                        "\"{}\" has no ingress rule allowing {} from \"{}\"",
-                        name_of(tsg),
-                        port.map(|x| format!("port {x}")).unwrap_or("this traffic".into()),
-                        src.name
-                    ),
-                ),
-            }
-        }
+        (Some((g, r)), _) if !r.source_group.is_empty() => (
+            Status::Ok,
+            format!(
+                "allowed by {}: rule from {}",
+                group_label(p, g),
+                if r.source_group == *g {
+                    "its own members".to_string()
+                } else {
+                    format!("security group {}", group_label(p, &r.source_group))
+                }
+            ),
+        ),
+        (Some((g, r)), _) => (
+            Status::Ok,
+            format!("allowed by {}: rule from {}", group_label(p, g), r.cidr),
+        ),
+        (None, false) => (
+            Status::Blocked,
+            format!(
+                "{} {} no ingress rule allowing {} from \"{}\"",
+                real_groups
+                    .iter()
+                    .map(|g| group_label(p, g))
+                    .collect::<Vec<_>>()
+                    .join(", "),
+                if real_groups.len() == 1 { "has" } else { "have" },
+                port.map(|x| format!("port {x}")).unwrap_or("this traffic".into()),
+                src.name
+            ),
+        ),
     };
     if status == Status::Ok && !linked && tgt.resource_type == "relational_database" {
         notes.push(format!(
@@ -848,8 +1078,14 @@ fn direct_path(
         hops.push(s.clone());
     }
     hops.extend(fabric);
-    if let Some(sg) = &tp.security_group {
-        hops.push(sg.clone());
+    // The group that let it in, or the first one that could have.
+    if let Some(g) = matched
+        .map(|(g, _)| g)
+        .or_else(|| real_groups.first().map(|g| g.to_string()))
+    {
+        if g != tid {
+            hops.push(g);
+        }
     }
     path(status, hops, reason, notes)
 }

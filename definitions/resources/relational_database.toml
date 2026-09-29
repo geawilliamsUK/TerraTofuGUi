@@ -170,6 +170,18 @@ type = "bool"
 default = false
 description = "Collect query-level performance data (not available on the db.t3.micro that 'small' selects)."
 
+[[providers.aws.fields]]
+name = "storage_type"
+label = "Storage type"
+type = "enum"
+options = ["gp3", "gp2", "io1", "io2"]
+default = "gp3"
+description = "EBS volume type. gp3 gives a 3,000 IOPS baseline at any size for less than gp2, whose IOPS grow with the size (a small gp2 volume is slow); io1 / io2 need provisioned IOPS."
+
+[[providers.aws.checks]]
+when = { any = [ { provider_field = "storage_type", equals = "io1" }, { provider_field = "storage_type", equals = "io2" } ] }
+message = "\"{name}\" uses provisioned-IOPS storage, which RDS will not create without an IOPS figure: add an `iops` extra argument (1000 or more), or choose gp3"
+
 [[providers.aws.variables]]
 name = "db_password"
 type = "string"
@@ -195,6 +207,7 @@ engine                       = { map = "engine", table = { postgres = "postgres"
 engine_version               = { provider_field = "engine_version", fallback = { map = "engine", table = { postgres = "16", mysql = "8.0" } } }
 instance_class               = { provider_field = "instance_class", fallback = { map = "size", table = { small = "db.t3.micro", medium = "db.t3.medium", large = "db.m5.large" } } }
 allocated_storage            = { map = "storage", table = { "32" = 32, "64" = 64, "128" = 128, "256" = 256, "512" = 512 } }
+storage_type                 = { provider_field = "storage_type", fallback = { value = "gp3" } }
 db_name                      = { field = "database_name" }
 username                     = { field = "admin_username" }
 password                     = { if = { relation = "reads" }, then = { relation = "reads", block = "version", attr = "secret_string" }, else = { var = "db_password" } }

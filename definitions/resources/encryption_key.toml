@@ -3,7 +3,9 @@
 # A customer-managed key other resources are encrypted with ('Encrypted with').
 # AWS:   aws_kms_key + aws_kms_alias. The key policy lets the account root administer the
 #        key and lets the CloudWatch Logs and event service principals use it, so an
-#        encrypted log group, queue and topic work without further edits.
+#        encrypted log group, queue and topic work without further edits. When
+#        Kubernetes node disks are encrypted with it, EC2 Auto Scaling's service-linked
+#        role may use it too.
 # Azure: azurerm_key_vault_key inside the enclosing Key Vault (required).
 # GCP:   google_kms_key_ring + google_kms_crypto_key in the provider's region.
 
@@ -95,6 +97,18 @@ Principal = { object = { Service = { value = ["sns.amazonaws.com", "sqs.amazonaw
 Action    = { value = ["kms:Decrypt", "kms:GenerateDataKey*"] }
 Resource  = { value = "*" }
 
+# Kubernetes node disks: EKS node groups are launched by EC2 Auto Scaling, which creates
+# and attaches their encrypted root volumes through its service-linked role. An IAM policy
+# cannot be attached to a service-linked role, so the key names it: use of the key, and
+# grants for the volumes it attaches.
+[[providers.aws.blocks.args.policy.args.object.Statement.list]]
+if = { any = [ { relation = "encrypted_with", incoming = true, target_type = "kubernetes_cluster" }, { relation = "encrypted_with", incoming = true, target_type = "kubernetes_node_pool" } ] }
+then = { object = { Sid = { value = "AutoScalingVolumes" }, Effect = { value = "Allow" }, Principal = { object = { AWS = { func = "format", args = [ { value = "arn:aws:iam::%s:role/aws-service-role/autoscaling.amazonaws.com/AWSServiceRoleForAutoScaling" }, { self_data = "account", attr = "account_id" } ] } } }, Action = { value = ["kms:Encrypt", "kms:Decrypt", "kms:ReEncrypt*", "kms:GenerateDataKey*", "kms:DescribeKey"] }, Resource = { value = "*" } } }
+
+[[providers.aws.blocks.args.policy.args.object.Statement.list]]
+if = { any = [ { relation = "encrypted_with", incoming = true, target_type = "kubernetes_cluster" }, { relation = "encrypted_with", incoming = true, target_type = "kubernetes_node_pool" } ] }
+then = { object = { Sid = { value = "AutoScalingVolumeGrants" }, Effect = { value = "Allow" }, Principal = { object = { AWS = { func = "format", args = [ { value = "arn:aws:iam::%s:role/aws-service-role/autoscaling.amazonaws.com/AWSServiceRoleForAutoScaling" }, { self_data = "account", attr = "account_id" } ] } } }, Action = { value = "kms:CreateGrant" }, Resource = { value = "*" }, Condition = { object = { Bool = { object = { "kms:GrantIsForAWSResource" = { value = "true" } } } } } } }
+
 [[providers.aws.blocks]]
 key = "alias"
 resource = "aws_kms_alias"
@@ -106,6 +120,21 @@ target_key_id  = { self_block = "main", attr = "key_id" }
 [providers.aws.outputs]
 arn    = { attr = "arn", description = "Key ARN" }
 key_id = { attr = "key_id", description = "Key id" }
+
+[[providers.aws.manual_steps]]
+title = "The Auto Scaling service-linked role must exist before the key"
+when = { any = [ { relation = "encrypted_with", incoming = true, target_type = "kubernetes_cluster" }, { relation = "encrypted_with", incoming = true, target_type = "kubernetes_node_pool" } ] }
+body = """
+Kubernetes node disks are encrypted with this key, so its policy names the EC2 Auto
+Scaling service-linked role (`AWSServiceRoleForAutoScaling`), and KMS refuses a policy
+whose principal does not exist. The role appears the first time anything in the account
+uses Auto Scaling, an EKS node group included; in a fresh account create it before the
+first `apply`:
+
+    aws iam create-service-linked-role --aws-service-name autoscaling.amazonaws.com
+
+An error saying the name has been taken means the role is already there.
+"""
 
 # ---------------------------------------------------------------- Azure
 [providers.azure]

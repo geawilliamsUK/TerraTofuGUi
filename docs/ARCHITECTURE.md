@@ -365,8 +365,12 @@ Three layers, all surfaced through the same `Diagnostic` list:
    several resources at once and therefore know the network-shaped abstract types by
    name: subnet CIDRs inside their network and non-overlapping, AWS zones inside the
    configured region, one route table per subnet, a NAT gateway's subnet routing to an
-   internet gateway, functions in subnets having an outbound route, and managed
-   services (`network_agnostic`) drawn inside a network being informational only.
+   internet gateway, functions in subnets having an outbound route, managed
+   services (`network_agnostic`) drawn inside a network being informational only, a
+   security group that rules name as their source although nothing carries it
+   (warning), and an AWS interface endpoint with private DNS whose security group admits
+   nothing in its network (error: it answers for the service's name everywhere there).
+   The last two use reachability's notion of membership.
 
 `diagnostics::run` answers for one target provider. `diagnostics::other_providers` adds
 the *other* providers' errors, each downgraded to a warning, tagged with the provider it
@@ -389,6 +393,15 @@ on the target on AWS). Managed services are reached over the provider API, so th
 "a way out of the network" plus "a link that grants permission"; networked targets need
 the same network, a matching ingress rule (CIDR or source group and port) and, on AWS, an
 egress rule on the source. The GUI's overlay and the `ttg reach` command both call it.
+
+A resource may carry several groups, and any of them may allow the traffic. Kubernetes
+resources have no network presence of their own: a cluster carries its linked groups
+plus *its own* group (the cluster's id stands for the security group the provider makes
+for it, which admits its members and lets everything out — what a rule whose source is
+the cluster means, and which can admit traffic but never refuses it, since the provider's
+controllers add rules to it the diagram cannot see); a node pool carries its own linked groups or else its cluster's, and
+always the cluster's own; a workload carries the groups and subnets of the pools it is
+linked to, or else of its cluster.
 
 ### 6.1 Manual and unmapped nodes
 

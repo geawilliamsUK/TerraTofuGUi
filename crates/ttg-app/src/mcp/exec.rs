@@ -1756,11 +1756,24 @@ impl TtgApp {
                         ttg_codegen::reach::Egress::Via(h) => json!({"via": h.iter().map(|x| name(self, x)).collect::<Vec<_>>()}),
                         ttg_codegen::reach::Egress::Blocked(r) => json!({"blocked": r}),
                     };
+                    // A cluster id among the groups stands for the security group the
+                    // provider creates for that cluster.
+                    let groups: Vec<String> = po
+                        .security_groups
+                        .iter()
+                        .map(|g| match self.project.entity(g) {
+                            Some(e) if e.resource_type == "kubernetes_cluster" => {
+                                format!("{} (cluster security group)", e.name)
+                            }
+                            _ => name(self, g),
+                        })
+                        .collect();
                     json!({
                         "id": id,
                         "name": name(self, id),
                         "subnets": po.subnets.iter().map(|s| name(self, s)).collect::<Vec<_>>(),
-                        "security_group": po.security_group.as_ref().map(|s| name(self, s)),
+                        "security_group": groups.first(),
+                        "security_groups": groups,
                         "egress": egress,
                         "exposed": po.exposed,
                         "listening_port": self.project.entity(id).and_then(|e| ttg_codegen::reach::listening_port(&e)),
