@@ -37,7 +37,24 @@ Claude Code ──Streamable HTTP (MCP), localhost, bearer token──► terrat
 
 Read: `project_get`, `project_summary`, `catalog_types`, `catalog_type`,
 `catalog_relations`, `diagnostics`, `reach_posture`, `reach_from`, `reach_to`,
-`export_preview`, `entity_preview`, `view_get`, `view_export`, `view_fit`, `screenshot`.
+`export_preview`, `entity_preview`, `view_get`, `view_export`, `view_fit`, `screenshot`,
+`cost_estimate`.
+
+`cost_estimate { provider?, environment?, view?, group_by?, assumptions?, region? }`
+(round 3, R3.12; `exec/cost.rs` over `ttg_codegen::cost::estimate_with`) answers the
+monthly estimate of the provider's layer: `monthly` (and `converted` when the project
+sets a display currency), `prices_retrieved`, `region` / `price_region`, the `caveat`
+to repeat, and by `group_by` either `lines` (priced entities, largest first, each with
+its charges — quantity, unit, unit price, the price-list row — assumptions with their
+source, and notes), `types` or `groups` (the labelled boxes of `view`, or of every
+view). Free entities come back summarised per type with the reason, unpriced ones in
+`not_estimated` with why; `views` has every saved view's total and `assumptions` every
+assumption at its project value. `view` narrows the lines and the total to what that view
+shows. `assumptions` are for the call only (`source: "call"`); unknown keys, a non-number,
+an unknown view, `group_by` or provider are refused with what would have worked. Named
+environments do not exist yet: `environment` is accepted and the reply's `notes` say it
+was ignored; the estimate takes a `&Project`, so resolving an environment first is all
+that will be needed. The budget warning (`code: "Cost"`) arrives through `diagnostics`.
 
 `diagnostics` answers `{ provider, diagnostics, other_providers }`: the target provider's
 list, and separately what the *other* providers would say: their errors as warnings
@@ -293,7 +310,10 @@ revision, every refusal listed, empty and non-matching selections). Codegen test
 the other-provider info lines, `Generated::entity_preview` and `views::reveal`; the
 catalog crate tests the fingerprint. The unit tests beside `mcp/mod.rs` cover the
 dropped-caller rule (fresh and deferred), the heartbeat, the screenshot size clamp,
-selectors and the quiet flag. All run in CI on the same job as the rest of
+selectors and the quiet flag. `headless_cost_estimate` covers the three groupings on
+job-pipeline (whose one view has four groups), a one-call assumption moving the total
+and reported as `call`, the environment note and an explicit region, each refusal, and
+that the revision does not move. All run in CI on the same job as the rest of
 the workspace.
 
 ## 5. Open ideas

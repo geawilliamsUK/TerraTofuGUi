@@ -236,6 +236,18 @@ OpenTofu installed, so a definition change that produces invalid HCL fails the b
   headless with `ttg reach <project> --from <name>`; `examples/hub-spoke.ttg.json` shows
   all three.
 
+- **Cost estimate** (*View ▸ Cost estimate…*, `ttg cost <project>`, or the agent's
+  `cost_estimate` tool). A monthly figure per resource, per type and per saved view and
+  group, for any provider and its region, from price lists bundled with the app and the
+  usage assumptions you set in the window (GB stored per bucket, node-hours a day of a GPU
+  pool that scales to zero, requests, log volume — project-wide or per resource, saved
+  with the project). A `budget` resource whose limit the estimate exceeds gets a
+  warning. **It is an estimate, not a quote:** the prices are on-demand list prices in US
+  dollars as of the date shown in the window (no free tier, discounts, reservations,
+  support or tax), some items are left out and say why, and usage is whatever you
+  assumed. Check the provider's own calculator before committing to a budget; see
+  [docs/PRICES.md](docs/PRICES.md) for the sources and how the list is refreshed.
+
 ![Reachability overlay from the job runner](docs/screenshot-reachability.png)
 
 ![Concrete display of the fan-out example with the "Messaging" view active](docs/screenshot-concrete.png)
@@ -357,7 +369,8 @@ GitHub Actions.
 ## Repository layout
 
 ```
-definitions/          resource + provider mapping files (data, contributable)
+definitions/          resource + provider mapping files (data, contributable), and
+                      prices/ for the cost estimate
 crates/ttg-core       IR, project file, structural validation, dependency graph
 crates/ttg-catalog    loads and validates definitions
 crates/ttg-codegen    HCL generation, diagnostics, MANUAL_STEPS.md, tool toggle
@@ -365,7 +378,7 @@ crates/ttg-cli        headless `ttg` command
 crates/ttg-app        egui/eframe desktop application
 examples/             sample projects (every one exports and validates on every provider)
 schemas/              JSON Schema of the .ttg.json project file (generated: `ttg schema project`)
-docs/                 ARCHITECTURE.md, MAPPING_FORMAT.md, PHASE2_PLAN.md, MCP_PLAN.md, RELEASING.md
+docs/                 ARCHITECTURE.md, MAPPING_FORMAT.md, PHASE2_PLAN.md, MCP_PLAN.md, PRICES.md, RELEASING.md
 CONTRIBUTING.md       how to add a definition, verify it, and what CI expects
 ```
 

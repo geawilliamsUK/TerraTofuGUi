@@ -33,6 +33,7 @@ definitions/               DATA, not code — the resource mapping catalog (TOML
   providers/aws.toml       provider block, required_providers entry, provider-level variables
   providers/azure.toml
   resources/*.toml         one file per abstract resource type
+  prices/<provider>.toml   bundled list prices for the cost estimate (see PRICES.md)
 crates/
   ttg-core                 IR types, project file (JSON), structural validation, dependency graph
   ttg-catalog              loads + validates definition files; typed schema for the mapping format
@@ -412,6 +413,47 @@ controllers add rules to it the diagram cannot see); a node pool carries its own
 always the cluster's own; a workload carries the groups and subnets of the pools it is
 linked to, or else of its cluster.
 
+### 6.0b Cost estimate (`ttg-codegen::cost`)
+
+`cost::estimate(project, catalog, provider, region?)` prices the provider's layer — what
+its export would create — and returns an `Estimate`: one `Line` per entity (status
+priced / free / not estimated, the `Charge`s that make it up as quantity × unit price,
+the assumptions it used and where each value came from, notes), totals per abstract type,
+per saved view and per labelled group of each view (`views::visible_set` and
+`ttg_core::view::group_members`), the price date, and a caveat every surface shows. It
+takes a plain `&Project`, so a caller that resolves a named environment into a project of
+its own can estimate that. Three parts, maintained apart:
+
+- **Prices** — `definitions/prices/<provider>.toml`, compiled in (`include_str!`) so the
+  estimate works offline: USD list prices for a few regions (the providers' defaults and
+  the UK / EU ones), one row per SKU, each table with its source and a note of what was
+  cross-checked and how. A region without a column falls back to the list's reference
+  region, and the estimate says so. `docs/PRICES.md` is the refresh procedure.
+- **Models** — `cost/{aws,azure,gcp}.rs`, one small function per priced abstract type.
+  They read the same fields the mappings read and resolve the concrete SKU through the
+  mapping itself (`Ctx::arg("main", "instance_class")` evaluates the block argument's
+  literal / field / provider-field / lookup-table / `if` sources, so `size = small`
+  becomes `db.t3.micro` and an instance-class override wins exactly as in the export).
+  Types that cost nothing or are not priced are listed in the price file's `[free]` /
+  `[not_estimated]` tables with the reason shown to the user; a test fails when a mapped
+  type is in none of the three places, or when a model asks for a row the list lacks.
+- **Assumptions** — usage the diagram does not say (`cost::ASSUMPTIONS`: GB per bucket,
+  log GB a month, node-hours a day of a pool that scales to zero, requests, …), with
+  defaults in code, project values in `settings.cost_assumptions.values`, per-entity
+  overrides in `settings.cost_assumptions.entities[<id>]` and, for one MCP call, the
+  tool's `assumptions`. A pool with `min_nodes = 0` is priced at the node-hours-a-day
+  assumption instead of around the clock. `settings.cost_currency` adds a display
+  currency at a fixed, dated rate; prices stay USD.
+
+`cost::budget_diagnostics` adds a warning (`Code::Cost`) on each `budget` entity whose
+`monthly_limit` the estimate exceeds. It runs inside `diagnostics::run` for the target
+provider only — the other-provider list keeps errors alone — because it is cheap: on the
+84-resource CallScope design it takes about 0.5 ms against about 6 ms for the whole
+diagnostics run (dev profile), and it is skipped outright without a budget. Surfaces: the
+GUI's Cost window (`cost_panel.rs`: the table by resource / type / view, the assumptions
+editable in place as undoable edits, the price date in a colour of its own), `ttg cost`
+and the MCP `cost_estimate` tool.
+
 ### 6.1 Manual and unmapped nodes
 
 A node flagged `manual`, or one with no mapping for the target provider, is **not emitted**.
@@ -574,6 +616,7 @@ stays); `diff::against_dir` lists the same stale files as removed.
 | `inspector.rs` | typed property editors generated from the definition (`string`, `bool`, `int`, `cidr`, `enum`, `string_list`); provider-specific fields under a per-provider header; inline validation; the project settings (tool, state backend and encryption, default tags, provider versions, provider variables) |
 | `menu.rs` | file new/open/save/save-as, undo/redo, tool toggle, target provider, export single / export all, validate |
 | `clipboard.rs` | copy/paste of a sub-diagram as JSON (fresh ids, de-duplicated names, edges between copied items kept) |
+| `cost_panel.rs` | the Cost window: estimate for a chosen provider, per resource / type / view, assumptions and display currency editable in place |
 | `views.rs` | the view bar (tabs, description, legend toggle, annotation buttons), the filter menu, and the per-frame visible set (`ttg_codegen::views::visible_set` plus the "a fitted container with no visible members is not drawn" rule) |
 | `annotations.rs` | drawing and editing a view's groups, flows, notes and logical nodes; the legend panel; geometry delegated to `ttg_core::view` |
 | `camera.rs` | world/screen transform, zoom-about-pointer, zoom-to-fit |
@@ -589,10 +632,11 @@ a muted colour; they never reach the canvas badges, which stay about the export 
 ## 8. Non-goals for v1
 
 Not implemented and not designed for: running `plan`/`apply` against live accounts, real-time
-multi-user collaboration, cost estimation, drift detection, state-file visualisation or
-management. The pipeline ends at "validated files on disk" — where the state *will* live
-(backend, encryption, the bootstrap root that creates the store) is generated, but nothing
-reads or writes a state file.
+multi-user collaboration, drift detection, state-file visualisation or management. A
+list-price cost *estimate* exists (§6.0b), but it never reads a bill. The pipeline ends at
+"validated files on disk" — where the state *will* live (backend, encryption, the
+bootstrap root that creates the store) is generated, but nothing reads or writes a state
+file.
 
 ## 9. Licensing
 

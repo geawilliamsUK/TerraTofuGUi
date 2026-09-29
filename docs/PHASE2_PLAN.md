@@ -724,7 +724,39 @@ backend type and an encryption flag; this round builds on them (ARCHITECTURE.md 
 - **`settings_set` refuses unknown keys** (R3.14), listing the valid ones, directly and
   inside `project_apply`; a refused call changes nothing.
 
+## Round 3: cost estimate (gap report R3.12)
+
+"Every reviewer's first question is what it costs": the CallScope author priced the
+design by hand at £350-400 a month for the architecture document.
+
+- **`ttg_codegen::cost`** estimates one provider's layer from bundled list prices
+  (`definitions/prices/<provider>.toml`, USD, dated, one row per SKU, sources and
+  cross-checks recorded per table; AWS us-east-1 / eu-west-1 / eu-west-2, Azure eastus /
+  westeurope / uksouth, GCP us-central1 / europe-west1 / europe-west2) and editable usage
+  assumptions. Models live per provider in code and resolve the concrete SKU through the
+  mapping's own argument sources; free and unpriced types are listed with reasons in the
+  price files, and a test refuses a mapped type that is in neither list nor priced.
+  Details in ARCHITECTURE.md §6.0b and the refresh procedure in PRICES.md.
+- **Assumptions** in `settings.cost_assumptions` (project values and per-entity
+  overrides); a pool that scales to zero is priced at a node-hours-a-day figure (default
+  8) rather than 24/7. `settings.cost_currency` shows a second currency at a fixed rate.
+- **Budget diagnostic**: a warning on a `budget` whose `monthly_limit` the estimate
+  exceeds, target provider only, cheap enough to run with the other diagnostics.
+- **Surfaces**: the GUI's *View ▸ Cost estimate…* window, `ttg cost <project>
+  [--provider] [--region] [--by entity|type] [--detail] [--json]`, and the MCP
+  `cost_estimate { provider?, environment?, view?, group_by?, assumptions?, region? }`
+  (named environments are accepted and, until the project has them, reported as ignored).
+- **CallScope (AWS, eu-west-2)** comes to about $938 a month at the default assumptions
+  (roughly £700), against the hand estimate of £350-400. The difference is in four
+  places: the GPU pool at eight node-hours a day of g5.xlarge ($311; at two hours a day
+  it is $78), the seven interface endpoints in two zones each ($113, easy to leave out
+  by hand), Multi-AZ RDS ($122, half of that single-AZ) and the EKS control plane plus
+  two t3.large nodes around the clock ($215). The budget entity's $600 limit is
+  exceeded, so the warning fires; at two GPU hours a day and single-AZ the design is
+  about $645.
+
 ## Explicitly still out of scope
 
-Running `plan`/`apply`, live-account access, multi-user collaboration, cost estimation,
-drift detection and state visualisation remain non-goals for these phases.
+Running `plan`/`apply`, live-account access, multi-user collaboration, drift detection
+and state visualisation remain non-goals for these phases. Cost is an *estimate* from
+bundled list prices; reading real bills or live pricing APIs is out of scope.
