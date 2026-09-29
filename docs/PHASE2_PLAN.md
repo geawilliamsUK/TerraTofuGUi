@@ -755,6 +755,60 @@ design by hand at £350-400 a month for the architecture document.
   exceeded, so the warning fires; at two GPU hours a day and single-AZ the design is
   about $645.
 
+## Round 3: views and metadata (gap report R3.22–R3.27)
+
+The CallScope design's "Data flow" view had 31 hand-drawn flows that the workload links
+already implied, labels overprinting where six or more flows met, a tidy that ranked by
+dependency rather than by flow, notes left far from their anchors after a move, a legend
+covering the corner of a fitted capture, and nothing in the model saying which
+resources hold personal data, why a resource exists or who owns it.
+
+- **Flows from links** (R3.22) — `ttg_codegen::dataflow`: one table decides, per
+  relation kind and (where the kind is ambiguous) per source / target type, whether a
+  link carries data, which way it moves and what to call it (the table is in
+  ARCHITECTURE.md §4.1). `view_generate { kind: "data_flow" }` and View ▸ *Generate data
+  flows from links* draw them between the view's visible resources, never duplicating a
+  pair that already has a flow; one undo step. Of the Kubernetes manifest links,
+  'Receives traffic from' a load balancer is a flow (the balancer forwards to the
+  workload); 'Runs image from' and 'Schedules on' are not.
+- **Tidy by flows** (R3.23) — `ttg_core::flow_layout`: a layered layout ranked by the
+  longest path of flows in step order (cycles broken at the flow that closes them), the
+  grouping boxes as non-overlapping swimlanes stacked in the order they first take part,
+  four barycentre sweeps, and straight chains where there is room; always into the
+  view's own layout. `layout_tidy { view, by: "flows" }` and View ▸ *Tidy by flows*.
+  Flows now fan out along a shared side of a node, follow the obstacle-aware orthogonal
+  routing when *Route around nodes* is on, stagger their step badges, and place labels
+  clear of nodes, badges and each other: along the arrow first, then stepped off it
+  perpendicular with a leader line when six or more flows meet.
+- **Sequence and presentation** (R3.24) — `view_export { format: "sequence" }` / `ttg
+  view export --format sequence` writes the numbered flows as a Mermaid `sequenceDiagram`
+  (participants in order of appearance, logical nodes and boxes included, shared step
+  numbers as `par` blocks, dashed flows as `-->>`). *Present steps* / **▶ Present** steps
+  through them in the GUI with the arrow keys, highlighting the step's flows and ends,
+  fading the rest and captioning the step with its labels and pinned notes; Esc leaves.
+- **Notes and the legend** (R3.25) — the round-2 note placement moved to
+  `ttg_core::view` (`note_offset_beside`, `arrange_notes`); `view_arrange_notes` and View ▸
+  *Arrange notes* use it, and tidying a view (by links or by flows) runs it in the same
+  undo step. Zoom to fit leaves the legend's strip on the right free when the legend is
+  on (reserving its screen rect rather than drawing it inside the fitted bounds), so a
+  fitted screenshot has nothing under it.
+- **Classification** (R3.26) — an optional `classification` on every node and container
+  (public, internal, confidential, personal, payment), set in the inspector or by
+  `entity_update` (one entity, or every match of `select` in one undo step), drawn as a pill, filtered by `ViewFilter.classifications`, and listed in
+  `project_get`, `project_summary` and the Markdown export. A flow's `data` says what it
+  carries. `view_generate { kind: "personal_data" }` / View ▸ *Build "Where personal data
+  goes"* builds or refreshes a view of the classified entities, what their data reaches
+  one link on, and the flows between them, laid out by its flows. Posture rules keyed on
+  the classification are left to a later package.
+- **Description and owner** (R3.27) — on every entity too, emitted through the provider
+  definition's new `default_tags.entity_arg`: `Owner` / `Description` tags on AWS and
+  Azure (one line, cut to 256 characters), an `owner` label on Google Cloud, and a comment
+  above the entity's first block everywhere. The mapping's tags and `extra` win over the
+  entity's, which win over the project's. The Markdown export's new *Resources* table
+  gains Classification / Description / Owner columns when any is set, and
+  `project_summary` reports them. `examples/job-pipeline.ttg.json` gives its resource
+  group and network an owner and a description, so the validate suite exercises the tags.
+
 ## Explicitly still out of scope
 
 Running `plan`/`apply`, live-account access, multi-user collaboration, drift detection

@@ -127,6 +127,28 @@ display. `TTG_WINDOW_SIZE=WxH` does the same for the `--screenshot` CLI path.
 `view_set` / `view_update` filter descriptions; it round-trips through `view_save`,
 `view_update { filter }` and `view_get` like every other key.
 
+Added 2026-09-29 (round 3, views and metadata, 49 → 51 tools): `view_generate { view?,
+kind, replace? }` — `data_flow` draws a view's flows from the links between the
+resources it shows (`ttg_codegen::dataflow`, whose relation → direction table is in
+ARCHITECTURE.md §4.1), skipping any pair that already has a flow, with `replace` first
+removing the resource-to-resource flows; the reply lists what was added, and a
+generation that changes nothing records no undo step. `personal_data` builds or
+refreshes "Where personal data goes" and switches to it. `view_arrange_notes { view? }`
+puts anchored notes back beside their anchors (`ttg_core::view::arrange_notes`, the same
+placement `view_note_add` uses). `layout_tidy` takes `view` and `by: links | flows`:
+`flows` is `ttg_core::flow_layout`, written into the view's own layout only, and either
+way a tidied view gets its notes rearranged in the same undo step. `view_fit` reports
+`legend_reserved_px`: with the legend on, the fit leaves its strip on the right free, so
+a fitted screenshot never has content under it. `view_export` takes `format: sequence`
+(a Mermaid `sequenceDiagram` of the numbered flows). `entity_update` takes
+`classification` (`"none"` or `""` clears it), `description` and `owner`, validated
+before anything is written and committed in the update's own undo step, and the bulk
+form `{ select }` carries them too (`EntityChanges::meta`); `entity_json`,
+`project_summary` (per entity, when set, plus a `classified` count) and `project_get`
+carry them. `view_flow_add` takes `data` beside `show_hidden`, and `view_get` reports
+it. New anchored notes are placed by `ttg_core::view::note_offset_beside`; `view_get`
+still reports where a note is drawn and the offset it stores (`note_geometry`).
+
 Not applying a command twice (2026-09-17): a tool call that timed out used to leave its
 command in the channel, so it ran later, beside whatever the agent retried. Three things
 stop that. `TtgApp::run_validate` runs `<tool> init && validate` on a background thread
@@ -306,7 +328,15 @@ anchored note (the report's (−1850, −1850) case), hidden flow ends with `sho
 filter), omitted entities and the `diagnostics` filters, `project_get` slices with
 `catalog_relations` and `entity_preview`, `dry_run` (the delta, nothing left in the
 project, history, redo stack or revision) and the bulk writes (one undo step, one
-revision, every refusal listed, empty and non-matching selections). Codegen tests cover
+revision, every refusal listed, empty and non-matching selections), and for views and
+metadata `headless_views_and_metadata`: `view_generate` (the secrets *read by* the
+runner, no duplicate of a hand-drawn pair, a second run adding nothing, one undo),
+`view_arrange_notes` bringing a moved note back, `layout_tidy { by: "flows" }`
+refusing without a view and then ordering the pipeline left to right in the view's
+layout while the shared layout stays put, the sequence export, the classification /
+description / owner round trip (reply, project, summary, undo, and the bulk form),
+the classification filter, and the personal-data view created and then refreshed.
+Codegen tests cover
 the other-provider info lines, `Generated::entity_preview` and `views::reveal`; the
 catalog crate tests the fingerprint. The unit tests beside `mcp/mod.rs` cover the
 dropped-caller rule (fresh and deferred), the heartbeat, the screenshot size clamp,

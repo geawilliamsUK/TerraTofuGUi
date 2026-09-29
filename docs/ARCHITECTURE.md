@@ -127,14 +127,16 @@ All types live in `ttg-core::ir`. Field names below are the serialized names.
 - a **filter** (`categories`, `relations`, `focus` + `depth`, `hidden`, `only`,
   `containers`, plus `providers` = provider layers, `origin` = `all` | `curated` |
   `native`, `types` = abstract type ids, `name_glob` = case-insensitive `*` / `?` glob on
-  the display name, and `hide_edges` to draw no structural links at all);
+  the display name, `classifications` = only entities classified as one of these, and
+  `hide_edges` to draw no structural links at all);
 - an optional `layout` (`positions` / `sizes` keyed by entity id that override the shared
   ones while the view is active);
 - a `description` and a `legend` flag;
 - annotations: `groups` (labelled boxes with `position`, `size`, optional `color`;
   nesting and membership are geometric), `flows` (labelled arrows between
   `{ "entity": id }` / `{ "group": id }` / `{ "logical": id }` ends, optionally `dashed`,
-  with an optional `step` number and `color`), `notes` (`title`, `body`, `size` and
+  with an optional `step` number, `color` and `data` — what travels along it, in words),
+  `notes` (`title`, `body`, `size` and
   either a free `position` or an `anchor` — any flow end, or `{ "flow": id }` — with
   `position` read as the offset from it) and `logicals` (annotation-only nodes: `name`,
   `icon`, `subtitle`, `position`, `size`).
@@ -143,9 +145,43 @@ All of it affects only what the GUI draws, never what is generated.
 `ttg_core::view` holds the geometry the canvas and the document renderer share: where a
 view puts an entity (in a view with its own layout a container is the padded bounding box
 of the members it still shows), which entities and logical nodes a box holds, where an
-anchored note lands, and how boxes nest. `ttg_codegen::views` holds the filter evaluation
-(`visible_set`, used by the canvas, the view bar, `view_get` and the CLI alike) and the
-Markdown / Mermaid renderers behind `ttg view export` and the `view_export` tool.
+anchored note lands (and where a note placed beside its anchor goes: `note_offset_beside`
+/ `arrange_notes`, shared by `view_note_add`, `view_arrange_notes` and tidy), and how
+boxes nest. `ttg_core::flow_layout` lays a view out by its flows: a layered drawing
+ranked by the longest path of flows taken in step order (a depth-first walk from the
+earliest steps drops the flows that close a cycle), the view's grouping boxes as
+swimlanes stacked in the order their members first take part, four barycentre sweeps
+against crossings, and each item aiming for the height of what flows into it; positions
+land in the view's own layout and the boxes are refitted around their members.
+`ttg_codegen::views` holds the filter evaluation (`visible_set`, used by the canvas, the
+view bar, `view_get` and the CLI alike) and the Markdown / Mermaid flowchart / Mermaid
+`sequenceDiagram` renderers behind `ttg view export` and the `view_export` tool.
+`ttg_codegen::dataflow` derives flows from links — one table (`dataflow::rule`) decides
+per relation kind, and per source / target type where the kind is ambiguous, whether a
+link carries data, which way it moves and what to call it:
+
+| relation | when | data moves | label |
+|---|---|---|---|
+| `sends_to` | always | source → target | sends to |
+| `dead_letters_to` | always | source → target | dead letters (dashed) |
+| `logs_to` | always | source → target | logs (dashed) |
+| `calls` | always | source → target | calls |
+| `reads` | source is a workload | target → source | read by |
+| `attribute_reference` | workload → queue | target → source | consumed by |
+| `attribute_reference` | workload → database, cache, bucket, file system, table | source → target (both ways) | uses |
+| `attribute_reference` | CDN → bucket or load balancer | source → target | origin |
+| `attachment` | anything → file system | target → source (both ways) | mounted by |
+| `attachment` | load balancer → instance or cluster | source → target | forwards to |
+| `attachment` | scaling group or Kubernetes workload → load balancer | target → source | forwards to |
+| `attachment` | audit trail → bucket | source → target | writes to |
+
+Everything else — `network_membership`, `iam_binding`, `encrypted_with`, `depends_on`,
+containment, security groups, certificates, a database reading its own password, a
+function's code bucket, what an alarm watches, a workload's image registry and node
+pool — is structure and produces no flow.
+"Both ways" marks a read/write link, which is what the "Where personal data goes" view
+(`dataflow::personal_data_view`) follows from the entities classified personal or
+payment.
 
 ### 4.2 `Node`
 
@@ -164,9 +200,24 @@ Markdown / Mermaid renderers behind `ttg view export` and the `view_export` tool
   "parent": "vnet-1c9e77aa",            // container id or null
   "manual": false,                      // "external / manage by hand" flag
   "providers": ["azure"],               // optional: provider layers this entity is part of (absent = all)
-  "extra": { "aws": { "main": { "force_destroy": true } } }   // optional: extra provider arguments per block
+  "extra": { "aws": { "main": { "force_destroy": true } } },  // optional: extra provider arguments per block
+  "classification": "personal",         // optional: public | internal | confidential | personal | payment
+  "description": "Call recordings",     // optional: why it exists
+  "owner": "Platform team"              // optional: who looks after it
 }
 ```
+
+**What an entity is for.** `classification`, `description` and `owner` are on every
+node and container (like `providers`, not per-type catalog fields), all optional and
+absent from the file when unset. The classification drives the view filter and the
+"Where personal data goes" view (posture rules on it are a later package). The owner
+and description reach the HCL through the provider definition's
+`default_tags.entity_arg` (MAPPING_FORMAT.md §4.3): an `Owner` and a `Description` tag on
+AWS and Azure (one line, cut to 256 characters), an `owner` label on Google Cloud (label-
+safe, 63 characters; no description, which a label cannot hold), and on every provider a
+comment above the entity's first block with the full description, the owner and the
+classification. Precedence, most specific first: the mapping's own tags and `extra` ›
+the entity's Owner / Description › the project-wide `settings.tags`.
 
 **Extra arguments.** `extra` is provider id → block key → argument name → JSON value,
 merged into the generated block after the mapping's own arguments (yours win). Nested
@@ -618,7 +669,8 @@ stays); `diff::against_dir` lists the same stale files as removed.
 | `clipboard.rs` | copy/paste of a sub-diagram as JSON (fresh ids, de-duplicated names, edges between copied items kept) |
 | `cost_panel.rs` | the Cost window: estimate for a chosen provider, per resource / type / view, assumptions and display currency editable in place |
 | `views.rs` | the view bar (tabs, description, legend toggle, annotation buttons), the filter menu, and the per-frame visible set (`ttg_codegen::views::visible_set` plus the "a fitted container with no visible members is not drawn" rule) |
-| `annotations.rs` | drawing and editing a view's groups, flows, notes and logical nodes; the legend panel; geometry delegated to `ttg_core::view` |
+| `annotations.rs` | drawing and editing a view's groups, flows, notes and logical nodes; the legend panel (and the strip of the canvas "zoom to fit" leaves it); geometry delegated to `ttg_core::view`. Flows fan out along a shared side, follow `canvas::routed_path` when *Route around nodes* is on, and place their labels clear of nodes, badges and each other — along the arrow first, then stepped off it on a leader line |
+| `view_tools.rs` | the View menu's view tools (flows from links, tidy by flows, arrange notes, "Where personal data goes") as single undo steps, and presentation mode: the step state, its keys and the caption |
 | `camera.rs` | world/screen transform, zoom-about-pointer, zoom-to-fit |
 | `history.rs` | snapshot-based undo/redo (the project is small; a clone per committed action is simpler and safer than command objects) |
 

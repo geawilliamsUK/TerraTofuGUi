@@ -697,6 +697,25 @@ With `resource_arg` the emitter adds the argument to every emitted resource whos
 schema has it, after the mapping has run; a tag the mapping set itself (a resource's own
 `Name`) wins over the project's.
 
+`entity_arg` names the argument a resource carries its *own* tags in (`tags` on AWS and
+Azure, `labels` on Google Cloud). An entity's `owner` becomes an `Owner` tag there — an
+`owner` label, made label-safe and cut to 63 characters, when `sanitize_labels` is set —
+and its `description` a `Description` tag (one line, AWS's tag character set, cut to 256
+characters); a label cannot hold prose, so on a label provider the description is only
+the comment above the entity's blocks, which every provider gets. The merge runs before
+the project's tags and never overwrites a key the block already has, so the precedence
+is: the mapping's own tags and `extra` › the entity's Owner / Description › the
+project-wide tags (AWS and Google Cloud apply the same rule themselves: a resource's tag
+wins over `default_tags` / `default_labels`). A provider without `entity_arg` gets no
+per-entity tags.
+
+```toml
+[default_tags]
+block = "default_tags"
+arg = "tags"
+entity_arg = "tags"                    # Owner / Description on each resource
+```
+
 ---
 
 ## 5. Checklist for a new definition

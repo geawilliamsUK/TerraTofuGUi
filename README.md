@@ -194,10 +194,39 @@ OpenTofu installed, so a definition change that produces invalid HCL fails the b
     *Legend* tick box shows what the group colours, flow colours and line styles mean,
     and is remembered with the view.
   Hidden resources are still exported; the corner label says how many are hidden.
+  The **View** menu's *Active view* tools do the tedious parts:
+  - *Generate data flows from links* draws a flow for every link that carries data
+    between the resources the view shows — sends to, reads, uses, logs, dead letters,
+    calls, mounts, forwards to — in the direction the data moves (a secret is *read by*
+    the function, a queue is *consumed by* its worker), never duplicating a pair that
+    already has a flow. Network membership, IAM bindings, encryption and containment
+    produce nothing. You add the numbering and the prose.
+  - *Tidy by flows* lays the view out left to right by its flows and step numbers, each
+    grouping box a swimlane of its own, in the view's own layout only; flows fan out
+    along the side of a busy node, are routed around nodes when *Route around nodes* is
+    on, and a label with no room on its arrow steps off it on a short leader line.
+  - *Arrange notes* puts every pinned note back beside what it explains (tidying a view
+    does this too), and *zoom to fit* keeps the legend's strip free so nothing is drawn
+    under it.
+  - *Present steps* (or **▶ Present** on the view bar) steps through the numbered flows
+    with ← → or Space: the current step's flows and ends are highlighted, the rest
+    faded, and a caption shows the step's labels and any note pinned to those flows.
+    Esc leaves.
+  - *Build "Where personal data goes"* makes (or refreshes) a view of the resources
+    classified *personal* or *payment* and everything their data reaches one link on.
+  Every resource also says what it is for: a **classification** (public, internal,
+  confidential, personal, payment — a pill on the node and a *Classification* filter), an
+  **owner** and a **description**. The owner and description are emitted as `Owner` /
+  `Description` tags on AWS and Azure (an `owner` label on Google Cloud) and as a comment
+  above the resource's blocks in the generated HCL; a flow can say what **data** travels
+  along it ("call audio"), drawn under its label.
   A view can also be written out as a document:
-  `ttg view export <project> "Data flow" --format md|mermaid` gives the description, the
-  groups with their members, the flows in step order and the notes, or a Mermaid
-  `flowchart LR`; `ttg view list <project>` names them. For a picture, take a screenshot
+  `ttg view export <project> "Data flow" --format md|mermaid|sequence` gives the
+  description, the resources it shows (with classification, description and owner when
+  any is set), the groups with their members, the flows in step order and the notes; a
+  Mermaid `flowchart LR`; or a Mermaid `sequenceDiagram` of the numbered flows (steps
+  sharing a number side by side in a `par` block). `ttg view list <project>` names them.
+  For a picture, take a screenshot
   with the canvas fitted and the panels hidden (the agent tool does both). The
   job-pipeline example ships a "Data flow" view built this way:
 
@@ -312,7 +341,7 @@ watch it happen. It is off until you switch it on:
    shows what the agent did. Saving to disk only happens when a tool is explicitly asked
    to, and opening another file goes through the same unsaved-changes prompt as the menu.
 
-The 49 tools cover reading (project, catalog, catalog relations, diagnostics,
+The 51 tools cover reading (project, catalog, catalog relations, diagnostics,
 reachability, export preview, one entity's HCL with `entity_preview`, export diff,
 `view_get`, `view_export`, screenshot) and editing (add/update/move/resize/
 reparent/delete entities, links, selection, views, tidy/align/distribute, settings,
@@ -325,7 +354,13 @@ themselves are editable: `view_save { replace }` rewrites a saved filter without
 disturbing the drawing on it, `view_update { filter }` does the same by name, and
 `view_delete` removes one. `view_fit` plus `screenshot { view, fit, hide_panels, width,
 height }` let it look at what it drew — the window is resized for the capture and put
-back, so a big view is readable however small the window was.
+back, so a big view is readable however small the window was. `view_generate { kind:
+"data_flow" }` derives a view's flows from the links and `{ kind: "personal_data" }`
+builds "Where personal data goes"; `layout_tidy { view, by: "flows" }` lays a view out by
+its flows and `view_arrange_notes` puts its notes back beside their anchors;
+`view_export { format: "sequence" }` gives the steps as a sequence diagram; and
+`entity_update` (one entity or a `select`) takes `classification`, `description` and
+`owner`.
 Reads can be narrowed (`diagnostics { entity, severity, provider }`, `project_get { fields,
 entities }`) and writes widened: `entity_update` and `link_add` take a `select` (`types`,
 `name_glob`, `ids`) to change or link many entities as one undo step. `serverInfo` and the
