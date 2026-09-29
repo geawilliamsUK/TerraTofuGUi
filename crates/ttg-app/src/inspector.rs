@@ -359,12 +359,7 @@ fn entity_inspector(app: &mut TtgApp, ui: &mut Ui, id: &Id) {
 
         // ---- abstract fields (concrete mode: only those the target mapping consumes)
         let used: Option<std::collections::HashSet<String>> = if concrete {
-            Some(
-                def.providers
-                    .get(&provider)
-                    .map(ttg_catalog::usage::used_fields)
-                    .unwrap_or_default(),
-            )
+            Some(ttg_catalog::usage::used_fields_for(&def, &provider))
         } else {
             None
         };
@@ -522,7 +517,7 @@ fn entity_inspector(app: &mut TtgApp, ui: &mut Ui, id: &Id) {
         for r in &def.relations {
             let satisfied = !ttg_codegen::diagnostics::declared_relation_targets(&app.project, &app.catalog, &app.project.entity(id).unwrap(), &def, r).is_empty();
             let txt = format!(
-                "{}: {} ({}{})",
+                "{}: {} ({}{}{})",
                 r.label.clone().unwrap_or(r.kind.clone()),
                 r.targets.join(" / "),
                 match r.cardinality {
@@ -530,7 +525,8 @@ fn entity_inspector(app: &mut TtgApp, ui: &mut Ui, id: &Id) {
                     ttg_catalog::Cardinality::Optional => "optional",
                     ttg_catalog::Cardinality::Many => "any number",
                 },
-                if r.via_parent { ", or by containment" } else { "" }
+                if r.via_parent { ", or by containment" } else { "" },
+                if r.manifests { ", Kubernetes manifests only" } else { "" }
             );
             ui.label(RichText::new(txt).small().color(if satisfied || r.cardinality != ttg_catalog::Cardinality::One { Color32::from_gray(110) } else { Color32::from_rgb(200, 90, 30) }));
         }
@@ -591,7 +587,10 @@ fn field_editor(app: &mut TtgApp, ui: &mut Ui, id: &str, provider: Option<&str>,
                     .collect::<Vec<_>>()
                     .join(", ")
             };
-            if users.is_empty() {
+            if f.manifests {
+                "Used by the Kubernetes manifests export (Settings ▸ Output ▸ Kubernetes manifests)."
+                    .to_string()
+            } else if users.is_empty() {
                 "Not used by any provider mapping yet.".to_string()
             } else if users.contains(&target) {
                 format!("Used by: {}", names(&users))
@@ -1179,6 +1178,20 @@ pub fn settings_ui(app: &mut TtgApp, ui: &mut Ui) {
     {
         let before = app.snapshot();
         app.project.settings.state_encryption = enc;
+        app.finish(before);
+    }
+    let mut k8s = app.project.settings.kubernetes_manifests;
+    if ui
+        .checkbox(&mut k8s, "Kubernetes manifests (k8s/ beside the Terraform)")
+        .on_hover_text(
+            "Also export, per Kubernetes Workload, its ServiceAccount, Deployment, Service, volumes, \
+             autoscaling and load-balancer binding, plus render.sh / render.ps1 that fill in the \
+             Terraform outputs they need. The manual steps they replace drop out of MANUAL_STEPS.md.",
+        )
+        .changed()
+    {
+        let before = app.snapshot();
+        app.project.settings.kubernetes_manifests = k8s;
         app.finish(before);
     }
     ui.add_space(8.0);

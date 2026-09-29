@@ -23,6 +23,7 @@ kind = "node"
 allowed_parents = ["resource_group", "virtual_network", "servicebus_namespace"]
 network_agnostic = true
 icon = "TP"
+env_prefix = "TOPIC"
 
 [[fields]]
 name = "subscriptions"
@@ -169,6 +170,9 @@ Principal = { object = { Service = { value = "budgets.amazonaws.com" } } }
 Action    = { value = "sns:Publish" }
 Resource  = { self_block = "main", attr = "arn" }
 
+[providers.aws.connection]
+ARN = { self_block = "main", attr = "arn" }
+
 [providers.aws.outputs]
 arn = { attr = "arn", description = "Topic ARN (publish here)" }
 
@@ -260,6 +264,10 @@ name               = { target = "name" }
 topic_id           = { self_block = "main", attr = "id" }
 max_delivery_count = { value = 10 }
 
+[providers.azure.connection]
+NAME      = { self_block = "main", attr = "name" }
+NAMESPACE = { if = { ancestor = "servicebus_namespace" }, then = { ancestor = "servicebus_namespace", attr = "name" }, else = { self_block = "ns", attr = "name" } }
+
 [providers.azure.outputs]
 id = { attr = "id", description = "Topic id" }
 
@@ -339,6 +347,9 @@ push_endpoint = { item = "endpoint" }
 for_each_field = "subscriptions"
 when = { item = "protocol", not_equals = "https" }
 message = "\"{name}\" subscribes {item.endpoint} over {item.protocol}, which Pub/Sub cannot do: only https push subscriptions exist. Notify people from an Alarm instead (its 'Notify email' generates a notification channel)"
+
+[providers.gcp.connection]
+TOPIC = { self_block = "main", attr = "id" }
 
 [providers.gcp.outputs]
 id = { attr = "id", description = "Topic id (publish here)" }

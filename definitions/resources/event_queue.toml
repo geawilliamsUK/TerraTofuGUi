@@ -16,6 +16,7 @@ kind = "node"
 allowed_parents = ["resource_group", "virtual_network", "servicebus_namespace"]
 network_agnostic = true
 icon = "Q"
+env_prefix = "QUEUE"
 
 [[fields]]
 name = "visibility_timeout_seconds"
@@ -85,6 +86,11 @@ kms_master_key_id           = { relation = "encrypted_with", attr = "arn", optio
 redrive_policy              = { if = { relation = "dead_letters_to" }, then = { func = "jsonencode", args = [ { object = { deadLetterTargetArn = { relation = "dead_letters_to", attr = "arn" }, maxReceiveCount = { field = "max_receives", fallback = { value = 5 } } } } ] } }
 tags                        = { object = { Name = { field = "name" } } }
 
+# What a Kubernetes workload linked to this queue is handed (MAPPING_FORMAT.md §2.7):
+# QUEUE_<NAME>_URL, and the URL KEDA's SQS scaler watches.
+[providers.aws.connection]
+URL = { self_block = "main", attr = "url" }
+
 [providers.aws.outputs]
 url = { attr = "url", description = "Queue URL" }
 arn = { attr = "arn", description = "Queue ARN" }
@@ -151,6 +157,11 @@ default_message_ttl = { func = "format", args = [ { value = "PT%dS" }, { field =
 dead_lettering_on_message_expiration = { if = { relation = "dead_letters_to" }, then = { value = true } }
 max_delivery_count  = { if = { relation = "dead_letters_to" }, then = { field = "max_receives", fallback = { value = 5 } } }
 forward_dead_lettered_messages_to = { if = { target_shares_ancestor = "servicebus_namespace", relation = "dead_letters_to" }, then = { relation = "dead_letters_to", attr = "name" } }
+
+# QUEUE_<NAME>_NAME / _NAMESPACE, which is also what KEDA's Service Bus scaler reads.
+[providers.azure.connection]
+NAME      = { self_block = "main", attr = "name" }
+NAMESPACE = { if = { ancestor = "servicebus_namespace" }, then = { ancestor = "servicebus_namespace", attr = "name" }, else = { self_block = "ns", attr = "name" } }
 
 [providers.azure.outputs]
 id   = { attr = "id", description = "Queue id" }
@@ -244,6 +255,11 @@ when = { relation = "dead_letters_to" }
 subscription = { self_block = "sub", attr = "name" }
 role         = { value = "roles/pubsub.subscriber" }
 member       = { func = "format", args = [ { value = "serviceAccount:service-%s@gcp-sa-pubsub.iam.gserviceaccount.com" }, { self_data = "project", attr = "number" } ] }
+
+# Publish to the topic, consume from the subscription (KEDA's Pub/Sub scaler watches it).
+[providers.gcp.connection]
+TOPIC        = { self_block = "main", attr = "id" }
+SUBSCRIPTION = { self_block = "sub", attr = "id" }
 
 [providers.gcp.outputs]
 topic        = { attr = "id", description = "Topic id (publish here)" }

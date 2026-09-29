@@ -131,9 +131,29 @@ pub fn catalog(cat: &Catalog) -> Vec<String> {
             }
         }
         let mut uses_v2 = false;
+        // Only the types the Kubernetes export reads may hand it fields and links.
+        let manifest_type = MANIFEST_TYPES.contains(&tid.as_str());
+        if let Some(prefix) = &def.resource.env_prefix {
+            uses_v2 = true;
+            if !is_env_name(prefix) {
+                errs.push(where_(&format!(
+                    "env_prefix '{prefix}' must be upper case letters, digits and '_', starting with a letter"
+                )));
+            }
+        }
         // fields
         let mut names = HashSet::new();
         for f in &def.fields {
+            if f.manifests {
+                uses_v2 = true;
+                if !manifest_type {
+                    errs.push(where_(&format!(
+                        "field '{}': manifests = true is only valid on a type the Kubernetes export reads ({})",
+                        f.name,
+                        MANIFEST_TYPES.join(", ")
+                    )));
+                }
+            }
             if f.name == "name" {
                 errs.push(where_("field 'name' is implicit and cannot be redeclared"));
             }
@@ -162,6 +182,16 @@ pub fn catalog(cat: &Catalog) -> Vec<String> {
             }
             if r.min_targets.is_some() {
                 uses_v2 = true;
+            }
+            if r.manifests {
+                uses_v2 = true;
+                if !manifest_type {
+                    errs.push(where_(&format!(
+                        "relation '{}': manifests = true is only valid on a type the Kubernetes export reads ({})",
+                        r.kind,
+                        MANIFEST_TYPES.join(", ")
+                    )));
+                }
             }
             if Relation::from_key(&r.kind).is_none() {
                 errs.push(where_(&format!("unknown relation kind '{}'", r.kind)));
@@ -203,6 +233,12 @@ pub fn catalog(cat: &Catalog) -> Vec<String> {
             };
             let mut pnames = HashSet::new();
             for f in &m.fields {
+                if f.manifests {
+                    errs.push(pw(&format!(
+                        "provider field '{}': manifests = true is only valid on an abstract field",
+                        f.name
+                    )));
+                }
                 if !pnames.insert(&f.name) {
                     errs.push(pw(&format!("duplicate provider field '{}'", f.name)));
                 }
@@ -289,6 +325,17 @@ pub fn catalog(cat: &Catalog) -> Vec<String> {
                 check_condition(&mut ctx, &chk.when, &mut errs);
                 ctx.item_fields = outer;
             }
+            // Connection values are resolved on the entity itself, exactly like a block
+            // argument, so they are checked the same way.
+            for (k, src) in &m.connection {
+                ctx.v2 = true;
+                if !is_env_name(k) {
+                    errs.push(pw(&format!(
+                        "connection key '{k}' must be upper case letters, digits and '_', starting with a letter"
+                    )));
+                }
+                check_source(&mut ctx, &format!("connection '{k}'"), src, &mut errs);
+            }
             for (k, o) in &m.outputs {
                 if let Some(b) = &o.block {
                     if !block_keys.contains(&b.as_str()) {
@@ -302,7 +349,8 @@ pub fn catalog(cat: &Catalog) -> Vec<String> {
             errs.push(where_(
                 "uses schema_version 2 features (struct_list, for_each_field, data, item, \
                  item_index, self_data, if, fallback, target_type, for_each_relation, target, \
-                 provider_alias) but declares schema_version = 1",
+                 provider_alias, setting, connection, manifests, env_prefix) but declares \
+                 schema_version = 1",
             ));
         }
     }
@@ -352,6 +400,12 @@ fn check_field(cat: &Catalog, where_: &str, f: &FieldDef, errs: &mut Vec<String>
             if sub.field_type == FieldType::StructList {
                 errs.push(format!("{where_}: item '{}' — struct_list cannot nest", sub.name));
             }
+            if sub.manifests {
+                errs.push(format!(
+                    "{where_}: item '{}' — manifests = true is only valid on a field",
+                    sub.name
+                ));
+            }
             check_field(cat, &format!("{where_} item '{}'", sub.name), sub, errs);
         }
     } else if !f.items.is_empty() {
@@ -398,6 +452,13 @@ fn is_hcl_identifier(s: &str) -> bool {
     let mut chars = s.chars();
     chars.next().is_some_and(|c| c.is_ascii_alphabetic() || c == '_')
         && chars.all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
+}
+
+/// `QUEUE`, `SUBSCRIPTION_NAME`: the shape of an environment variable name part.
+fn is_env_name(s: &str) -> bool {
+    let mut chars = s.chars();
+    chars.next().is_some_and(|c| c.is_ascii_uppercase())
+        && chars.all(|c| c.is_ascii_uppercase() || c.is_ascii_digit() || c == '_')
 }
 
 fn check_block(ctx: &mut SourceCtx, b: &BlockDef, errs: &mut Vec<String>) {
@@ -578,6 +639,17 @@ fn check_condition(ctx: &mut SourceCtx, c: &Condition, errs: &mut Vec<String>) {
             }
             if let Some(ty) = &i.ref_type {
                 check_ref_type(ctx, &i.item, ty, errs);
+            }
+        }
+        Condition::Setting(s) => {
+            ctx.v2 = true;
+            if !CONDITION_SETTINGS.contains(&s.setting.as_str()) {
+                errs.push(format!(
+                    "{}when: unknown setting '{}' (known: {})",
+                    ctx.what,
+                    s.setting,
+                    CONDITION_SETTINGS.join(", ")
+                ));
             }
         }
         Condition::All(a) => {

@@ -125,6 +125,10 @@ scope                = { ancestor = "resource_group", attr = "id" }
 role_definition_name = { map = "permissions", table = { read_only = "Reader", admin = "Contributor" } }
 principal_id         = { self_block = "main", attr = "principal_id" }
 
+# A Kubernetes workload's ServiceAccount is annotated with the identity's client id.
+[providers.azure.connection]
+CLIENT_ID = { self_block = "main", attr = "client_id" }
+
 [providers.azure.outputs]
 id           = { attr = "id", description = "Managed identity id" }
 principal_id = { attr = "principal_id", description = "Service principal object id" }
@@ -170,6 +174,10 @@ when = { field = "permissions", not_equals = "none" }
 project = { var = "project" }
 role    = { map = "permissions", table = { read_only = "roles/viewer", admin = "roles/editor" } }
 member  = { self_block = "main", attr = "member" }
+
+# A Kubernetes workload's ServiceAccount is annotated with the service account's email.
+[providers.gcp.connection]
+EMAIL = { self_block = "main", attr = "email" }
 
 [providers.gcp.outputs]
 email  = { attr = "email", description = "Service account email" }

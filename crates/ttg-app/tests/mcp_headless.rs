@@ -1857,3 +1857,94 @@ fn headless_bulk_update_and_link_are_one_undo_step() {
         "one undo for the whole batch, bulk writes included"
     );
 }
+
+/// The Kubernetes manifests through the agent — the new workload fields and
+/// links in `catalog_type`, the project setting, and the per-call `k8s` override.
+#[test]
+fn headless_kubernetes_manifests() {
+    let server = start("kubernetes.ttg.json");
+    let mut c = Client::new(&server);
+    c.initialize();
+
+    let (err, t) = c.call("catalog_type", json!({"type_id": "kubernetes_workload"}));
+    assert!(!err, "{t}");
+    let fields = t["fields"].as_array().unwrap();
+    for name in [
+        "image_tag",
+        "repository",
+        "port",
+        "cpu",
+        "memory",
+        "gpu",
+        "max_replicas",
+    ] {
+        let f = fields
+            .iter()
+            .find(|f| f["name"] == json!(name))
+            .unwrap_or_else(|| panic!("no field {name}: {t}"));
+        assert_eq!(f["manifests"], json!(true), "{f}");
+    }
+    let rels = t["relations"].as_array().unwrap();
+    for label in [
+        "Runs image from",
+        "Schedules on (node pool)",
+        "Receives traffic from (load balancer)",
+    ] {
+        let r = rels
+            .iter()
+            .find(|r| r["label"] == json!(label))
+            .unwrap_or_else(|| panic!("no relation {label}: {t}"));
+        assert_eq!(r["manifests_only"], json!(true), "{r}");
+    }
+
+    let k8s_files = |preview: &Value| -> Vec<String> {
+        preview["files"]
+            .as_object()
+            .unwrap()
+            .keys()
+            .filter(|k| k.starts_with("k8s/"))
+            .cloned()
+            .collect()
+    };
+    // The example is saved with the manifests on; `k8s: false` leaves them out of one
+    // call without touching the setting.
+    let (err, on) = c.call("export_preview", json!({}));
+    assert!(!err, "{on}");
+    assert!(k8s_files(&on).contains(&"k8s/api.yaml".to_string()), "{on}");
+    let (err, off) = c.call("export_preview", json!({"k8s": false}));
+    assert!(!err, "{off}");
+    assert!(k8s_files(&off).is_empty(), "{off}");
+    assert!(
+        off["manual_steps"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|s| s.as_str().unwrap().contains("Apply the Deployment")),
+        "{off}"
+    );
+
+    // The setting itself.
+    let (err, s) = c.call("settings_set", json!({"kubernetes_manifests": false}));
+    assert!(!err, "{s}");
+    assert_eq!(s["kubernetes_manifests"], json!(false), "{s}");
+    let (_, off) = c.call("export_preview", json!({}));
+    assert!(k8s_files(&off).is_empty(), "{off}");
+
+    // export_run { k8s: true } writes them anyway.
+    let dir = std::env::temp_dir().join(format!("ttg-mcp-k8s-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    let (err, run) = c.call(
+        "export_run",
+        json!({"dir": dir.to_string_lossy(), "provider": "aws", "k8s": true}),
+    );
+    assert!(!err, "{run}");
+    assert!(dir.join("k8s/asr-worker.yaml").exists(), "{run}");
+    assert!(dir.join("k8s/render.sh").exists(), "{run}");
+    assert!(
+        std::fs::read_to_string(dir.join("outputs.tf"))
+            .unwrap()
+            .contains("output \"k8s_jobs_url\""),
+        "{run}"
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}

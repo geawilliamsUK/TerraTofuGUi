@@ -100,6 +100,10 @@
           "additionalProperties": {
             "type": "string"
           }
+        },
+        "kubernetes_manifests": {
+          "description": "Also write a `k8s/` directory of Kubernetes manifests beside the Terraform: per\nworkload a Namespace, ServiceAccount, Deployment, Service, volumes and autoscaling,\nfilled in from `terraform output` by a small render script. Off by default; left\nout of the file while off so older projects do not change on save.",
+          "type": "boolean"
         }
       }
     },

@@ -13,7 +13,8 @@
       }
     },
     "backend": null,
-    "state_encryption": false
+    "state_encryption": false,
+    "kubernetes_manifests": true
   },
   "containers": {
     "rg-k8s": {
@@ -353,7 +354,15 @@
       "config": {
         "namespace": "platform",
         "service_account": "api",
-        "db_user": "api"
+        "db_user": "api",
+        "repository": "api",
+        "image_tag": "1.4.2",
+        "port": 8080,
+        "cpu": "250m",
+        "memory": "512Mi",
+        "replicas": 2,
+        "min_replicas": 2,
+        "max_replicas": 6
       },
       "provider_config": {},
       "position": {
@@ -370,7 +379,15 @@
       "config": {
         "namespace": "platform",
         "service_account": "asr-worker",
-        "delete_objects": true
+        "delete_objects": true,
+        "repository": "asr-worker",
+        "image_tag": "2.0.1",
+        "cpu": "2",
+        "memory": "8Gi",
+        "gpu": 1,
+        "min_replicas": 0,
+        "max_replicas": 4,
+        "messages_per_replica": 2
       },
       "provider_config": {},
       "position": {
@@ -535,7 +552,11 @@
       "resource_type": "kubernetes_workload",
       "config": {
         "namespace": "platform",
-        "service_account": "reporting"
+        "service_account": "reporting",
+        "repository": "reporting",
+        "image_tag": "0.9.0",
+        "cpu": "100m",
+        "memory": "256Mi"
       },
       "provider_config": {},
       "position": {
@@ -656,8 +677,11 @@
       "config": {
         "repositories": [
           "api",
-          "asr-worker"
-        ]
+          "asr-worker",
+          "reporting"
+        ],
+        "immutable_tags": false,
+        "scan_on_push": true
       },
       "provider_config": {
         "azure": {
@@ -666,7 +690,7 @@
       },
       "position": {
         "x": 1560,
-        "y": 680
+        "y": 700
       },
       "parent": "rg-k8s",
       "manual": false
@@ -887,6 +911,31 @@
       "source": "pool-gpu",
       "target": "key-nodes",
       "relation": "encrypted_with"
+    },
+    {
+      "source": "wl-api",
+      "target": "reg-images",
+      "relation": "attachment"
+    },
+    {
+      "source": "wl-asr",
+      "target": "reg-images",
+      "relation": "attachment"
+    },
+    {
+      "source": "wl-report",
+      "target": "reg-images",
+      "relation": "attachment"
+    },
+    {
+      "source": "wl-asr",
+      "target": "pool-gpu",
+      "relation": "attachment"
+    },
+    {
+      "source": "wl-api",
+      "target": "lb-edge",
+      "relation": "attachment"
     }
   ]
 }

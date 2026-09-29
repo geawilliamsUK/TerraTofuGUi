@@ -227,7 +227,13 @@ pub fn render_manual_steps(
     out
 }
 
-pub fn render_readme(p: &Project, profile: &Profile, pdef: &ProviderDef, has_manual: bool) -> String {
+pub fn render_readme(
+    p: &Project,
+    profile: &Profile,
+    pdef: &ProviderDef,
+    has_manual: bool,
+    has_manifests: bool,
+) -> String {
     let bin = profile.binary();
     let mut s = format!(
         "# {} — {} ({})\n\n\
@@ -245,6 +251,15 @@ pub fn render_readme(p: &Project, profile: &Profile, pdef: &ProviderDef, has_man
     );
     if has_manual {
         s.push_str("\n> **Read `MANUAL_STEPS.md`** — parts of the diagram must be completed by hand.\n");
+    }
+    if has_manifests {
+        s.push_str(&format!(
+            "\n## Kubernetes manifests\n\n\
+             `k8s/` holds the Kubernetes objects for the workloads in the diagram. After \
+             `{bin} apply`, run `k8s/render.sh` (or `k8s/render.ps1`) to fill in the values \
+             only Terraform knows — they are the `k8s_*` outputs in `outputs.tf` — then \
+             `kubectl apply -f k8s/rendered/`. See `k8s/README.md`.\n"
+        ));
     }
     s
 }

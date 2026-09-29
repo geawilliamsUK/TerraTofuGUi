@@ -1646,7 +1646,10 @@ fn older_projects_gain_the_safe_defaults() {
 #[test]
 fn kubernetes_example_node_pools_and_workload_identity() {
     let cat = Catalog::builtin();
-    let p = example("kubernetes.ttg.json");
+    // The Terraform half, with the steps an operator gets when the Kubernetes manifests
+    // are off (`kubernetes_manifests_export` covers the example as it is saved).
+    let mut p = example("kubernetes.ttg.json");
+    p.settings.kubernetes_manifests = false;
 
     // ------------------------------------------------------------------ AWS
     let aws = generate(&p, &cat, "aws", Tool::OpenTofu).unwrap();
@@ -2163,7 +2166,7 @@ fn kubernetes_example_node_groups_are_hardened() {
     );
     // Registries keep their images through a destroy; the database is on gp3.
     let reg = norm(&aws.files["container.tf"]);
-    assert_eq!(reg.matches("force_delete = false").count(), 2, "{reg}");
+    assert_eq!(reg.matches("force_delete = false").count(), 3, "{reg}");
     assert!(!reg.contains("force_delete = true"), "{reg}");
     assert!(
         norm(&aws.files["database.tf"]).contains("storage_type = \"gp3\""),

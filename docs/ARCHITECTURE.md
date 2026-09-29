@@ -109,7 +109,8 @@ All types live in `ttg-core::ir`. Field names below are the serialized names.
     },
     "backend": null,                    // or { "type": "s3", "args": { "bucket": "...", ... } }
     "state_encryption": false,          // OpenTofu-only feature; ignored for Terraform
-    "tags": { "Project": "demo" }       // put on every generated resource (see MAPPING_FORMAT §4.3)
+    "tags": { "Project": "demo" },      // put on every generated resource (see MAPPING_FORMAT §4.3)
+    "kubernetes_manifests": false       // also write k8s/ (§6.4); omitted from the file while false
   },
   "containers": { "<id>": Container, ... },
   "nodes":      { "<id>": Node, ... },
@@ -346,6 +347,8 @@ Project + Catalog + provider + tool
   ├─ emit (plan phase)         evaluate `when` -> the set of (entity, block) pairs to emit
   ├─ emit (resolve phase)      ArgSource -> hcl::Expression, collects variables + manual steps
   ├─ graph (petgraph)          topological order of emissions; cycle = error
+  ├─ k8s::generate             only with settings.kubernetes_manifests: k8s/*.yaml, render
+  │                            scripts, k8s/README.md, plus the k8s_* outputs they read (§6.4)
   ├─ files::assemble           network.tf, compute.tf, storage.tf, iam.tf, variables.tf,
   │                            outputs.tf, versions.tf, providers.tf, [backend.tf], MANUAL_STEPS.md
   ├─ tool::Profile             the ONLY place Terraform and OpenTofu differ
@@ -430,6 +433,46 @@ UI thread: `TtgApp::run_validate` starts one background thread for the exported 
 `poll_validate` collects the outcomes through an `mpsc` channel once a frame, showing "validating…"
 per provider meanwhile. A frozen UI is not just an unresponsive window — it also stops the MCP
 command queue draining, which is what made an agent's timed-out call get applied late.
+
+### 6.4 Kubernetes manifests (`ttg-codegen::k8s`)
+
+With `settings.kubernetes_manifests` on (Settings ▸ Output, `ttg export --k8s`, MCP
+`export_run { k8s: true }`), one provider's export directory looks like this:
+
+```
+out/aws/
+  *.tf, README.md, MANUAL_STEPS.md     as above; outputs.tf gains the k8s_* outputs
+  k8s/
+    00-namespaces.yaml                 the workloads' namespaces (default / kube-* left out)
+    <workload>.yaml                    ServiceAccount, [PersistentVolume + claim per mount],
+                                       Deployment, [Service], [TargetGroupBinding (AWS)],
+                                       [ScaledObject + TriggerAuthentication | HPA]
+    render.sh, render.ps1              fill the ${k8s_*} tokens from `<tool> output`
+    README.md                          apply flow, prerequisites, the env-var table
+    rendered/                          written by the render scripts; never touched by export
+```
+
+The module reads only the workload's own fields and links (those marked
+`manifests = true`, MAPPING_FORMAT.md §1.1–1.2) and knows the per-provider identity
+conventions (which annotation or label a ServiceAccount needs, which CSI driver mounts a
+file system, which KEDA scaler reads a queue). Everything about the *resources* a workload
+links to comes from their definitions' `connection` tables (§2.7): the emitter resolves
+each one a workload uses on its own entity, exactly like a block argument, and the value
+becomes a `k8s_<slug>_<key>` output plus a `${k8s_<slug>_<key>}` token in the YAML. A manual
+or unmapped target resolves to an input variable, as any reference to it does, so the
+manifests never carry a value that silently breaks. The render scripts are the second
+stage: `tofu apply`, then `k8s/render.sh`, then `kubectl apply -f k8s/rendered/`. The
+alternative — `kubernetes_manifest` resources through the Terraform `kubernetes` provider
+— is left as future work, because that provider needs the cluster's API (and the KEDA /
+load balancer controller CRDs) at plan time, which the same apply is only creating.
+
+The YAML is emitted from `serde_json` values (ordered maps) by a small writer that quotes
+every string that could read back as anything else, so exports are byte-identical and a
+substituted value cannot change the document's structure. Manual steps that only describe
+these objects carry `when = { setting = "kubernetes_manifests", equals = "false" }` and
+drop out; the module adds one step of its own when a manifest needs a controller (KEDA,
+the AWS Load Balancer Controller). `export` replaces the files directly in `k8s/` and
+removes the ones a later export no longer writes; `diff` reports them the same way.
 
 ## 7. GUI architecture (`ttg-app`)
 

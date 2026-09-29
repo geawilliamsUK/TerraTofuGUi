@@ -15,6 +15,7 @@ description = "A managed Redis cache. Link subnets (AWS) and optionally a Securi
 kind = "node"
 allowed_parents = ["virtual_network", "resource_group"]
 icon = "RED"
+env_prefix = "CACHE"
 
 [[fields]]
 name = "size"
@@ -70,6 +71,10 @@ subnet_group_name    = { self_block = "subnets", attr = "name" }
 security_group_ids   = { relation = "attribute_reference", target_type = "security_group", attr = "id", wrap = "list", optional = true }
 tags                 = { object = { Name = { field = "name" } } }
 
+[providers.aws.connection]
+HOST = { self_block = "main", attr = "cache_nodes.0.address" }
+PORT = { value = 6379 }
+
 [providers.aws.outputs]
 endpoint = { attr = "cache_nodes.0.address", description = "Redis endpoint address" }
 
@@ -100,6 +105,11 @@ family              = { value = "C" }
 sku_name            = { value = "Basic" }
 minimum_tls_version = { value = "1.2" }
 
+# Azure Cache for Redis serves TLS only on its SSL port.
+[providers.azure.connection]
+HOST = { self_block = "main", attr = "hostname" }
+PORT = { self_block = "main", attr = "ssl_port" }
+
 [providers.azure.outputs]
 hostname = { attr = "hostname", description = "Redis host name" }
 
@@ -119,6 +129,10 @@ memory_size_gb     = { map = "size", table = { small = 1, medium = 4, large = 16
 region             = { var = "region" }
 redis_version      = { value = "REDIS_7_0" }
 authorized_network = { relation = "network_membership", ancestor = "virtual_network", attr = "id", fallback = { ancestor = "virtual_network", attr = "id", optional = true } }
+
+[providers.gcp.connection]
+HOST = { self_block = "main", attr = "host" }
+PORT = { self_block = "main", attr = "port" }
 
 [providers.gcp.outputs]
 host = { attr = "host", description = "Redis host" }

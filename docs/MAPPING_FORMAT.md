@@ -25,6 +25,8 @@ description = "An address range inside a virtual network."
 kind = "node"                         # "node" (leaf) or "container" (can hold others)
 allowed_parents = ["virtual_network"] # container types this may be drawn inside
 icon = "SUB"                          # short glyph shown on the canvas
+env_prefix = "QUEUE"                  # v2, optional: first word of a Kubernetes workload's
+                                      # environment variables for this type (§2.7)
 ```
 
 Categories in use: `compute`, `storage`, `network`, `database`, `iam`, `serverless`,
@@ -47,7 +49,15 @@ description = "…"             # tooltip
 options = ["a", "b"]          # enum: the only allowed values
 pattern = "^[a-z0-9-]+$"      # optional regex (string only); no look-around
 pattern_hint = "lowercase…"   # shown when the pattern fails
+manifests = true              # v2, optional: read by the Kubernetes manifests export (§2.7)
 ```
+
+`manifests = true` says that no provider mapping reads the field — the Kubernetes
+manifests export does (a workload's `image_tag`, `cpu`, `max_replicas`). The field then
+counts as used by every provider: the inspector shows it in concrete mode and says who
+reads it, and `ttg catalog --strict` does not report it as unused. Only types the export
+reads may declare it (`ttg_catalog::MANIFEST_TYPES`: `kubernetes_workload`), and only on
+abstract fields.
 
 ### 1.2 Relations
 
@@ -64,6 +74,7 @@ targets = ["virtual_network"]
 cardinality = "one"           # one (required, exactly one) | optional | many
 via_parent = true             # containment in a target container satisfies it
 providers = ["aws"]           # v2, optional: only this provider's mapping uses the link
+manifests = true              # v2, optional: only the Kubernetes manifests read the link
 ```
 
 `depends_on` edges are always allowed and never need declaring. `calls` is documentation
@@ -74,7 +85,11 @@ Declare it (`targets`, `cardinality`) so the inspector offers it and the "not a 
 target" check still applies; no mapping is expected to consume it. A relation scoped with
 `providers` (a load balancer's security group, a peering's route tables) is simply not
 the other providers' business: their mappings neither consume it nor warn that they
-cannot, and the inspector labels it accordingly.
+cannot, and the inspector labels it accordingly. A relation marked `manifests = true` (a
+workload's 'Runs image from', 'Schedules on', 'Receives traffic from') is read by the
+Kubernetes manifests export and by no mapping: like `calls` it adds no `depends_on`, no
+"cannot express" diagnostic and no "link by hand" step, and the same `MANIFEST_TYPES` rule
+applies.
 
 There are only ten usable relation kinds, so a type may declare the **same kind more than
 once**, one entry per group of target types — a DNS Record's `attribute_reference` is both
@@ -197,6 +212,11 @@ Deep structures can be written as TOML tables instead of inline (see `iam_role.t
 - `{ field = "versioning" }` — the field is truthy (true / non-zero / non-empty).
 - `{ field = "permissions", equals = "admin" }` / `not_equals = "none"`.
 - `{ provider_field = "…" }` with the same `equals` / `not_equals` options.
+- `{ setting = "kubernetes_manifests" }` (v2) — a project setting is on;
+  `equals = "false"` holds when it is off. Only the settings in
+  `ttg_catalog::CONDITION_SETTINGS` may be named, and the catalog refuses any other. A
+  manual step that only describes what the Kubernetes export writes uses it to drop out
+  when the export is on.
 
 ### 2.5 Outputs and manual steps
 
@@ -486,6 +506,45 @@ See `definitions/resources/function.toml`, `security_group.toml`, `relational_da
 `secret.toml` and `kubernetes_node_pool.toml` for worked examples of every feature;
 `tls_certificate.toml` for `refs` and `dns_record.toml` for two relations sharing a kind.
 
+## 2.7 Connection values (schema_version 2)
+
+What a client needs to reach a resource — a queue's URL, a bucket's name, a database's
+host and port — is declared once per provider, as argument sources resolved on the
+resource itself (every source form of §2.3 and §2.6 works, `self_block` and `if` most of
+all). Keys are upper case (`[A-Z][A-Z0-9_]*`).
+
+```toml
+[resource]
+env_prefix = "QUEUE"
+
+[providers.aws.connection]
+URL = { self_block = "main", attr = "url" }
+
+[providers.azure.connection]
+NAME      = { self_block = "main", attr = "name" }
+NAMESPACE = { if = { ancestor = "servicebus_namespace" }, then = { ancestor = "servicebus_namespace", attr = "name" }, else = { self_block = "ns", attr = "name" } }
+```
+
+The Kubernetes manifests export (`settings.kubernetes_manifests`, ARCHITECTURE.md §6.4) is
+the reader. For every resource a Kubernetes Workload uses, sends to, reads or logs to, it
+turns each key into
+
+- an output `k8s_<slug>_<key>` in `outputs.tf` whose value is the resolved source, and
+- an environment variable `<env_prefix>_<NAME>_<KEY>` on the Deployment, whose value is the
+  token `${k8s_<slug>_<key>}` that `k8s/render.sh` / `render.ps1` replace with the output.
+  `<NAME>` is the display name in upper snake case: `QUEUE_JOBS_URL`, `DB_CORE_DB_HOST`.
+
+Some keys have a fixed meaning to the export itself: an IAM Role's `CLIENT_ID` (Azure) and
+`EMAIL` (GCP) annotate the workload's ServiceAccount; a Container Registry's `REGISTRY` is
+the image prefix; a File System's `ID` (AWS), `RESOURCE_GROUP` / `ACCOUNT` / `SHARE`
+(Azure) and `VOLUME_HANDLE` / `IP` (GCP) fill the CSI PersistentVolume; an Event Queue's
+`URL` (AWS), `NAME` / `NAMESPACE` (Azure) and `SUBSCRIPTION` (GCP) feed the KEDA trigger;
+a Load Balancer's `TARGET_GROUP_ARN` (AWS) the `TargetGroupBinding`. A resource that is
+manual or unmapped for the provider resolves to an input variable named `<slug>_<key>`,
+the same way any other reference to it does. Only outputs a manifest actually uses are
+emitted. The sources are validated like block arguments at load time, and
+`tests/schema_check.rs` checks every `self_block` attribute against the provider schema.
+
 ---
 
 ## 3. What the generator does with a mapping
@@ -502,7 +561,8 @@ See `definitions/resources/function.toml`, `security_group.toml`, `relational_da
    whose relation kind the mapping never consumes (those also become a manual step).
 5. Blocks are written to `<file>.tf` in dependency order, plus `variables.tf`,
    `outputs.tf`, `versions.tf`, `providers.tf`, optional `backend.tf`, `README.md`,
-   and `MANUAL_STEPS.md` when there is anything to say.
+   and `MANUAL_STEPS.md` when there is anything to say — and, with the Kubernetes
+   manifests on, `k8s/` (§2.7).
 
 ---
 

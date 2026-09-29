@@ -101,6 +101,10 @@ file_system_id  = { self_block = "main", attr = "id" }
 subnet_id       = { target = "id" }
 security_groups = { relation = "attribute_reference", target_type = "security_group", attr = "id", wrap = "list" }
 
+# The EFS CSI driver's volume handle, for the PersistentVolume of a workload that mounts it.
+[providers.aws.connection]
+ID = { self_block = "main", attr = "id" }
+
 [providers.aws.outputs]
 id            = { attr = "id", description = "File system id" }
 dns_name      = { attr = "dns_name", description = "Mount address (<id>.efs.<region>.amazonaws.com)" }
@@ -149,6 +153,12 @@ storage_account_id = { self_block = "account", attr = "id" }
 enabled_protocol   = { value = "NFS" }
 quota              = { field = "size_gb" }
 
+# What the Azure Files CSI driver's PersistentVolume names: the share and where it lives.
+[providers.azure.connection]
+RESOURCE_GROUP = { self_block = "account", attr = "resource_group_name" }
+ACCOUNT        = { self_block = "account", attr = "name" }
+SHARE          = { self_block = "main", attr = "name" }
+
 [providers.azure.outputs]
 id  = { attr = "id", description = "File share id" }
 url = { attr = "url", description = "Share URL" }
@@ -196,6 +206,11 @@ block = "networks"
 [providers.gcp.blocks.nested.args]
 network = { relation = "network_membership", ancestor = "virtual_network", attr = "name", fallback = { ancestor = "virtual_network", attr = "name" } }
 modes   = { value = ["MODE_IPV4"] }
+
+# The Filestore CSI driver's volume handle (modeInstance/<zone>/<instance>/<share>) and address.
+[providers.gcp.connection]
+VOLUME_HANDLE = { func = "format", args = [ { value = "modeInstance/%s/%s/%s" }, { self_block = "main", attr = "location" }, { self_block = "main", attr = "name" }, { self_block = "main", attr = "file_shares.0.name" } ] }
+IP            = { self_block = "main", attr = "networks.0.ip_addresses.0" }
 
 [providers.gcp.outputs]
 id = { attr = "id", description = "Filestore instance id" }

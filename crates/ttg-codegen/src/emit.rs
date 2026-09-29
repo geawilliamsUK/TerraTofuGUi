@@ -468,6 +468,17 @@ pub fn generate(p: &Project, cat: &Catalog, provider: &str, tool: Tool) -> Resul
         }
     }
 
+    // The Kubernetes manifests (`k8s/`): their values come from outputs added here, and
+    // the one step they add (installing the controllers they use) joins the others.
+    let manifests = if p.settings.kubernetes_manifests {
+        let m = crate::k8s::generate(p, cat, provider, em.profile, |w| em.want(w))?;
+        outputs.extend(m.outputs);
+        em.manual.extend(m.manual);
+        m.files
+    } else {
+        Vec::new()
+    };
+
     // Providers that write their default tags per resource (Azure has no provider-level
     // equivalent of AWS `default_tags`), applied once to everything that was emitted.
     let per_resource_tags = pdef
@@ -577,8 +588,9 @@ pub fn generate(p: &Project, cat: &Catalog, provider: &str, tool: Tool) -> Resul
     }
     files.insert(
         "README.md".into(),
-        files::render_readme(p, &em.profile, pdef, !em.manual.is_empty()),
+        files::render_readme(p, &em.profile, pdef, !em.manual.is_empty(), !manifests.is_empty()),
     );
+    files.extend(manifests);
 
     Ok(Generated {
         provider: provider.to_string(),
@@ -1579,6 +1591,40 @@ impl<'a> Emitter<'a> {
         })
     }
 
+    /// A value the Kubernetes manifests need, as the expression of the output that carries
+    /// it: a `connection` entry resolved on its own entity, or a provider-level variable.
+    /// A manual or unmapped target becomes an input variable named after the key, the same
+    /// way any other reference to it does.
+    fn want(&mut self, w: crate::k8s::Want<'_>) -> Result<Option<Expression>, GenError> {
+        use crate::k8s::Want;
+        match w {
+            Want::Var(name) => Ok(self.vars.contains_key(name).then(|| {
+                self.used_vars.insert(name.to_string());
+                var_ref(name)
+            })),
+            Want::Connection { target, key } => {
+                let Some(t) = self.p.entity(target) else {
+                    return Ok(None);
+                };
+                let Some(declared) = self.cat.mapping(t.resource_type, self.provider) else {
+                    return Ok(None);
+                };
+                let Some(src) = declared.connection.get(key) else {
+                    return Ok(None);
+                };
+                let at = format!("{} \"{}\" / connection {key}", t.resource_type, t.name);
+                match self.status(&t) {
+                    Status::Emit(m) => self.resolve(&t, m, src, &at, None),
+                    Status::Manual | Status::Unmapped => {
+                        let attr = key.to_lowercase();
+                        self.reference(target, None, &attr, &at)
+                    }
+                    Status::Logical(_) => Ok(None),
+                }
+            }
+        }
+    }
+
     /// A traversal to another entity's block attribute — or, when the target is manual or
     /// unmapped, an input variable standing in for it.
     fn reference(
@@ -1728,6 +1774,11 @@ impl<'a> Emitter<'a> {
             // `calls` documents who talks to whom. No mapping generates anything for it,
             // so it earns neither a `depends_on` nor a "link by hand" step.
             if edge.relation == Relation::Calls {
+                continue;
+            }
+            // Links only the Kubernetes manifests read (a workload's image registry, node
+            // pool, load balancer) are the same: nothing in Terraform to order or finish.
+            if diagnostics::manifests_only(self.cat, e.resource_type, edge.relation, t.resource_type) {
                 continue;
             }
             let is_consumed = covers(consumed, edge.relation.key(), t.resource_type);

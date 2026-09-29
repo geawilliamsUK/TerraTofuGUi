@@ -213,12 +213,32 @@ pub fn against_dir(g: &Generated, dir: &Path) -> Vec<FileDiff> {
             .filter_map(|e| e.file_name().to_str().map(|s| s.to_string()))
             .filter(|n| managed(n) && !g.files.contains_key(n))
             .collect();
+        stale.extend(stale_manifests(g, dir));
         stale.sort();
         for name in stale {
             let old = std::fs::read_to_string(dir.join(&name)).ok();
             out.push(file_diff(&name, old.as_deref(), None));
         }
     }
+    out
+}
+
+/// Files directly inside `<dir>/k8s/` that an export wrote and this one would not
+/// (`k8s/<name>`, the `Generated::files` key). `k8s/rendered/` is the render scripts'
+/// output and never counts.
+pub fn stale_manifests(g: &Generated, dir: &Path) -> Vec<String> {
+    let Ok(rd) = std::fs::read_dir(dir.join(crate::k8s::DIR)) else {
+        return Vec::new();
+    };
+    let mut out: Vec<String> = rd
+        .flatten()
+        .filter(|e| e.path().is_file())
+        .filter_map(|e| e.file_name().to_str().map(|s| s.to_string()))
+        .filter(|n| n.ends_with(".yaml") || n.ends_with(".sh") || n.ends_with(".ps1") || n == "README.md")
+        .map(|n| format!("{}/{n}", crate::k8s::DIR))
+        .filter(|n| !g.files.contains_key(n))
+        .collect();
+    out.sort();
     out
 }
 

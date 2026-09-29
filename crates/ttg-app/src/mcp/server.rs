@@ -268,6 +268,7 @@ pub fn command_from_json(tool: &str, args: serde_json::Value) -> Result<AgentCom
                 provider: a.provider,
                 provider_settings: a.provider_settings,
                 tags: a.tags,
+                kubernetes_manifests: a.kubernetes_manifests,
             }
         }
         other => {
@@ -310,9 +311,15 @@ pub struct EntityArgs {
 }
 
 #[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
-pub struct ProviderArg {
-    #[schemars(description = "Provider id (`aws` / `azure`); defaults to the project's target provider")]
+pub struct PreviewArgs {
+    #[schemars(
+        description = "Provider id (`aws` / `azure` / `gcp`); defaults to the project's target provider"
+    )]
     pub provider: Option<String>,
+    #[schemars(
+        description = "Include the Kubernetes manifests (k8s/…) whatever settings.kubernetes_manifests says; false leaves them out"
+    )]
+    pub k8s: Option<bool>,
 }
 
 #[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
@@ -719,6 +726,10 @@ pub struct SettingsArgs {
         description = "Tags put on every generated resource (AWS default_tags, Google default_labels, an Azure `tags` argument): { \"Project\": \"CallScope\" }. Replaces the whole set; {} clears it"
     )]
     pub tags: Option<serde_json::Map<String, serde_json::Value>>,
+    #[schemars(
+        description = "Also write Kubernetes manifests (k8s/: per workload a ServiceAccount, Deployment, Service, volumes, KEDA / HPA autoscaling, TargetGroupBinding) beside the Terraform on every export"
+    )]
+    pub kubernetes_manifests: Option<bool>,
 }
 
 #[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
@@ -744,6 +755,10 @@ pub struct ExportArgs {
     pub provider: Option<String>,
     #[schemars(description = "Run `<tool> init && validate` afterwards (20-60 s)")]
     pub validate: Option<bool>,
+    #[schemars(
+        description = "Also write Kubernetes manifests into <dir>/k8s/ (with render.sh / render.ps1 and the k8s_* outputs they read), whatever settings.kubernetes_manifests says; false leaves them out"
+    )]
+    pub k8s: Option<bool>,
 }
 
 // ------------------------------------------------------------------ tools
@@ -892,6 +907,8 @@ pub struct DiffArgs {
     #[schemars(description = "Directory a previous export wrote to")]
     pub dir: String,
     pub provider: Option<String>,
+    #[schemars(description = "Compare an export with (true) or without (false) Kubernetes manifests")]
+    pub k8s: Option<bool>,
 }
 
 #[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
@@ -996,9 +1013,12 @@ impl TtgServer {
     #[tool(
         description = "Generate the Terraform/OpenTofu files in memory and return them as text, without writing to disk. Fails with the blocking diagnostics if there are errors (export_diff, export_run and entity_preview fail with the same list). For one entity's blocks only, use entity_preview."
     )]
-    async fn export_preview(&self, Parameters(a): Parameters<ProviderArg>) -> CallToolResult {
-        self.run(AgentCommand::ExportPreview { provider: a.provider })
-            .await
+    async fn export_preview(&self, Parameters(a): Parameters<PreviewArgs>) -> CallToolResult {
+        self.run(AgentCommand::ExportPreview {
+            provider: a.provider,
+            k8s: a.k8s,
+        })
+        .await
     }
 
     #[tool(
@@ -1340,6 +1360,7 @@ impl TtgServer {
             provider: a.provider,
             provider_settings: a.provider_settings,
             tags: a.tags,
+            kubernetes_manifests: a.kubernetes_manifests,
         })
         .await
     }
@@ -1364,7 +1385,7 @@ impl TtgServer {
     }
 
     #[tool(
-        description = "Write a complete Terraform/OpenTofu project directory for one provider, optionally validating it."
+        description = "Write a complete Terraform/OpenTofu project directory for one provider, optionally validating it. With k8s (or settings.kubernetes_manifests) it also writes k8s/: Kubernetes manifests for the workloads plus render scripts that fill in the Terraform outputs they need."
     )]
     async fn export_run(&self, Parameters(a): Parameters<ExportArgs>) -> CallToolResult {
         let dir = a.dir.clone();
@@ -1372,6 +1393,7 @@ impl TtgServer {
             .run(AgentCommand::ExportRun {
                 dir: a.dir,
                 provider: a.provider,
+                k8s: a.k8s,
             })
             .await;
         if !a.validate.unwrap_or(false) || result.is_error.unwrap_or(false) {
@@ -1428,6 +1450,7 @@ impl TtgServer {
         self.run(AgentCommand::ExportDiff {
             dir: a.dir,
             provider: a.provider,
+            k8s: a.k8s,
         })
         .await
     }

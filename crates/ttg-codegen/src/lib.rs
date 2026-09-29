@@ -15,6 +15,7 @@ pub mod diagnostics;
 pub mod diff;
 pub mod emit;
 pub mod files;
+pub mod k8s;
 pub mod layers;
 pub mod reach;
 pub mod tool;
@@ -64,7 +65,8 @@ pub struct ExportReport {
 
 /// Generate and write a single-provider project into `out_dir` (created if needed).
 /// Existing `.tf`, `MANUAL_STEPS.md` and `README.md` files in the directory are
-/// replaced; other files are left alone.
+/// replaced, and so are the files directly inside `k8s/`; other files — including the
+/// render scripts' own `k8s/rendered/` — are left alone.
 pub fn export(
     project: &Project,
     catalog: &Catalog,
@@ -74,7 +76,8 @@ pub fn export(
 ) -> Result<ExportReport, GenError> {
     let generated = generate(project, catalog, provider, tool)?;
     std::fs::create_dir_all(out_dir)?;
-    // Remove previously generated .tf files so stale resources do not linger.
+    // Remove previously generated .tf files so stale resources do not linger, and the
+    // manifests of workloads that are gone (or of an export that no longer has them).
     if let Ok(rd) = std::fs::read_dir(out_dir) {
         for e in rd.flatten() {
             let p = e.path();
@@ -84,9 +87,22 @@ pub fn export(
             }
         }
     }
+    for stale in diff::stale_manifests(&generated, out_dir) {
+        let _ = std::fs::remove_file(out_dir.join(stale));
+    }
+    let _ = std::fs::remove_dir(out_dir.join(k8s::DIR)); // only succeeds when empty
     let mut written = Vec::new();
     for (name, content) in &generated.files {
-        std::fs::write(out_dir.join(name), content)?;
+        let path = out_dir.join(name);
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+        std::fs::write(&path, content)?;
+        #[cfg(unix)]
+        if name.ends_with(".sh") {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755))?;
+        }
         written.push(name.clone());
     }
     if !generated.manual_steps.is_empty() {

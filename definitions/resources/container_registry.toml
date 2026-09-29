@@ -133,6 +133,11 @@ description  = { template = "Keep only the last {keep_last_images} images" }
 selection    = { object = { tagStatus = { value = "any" }, countType = { value = "imageCountMoreThan" }, countNumber = { field = "keep_last_images" } } }
 action       = { object = { type = { value = "expire" } } }
 
+# The registry host a Kubernetes workload's image is pulled from: every repository URL is
+# <account>.dkr.ecr.<region>.amazonaws.com/<name>, whichever block created it.
+[providers.aws.connection]
+REGISTRY = { raw = "split(\"/\", @urls@[0])[0]", refs = { urls = { func = "concat", args = [ { self_block = "main", attr = "repository_url", wrap = "list" }, { self_block = "repo", attr = "repository_url", wrap = "list" } ] } } }
+
 [providers.aws.outputs]
 url             = { attr = "repository_url", description = "Repository URL" }
 repository_urls = { block = "repo", attr = "repository_url", description = "URL of each listed repository" }
@@ -170,8 +175,26 @@ location            = { var = "location" }
 sku                 = { value = "Basic" }
 admin_enabled       = { value = false }
 
+[providers.azure.connection]
+REGISTRY = { self_block = "main", attr = "login_server" }
+
 [providers.azure.outputs]
 url = { attr = "login_server", description = "Registry login server" }
+
+# A Kubernetes Workload that runs its image from here ('Runs image from') is pulled by the
+# cluster's kubelet identity, which has no rights on the registry by default. One step per
+# registry, however many workloads pull from it.
+[[providers.azure.manual_steps]]
+title = "Let the Kubernetes cluster pull from the registry"
+when = { relation = "attachment", incoming = true, target_type = "kubernetes_workload" }
+body = """
+AKS pulls images with the cluster's kubelet identity, which cannot read an Azure Container
+Registry until it holds **AcrPull** on it: run
+`az aks update -n <cluster> -g <resource group> --attach-acr <registry>`, or add an
+`azurerm_role_assignment` with `role_definition_name = "AcrPull"`, this registry's id as
+the scope and `azurerm_kubernetes_cluster.<cluster>.kubelet_identity[0].object_id` as the
+principal — once per cluster that runs workloads from it.
+"""
 
 # ---------------------------------------------------------------- GCP
 [providers.gcp]
@@ -228,6 +251,10 @@ block = "condition"
 
 [providers.gcp.blocks.nested.nested.args]
 tag_state = { value = "ANY" }
+
+# <location>-docker.pkg.dev/<project>/<repository>, the prefix of every image path in it.
+[providers.gcp.connection]
+REGISTRY = { func = "format", args = [ { value = "%s-docker.pkg.dev/%s/%s" }, { self_block = "main", attr = "location" }, { self_block = "main", attr = "project" }, { self_block = "main", attr = "repository_id" } ] }
 
 [providers.gcp.outputs]
 id = { attr = "id", description = "Repository id" }

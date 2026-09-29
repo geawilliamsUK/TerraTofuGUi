@@ -600,6 +600,63 @@ named itself.
   calls the API, an EFS file system the ASR worker mounts, an application Log Group all
   three workloads write to, and an IAM-authenticated database.
 
+## Round 3: Kubernetes manifests (gap report R3.10, and R3.31 for outputs, done 2026-09-29)
+
+Eight of the twelve AWS manual steps on the CallScope design said "apply the Deployment and
+its ServiceAccount" and one more "bind the target group to a Service", although the diagram
+already knew each workload's namespace, service account, role, cluster, queues, buckets,
+secrets and mounts.
+
+- **`settings.kubernetes_manifests`** (Settings ▸ Output, `ttg export --k8s`,
+  `export_run { k8s: true }`) adds a `k8s/` directory to the export: `00-namespaces.yaml`,
+  one `<workload>.yaml` per Kubernetes Workload, `render.sh`, `render.ps1` and a README.
+  Per workload: a ServiceAccount named as the identity binding says (no annotation on AWS,
+  `azure.workload.identity/client-id` plus the pod label on Azure,
+  `iam.gke.io/gcp-service-account` on GCP); a Deployment; a ClusterIP Service on the port;
+  a static PersistentVolume and claim per mounted file system (EFS, Azure Files NFS and
+  Filestore CSI, no StorageClass); a KEDA `ScaledObject` + `TriggerAuthentication` for a
+  workload that consumes queues, or a CPU `HorizontalPodAutoscaler` otherwise, when **Max
+  replicas** is set; and on AWS a `TargetGroupBinding` for a workload behind a load
+  balancer that forwards to the cluster (GKE: the NEG annotation on the Service; Azure: a
+  README note, because the equivalents are controller-specific).
+- **Workload fields and links**, all marked `manifests = true`: `image_tag` (no default: the
+  placeholder `set-image-tag` applies but cannot be pulled, and a manual step says so),
+  `repository`, `image`, `port`, `replicas`, `min_replicas`, `max_replicas`,
+  `messages_per_replica`, `cpu`, `memory`, `gpu`; 'Runs image from' a Container Registry,
+  'Schedules on' a Node Pool (its labels become the nodeSelector — or the provider's pool
+  label when it has none — its taints the tolerations, plus AKS's spot taint) and
+  'Receives traffic from' a Load Balancer. Like `calls`, those links generate no
+  `depends_on` and no manual step. Scaling reuses the consumed-queue link ('Uses'), one
+  KEDA trigger per queue, rather than a separate "Scales on" link.
+- **Connection values** — `[providers.<id>.connection]` in a resource definition names what
+  a client needs (a queue's URL, a Service Bus queue's name and namespace, a Pub/Sub
+  subscription, a bucket, a secret ARN / id, a database host, port and name, a cache host
+  and port, a log group, a file system's volume handle, an identity's client id or email,
+  a registry host, a target group ARN) as argument sources resolved on the resource itself.
+  A workload gets `<PREFIX>_<NAME>_<KEY>` environment variables for everything it uses,
+  sends to, reads or logs to (`QUEUE_JOBS_URL`, `BUCKET_TRANSCRIPTS_NAME`,
+  `SECRET_API_KEY_ARN`; the prefix is the type's `env_prefix`).
+- **Outputs and the render step** (the Kubernetes half of R3.31) — every value only
+  Terraform knows becomes a `k8s_<slug>_<key>` output and a `${k8s_<slug>_<key>}` token in
+  the YAML; `render.sh` (bash 3.2+, `<tool> output -raw` per token, no jq or envsubst) and
+  `render.ps1` (`output -json`, parsed natively) write the finished files to `k8s/rendered/`.
+  A manual or unmapped resource's value becomes an input variable, as any reference to it
+  does. Generating `kubernetes_manifest` / `helm_release` resources instead is documented
+  as future work: those providers need the cluster's API at plan time.
+- **Mapping language** — `{ setting = "kubernetes_manifests" }` conditions (with `equals` /
+  `not_equals`) let a step apply only with the manifests off: the workload's
+  Deployment/ServiceAccount, annotation/label and CSI mount steps on every provider, and the
+  AWS load balancer's target-group step once a workload says it is behind it. The export
+  adds one step of its own, "install KEDA and/or the AWS Load Balancer Controller". Azure's
+  registry now says once, not per workload, that the cluster needs AcrPull.
+- `examples/kubernetes.ttg.json` is saved with the manifests on: a registry with three
+  repositories, a load-balanced, CPU-autoscaled API, a GPU ASR worker on the GPU pool
+  scaled to zero by KEDA on the job queue, and tags and requests on all three. Its AWS
+  export goes from 11 manual steps to 7. Tests run `kubectl annotate --local -o json`
+  over the rendered manifests of every provider (kubectl's own decoder, no cluster
+  needed), run both render scripts against a stand-in for `tofu output`, and check that two
+  exports are byte-identical.
+
 ## Explicitly still out of scope
 
 Running `plan`/`apply`, live-account access, multi-user collaboration, cost estimation,

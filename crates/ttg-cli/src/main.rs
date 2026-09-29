@@ -2,8 +2,8 @@
 //!
 //! ```text
 //! ttg check      <project.ttg.json> [--provider aws]
-//! ttg export     <project.ttg.json> --provider aws --tool opentofu --out ./out/aws [--validate]
-//! ttg export-all <project.ttg.json> --tool opentofu --out ./out [--zip] [--validate]
+//! ttg export     <project.ttg.json> --provider aws --tool opentofu --out ./out/aws [--validate] [--k8s]
+//! ttg export-all <project.ttg.json> --tool opentofu --out ./out [--zip] [--validate] [--k8s]
 //! ttg catalog    [--definitions ./definitions]
 //! ttg view       export <project.ttg.json> <view> [--format md|mermaid] [--out doc.md]
 //! ```
@@ -60,6 +60,10 @@ enum Cmd {
         /// Run `<tool> init && <tool> validate` afterwards if the binary is on PATH.
         #[arg(long)]
         validate: bool,
+        /// Also write Kubernetes manifests for the workloads into <out>/k8s/, whatever
+        /// the project's own setting says.
+        #[arg(long)]
+        k8s: bool,
     },
     /// Show what exporting would change in an existing export directory, without
     /// writing anything. Exits 1 when there are changes.
@@ -75,6 +79,9 @@ enum Cmd {
         /// Print the changed lines, not just the per-file summary.
         #[arg(long)]
         full: bool,
+        /// Compare an export with Kubernetes manifests (see `export --k8s`).
+        #[arg(long)]
+        k8s: bool,
     },
     /// Export one complete project directory per provider under --out.
     ExportAll {
@@ -88,6 +95,9 @@ enum Cmd {
         zip: bool,
         #[arg(long)]
         validate: bool,
+        /// Also write Kubernetes manifests into each <out>/<provider>/k8s/.
+        #[arg(long)]
+        k8s: bool,
     },
     /// Load and validate the definition catalog, then list what it contains.
     Catalog {
@@ -531,8 +541,10 @@ fn main() -> Result<()> {
             tool,
             out,
             validate,
+            k8s,
         } => {
-            let p = ttg_core::project::load(&project)?;
+            let mut p = ttg_core::project::load(&project)?;
+            p.settings.kubernetes_manifests |= k8s;
             cat.ensure_native_types(&p);
             let provider = provider.unwrap_or(p.settings.target_provider.clone());
             let tool: Tool = tool.map(Into::into).unwrap_or(p.settings.tool);
@@ -552,8 +564,10 @@ fn main() -> Result<()> {
             tool,
             out,
             full,
+            k8s,
         } => {
-            let p = ttg_core::project::load(&project)?;
+            let mut p = ttg_core::project::load(&project)?;
+            p.settings.kubernetes_manifests |= k8s;
             cat.ensure_native_types(&p);
             let provider = provider.unwrap_or(p.settings.target_provider.clone());
             let tool: Tool = tool.map(Into::into).unwrap_or(p.settings.tool);
@@ -586,8 +600,10 @@ fn main() -> Result<()> {
             out,
             zip,
             validate,
+            k8s,
         } => {
-            let p = ttg_core::project::load(&project)?;
+            let mut p = ttg_core::project::load(&project)?;
+            p.settings.kubernetes_manifests |= k8s;
             cat.ensure_native_types(&p);
             let tool: Tool = tool.map(Into::into).unwrap_or(p.settings.tool);
             std::fs::create_dir_all(&out)?;
@@ -733,8 +749,14 @@ fn strict_findings(cat: &ttg_catalog::Catalog) -> Vec<String> {
                     .any(|c| c.relation == rel.kind)
             });
             // `calls` and `depends_on` are never consumed: the first documents who talks
-            // to whom, the second only orders. Neither is a mapping's business.
-            if !consumed && !applicable.is_empty() && rel.kind != "depends_on" && rel.kind != "calls" {
+            // to whom, the second only orders. Neither is a mapping's business, and nor is
+            // a link only the Kubernetes manifests read (`manifests = true`).
+            if !consumed
+                && !applicable.is_empty()
+                && rel.kind != "depends_on"
+                && rel.kind != "calls"
+                && !rel.manifests
+            {
                 out.push(format!(
                     "{id}: relation '{}' ({}) is consumed by no provider mapping",
                     rel.kind,

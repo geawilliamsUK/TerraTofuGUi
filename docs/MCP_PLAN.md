@@ -61,6 +61,14 @@ via `BlockSchema::filtered` in `ttg-schema`, also behind `ttg schema show --dept
 `layout_distribute`, `settings_set`, `project_save`, `project_open`, `project_new`,
 `export_run` (validate runs off the UI thread), `undo`, `redo`.
 
+Added 2026-09-29 (round 3, Kubernetes manifests): `export_run`, `export_preview` and
+`export_diff` take `k8s` (bool) to include (`true`) or leave out (`false`) the `k8s/`
+directory for that one call, whatever `settings.kubernetes_manifests` says — the project
+is not changed, so nothing needs undoing. `settings_set { kubernetes_manifests }` changes
+the setting itself (one undo step) and echoes it back. `catalog_type` marks the fields and
+relations only the manifests read (`manifests: true` / `manifests_only: true`), so an agent
+can tell that a workload's `image_tag` or its 'Schedules on' link change no Terraform.
+
 Added 2026-09-14 (views as documents): `view_note_add` and `view_logical_add` (note
 boxes and annotation-only nodes; both removable through `view_annotation_remove`, which
 now matches a group, flow, note or logical node by id, label, title or name),

@@ -25,13 +25,23 @@ pub fn used_fields(m: &ProviderMapping) -> HashSet<String> {
     set
 }
 
-/// Providers (ids) whose mapping uses the given abstract field.
+/// Providers (ids) whose mapping uses the given abstract field. A field marked
+/// `manifests` feeds the Kubernetes manifests export, which runs for every provider.
 pub fn providers_using(def: &ResourceDef, field: &str) -> Vec<String> {
+    let manifests = def.fields.iter().any(|f| f.name == field && f.manifests);
     def.providers
         .iter()
-        .filter(|(_, m)| used_fields(m).contains(field))
+        .filter(|(_, m)| manifests || used_fields(m).contains(field))
         .map(|(id, _)| id.clone())
         .collect()
+}
+
+/// Abstract fields that matter for one provider: what its mapping reads plus the fields
+/// the Kubernetes manifests export reads.
+pub fn used_fields_for(def: &ResourceDef, provider: &str) -> HashSet<String> {
+    let mut set = def.providers.get(provider).map(used_fields).unwrap_or_default();
+    set.extend(def.fields.iter().filter(|f| f.manifests).map(|f| f.name.clone()));
+    set
 }
 
 fn scan_nested(n: &NestedBlockDef, set: &mut HashSet<String>) {

@@ -628,6 +628,9 @@ pub fn run(full: &Project, cat: &Catalog, provider: &str) -> Vec<Diagnostic> {
             let Some(t) = p.entity(&edge.target) else {
                 continue;
             };
+            if manifests_only(cat, e.resource_type, edge.relation, t.resource_type) {
+                continue;
+            }
             // Relations declared for other providers only are silently ignored here.
             let scoped_elsewhere = def.relations.iter().any(|r| {
                 r.kind == edge.relation.key()
@@ -996,6 +999,7 @@ pub fn condition_holds_for(
             cond_value(v.as_ref(), &f.equals, &f.not_equals)
         }
         Condition::Ancestor(a) => p.ancestor_of_type(e.id, &a.ancestor).is_some() != a.absent,
+        Condition::Setting(s) => cond_value(setting_value(p, &s.setting).as_ref(), &s.equals, &s.not_equals),
         Condition::Item(i) => {
             let Some((record, _)) = item else {
                 return false;
@@ -1023,6 +1027,27 @@ pub fn condition_holds_for(
             .iter()
             .any(|c| condition_holds_for(p, cat, provider, e, c, item, target)),
     }
+}
+
+/// The value of a project setting a `{ setting = "…" }` condition may test (the list is
+/// `ttg_catalog::CONDITION_SETTINGS`; the catalog refuses any other name).
+fn setting_value(p: &Project, name: &str) -> Option<Value> {
+    match name {
+        "kubernetes_manifests" => Some(Value::Bool(p.settings.kubernetes_manifests)),
+        _ => None,
+    }
+}
+
+/// Is this link one only the Kubernetes manifests export reads (`manifests = true` on the
+/// source type's relation declaration for that target type)? Such a link is never a
+/// Terraform mapping's business: like `calls` it earns no `depends_on`, no "cannot
+/// express" warning and no "link by hand" step.
+pub fn manifests_only(cat: &Catalog, source_type: &str, relation: Relation, target_type: &str) -> bool {
+    cat.resource(source_type).is_some_and(|def| {
+        def.relations
+            .iter()
+            .any(|r| r.manifests && r.kind == relation.key() && r.targets.iter().any(|t| t == target_type))
+    })
 }
 
 /// Manual steps of a mapping whose `when` holds for this entity.

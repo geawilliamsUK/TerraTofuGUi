@@ -243,6 +243,10 @@ target_group_arn = { self_block = "tg", attr = "arn" }
 target_id        = { target = "id" }
 port             = { field = "target_port" }
 
+# The target group a Kubernetes workload's TargetGroupBinding registers its pods with.
+[providers.aws.connection]
+TARGET_GROUP_ARN = { self_block = "tg", attr = "arn" }
+
 [providers.aws.outputs]
 dns_name = { attr = "dns_name", description = "Public DNS name of the load balancer" }
 zone_id  = { attr = "zone_id", description = "Hosted zone id for a Route 53 alias record" }
@@ -268,9 +272,11 @@ replace the `Principal` with `{ AWS = data.aws_elb_service_account.main.arn }` a
 matching `data "aws_elb_service_account" "main" {}` block, or logging silently never starts.
 """
 
+# With the Kubernetes manifests on, a workload linked with 'Receives traffic from' gets its
+# TargetGroupBinding generated, so the step is only for a cluster nobody says is behind it.
 [[providers.aws.manual_steps]]
 title = "Bind the target group to a Kubernetes Service"
-when = { relation = "attachment", target_type = "kubernetes_cluster" }
+when = { all = [ { relation = "attachment", target_type = "kubernetes_cluster" }, { any = [ { setting = "kubernetes_manifests", equals = "false" }, { relation = "attachment", incoming = true, target_type = "kubernetes_workload", absent = true } ] } ] }
 body = """
 The target group is created with `target_type = "ip"` and no attachments: nothing in
 Terraform knows which pods should be in it. Install the **AWS Load Balancer Controller** in
@@ -573,7 +579,10 @@ No backend is generated for the linked cluster: a GKE backend is a **network end
 group**, which the cluster creates when a `Service` is annotated
 `cloud.google.com/neg: '{"exposed_ports": {"<port>":{}}}'`. Annotate the Service, then add
 a `backend { group = <the NEG self link> }` to this backend service (or let a GKE `Ingress`
-create its own load balancer instead of this one).
+create its own load balancer instead of this one). With the project's Kubernetes manifests
+on, the Service of a workload linked with 'Receives traffic from' already carries the
+annotation; the backend is still yours to add, because the NEG only exists once GKE has
+created it.
 """
 
 [[providers.gcp.manual_steps]]

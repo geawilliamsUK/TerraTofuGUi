@@ -53,7 +53,28 @@ pub struct ResourceMeta {
     /// target provider is an error rather than a "no mapping" warning.
     #[serde(default)]
     pub providers: Vec<String>,
+    /// First word of the environment variables a Kubernetes workload linked to this type
+    /// receives: `QUEUE` gives `QUEUE_<NAME>_<KEY>` for each `connection` key (v2).
+    /// Defaults to the type id in upper case.
+    #[serde(default)]
+    pub env_prefix: Option<String>,
 }
+
+impl ResourceMeta {
+    /// `env_prefix`, or the type id in upper case.
+    pub fn env_prefix(&self) -> String {
+        self.env_prefix
+            .clone()
+            .unwrap_or_else(|| self.type_id.to_uppercase())
+    }
+}
+
+/// Abstract types the Kubernetes manifests export reads its own fields and links from.
+/// Only these may mark a field or relation `manifests = true`.
+pub const MANIFEST_TYPES: &[&str] = &["kubernetes_workload"];
+
+/// Project settings a `{ setting = "…" }` condition may test.
+pub const CONDITION_SETTINGS: &[&str] = &["kubernetes_manifests"];
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Default)]
 #[serde(rename_all = "lowercase")]
@@ -99,6 +120,10 @@ pub struct FieldDef {
     /// Values must be unique across all entities sharing this scope, per provider (v2).
     #[serde(default)]
     pub unique_scope: Option<String>,
+    /// Read by the Kubernetes manifests export rather than by a provider mapping (v2):
+    /// the field counts as used by every provider (see `MANIFEST_TYPES`).
+    #[serde(default)]
+    pub manifests: bool,
 }
 
 impl FieldDef {
@@ -146,6 +171,10 @@ pub struct RelationDef {
     /// it nor warn that they cannot; empty means every provider.
     #[serde(default)]
     pub providers: Vec<String>,
+    /// Read only by the Kubernetes manifests export (v2): no Terraform mapping consumes
+    /// the link, and like `calls` it adds no `depends_on` and no manual step.
+    #[serde(default)]
+    pub manifests: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Default)]
@@ -196,6 +225,11 @@ pub struct ProviderMapping {
     /// Design-time checks evaluated against each entity (v2).
     #[serde(default)]
     pub checks: Vec<CheckDef>,
+    /// What a client needs to reach this resource (v2): upper-case key -> argument
+    /// source, resolved on this entity. The Kubernetes manifests export turns each one a
+    /// linked workload uses into a `k8s_<slug>_<key>` output and an environment variable.
+    #[serde(default)]
+    pub connection: IndexMap<String, ArgSource>,
 }
 
 /// A definition-level diagnostic: when the condition holds the message is reported.
@@ -350,6 +384,20 @@ pub enum Condition {
     /// itself (`absent = true` inverts) (v2). With `relation = "…"` the subject is every
     /// target of that relation instead of the current row's.
     Target(CondTarget),
+    /// `{ setting = "kubernetes_manifests" }` — a project setting is on; `equals` /
+    /// `not_equals` compare it instead (`equals = "false"`: the setting is off) (v2).
+    Setting(CondSetting),
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct CondSetting {
+    /// One of `CONDITION_SETTINGS`.
+    pub setting: String,
+    #[serde(default)]
+    pub equals: Option<String>,
+    #[serde(default)]
+    pub not_equals: Option<String>,
 }
 
 #[derive(Debug, Clone, Deserialize)]

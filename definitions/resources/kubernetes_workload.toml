@@ -1,9 +1,9 @@
 # Abstract type: Kubernetes Workload  (schema_version 2)
 #
 # A deployment running *inside* a cluster, drawn so that its cloud permissions can be
-# generated. The manifests stay in the repository; what the diagram owns is the identity
-# plumbing and the least-privilege policy that the links imply — exactly what
-# `function.toml` does for a Lambda, one layer up.
+# generated. What the Terraform owns is the identity plumbing and the least-privilege
+# policy that the links imply — exactly what `function.toml` does for a Lambda, one layer
+# up.
 #
 #   AWS:   aws_eks_pod_identity_association (cluster / namespace / service account -> role)
 #          plus one aws_iam_role_policy on the linked role, built from the links.
@@ -15,7 +15,11 @@
 #          member per linked resource.
 #
 # Every provider is `partial`: the Deployment and its ServiceAccount are yours to apply,
-# and each provider needs a specific annotation or label on them.
+# and each provider needs a specific annotation or label on them. With the project's
+# Kubernetes manifests setting on, the export writes them too (`k8s/`, see
+# `crates/ttg-codegen/src/k8s.rs`), from the fields and links marked `manifests = true`
+# below plus the `connection` values of whatever the workload links to; the steps that
+# only describe those manifests then drop out (`{ setting = "kubernetes_manifests" }`).
 #
 # The links are deliberately split by intent: 'Uses' is read *and* write, 'Reads' is
 # read-only, and deleting objects is a separate switch, so a bucket link cannot quietly
@@ -56,6 +60,93 @@ label = "May delete objects"
 type = "bool"
 default = false
 description = "Add delete permission to the read/write bucket grant. Off by default: a service that writes new objects rarely needs to erase the ones already there, and the difference is exactly what a compromised pod would use."
+
+# ---- read by the Kubernetes manifests export only (manifests = true)
+[[fields]]
+name = "image_tag"
+label = "Image tag"
+type = "string"
+manifests = true
+pattern = "^[A-Za-z0-9_][A-Za-z0-9_.-]{0,127}$"
+pattern_hint = "a container image tag: letters, digits, '_', '.' and '-', up to 128 characters"
+description = "The tag the Deployment runs. Deliberately no default: until it is set the manifest uses the tag 'set-image-tag', which applies but cannot be pulled, and a manual step says so."
+
+[[fields]]
+name = "repository"
+label = "Repository"
+type = "string"
+manifests = true
+description = "Which of the linked Container Registry's repositories the image comes from. Defaults to the registry's only repository, or the registry itself when it lists none."
+
+[[fields]]
+name = "image"
+label = "Image"
+type = "string"
+manifests = true
+description = "A full image reference (e.g. ghcr.io/acme/api or nginx:1.27) for a workload not linked to a Container Registry."
+
+[[fields]]
+name = "port"
+label = "Port"
+type = "int"
+manifests = true
+description = "The port the container listens on; the Service forwards it. Defaults to the Target port of a load balancer the workload receives traffic from."
+
+[[fields]]
+name = "replicas"
+label = "Replicas"
+type = "int"
+default = 1
+manifests = true
+description = "Pods to run when the workload is not autoscaled (no Max replicas)."
+
+[[fields]]
+name = "min_replicas"
+label = "Min replicas"
+type = "int"
+default = 1
+manifests = true
+description = "The autoscaler's floor. 0 lets a queue worker scale to zero while its queue is empty (KEDA only; a CPU autoscaler keeps one)."
+
+[[fields]]
+name = "max_replicas"
+label = "Max replicas"
+type = "int"
+manifests = true
+description = "Set it to autoscale: on queue depth with KEDA when the workload consumes a queue ('Uses'), otherwise on CPU with a HorizontalPodAutoscaler."
+
+[[fields]]
+name = "messages_per_replica"
+label = "Messages per replica"
+type = "int"
+default = 5
+manifests = true
+description = "Queue depth KEDA aims for per pod: 10 waiting messages at 5 per replica means two pods."
+
+[[fields]]
+name = "cpu"
+label = "CPU request"
+type = "string"
+manifests = true
+pattern = "^[0-9]+(\\.[0-9]+)?m?$"
+pattern_hint = "a Kubernetes CPU quantity such as 250m or 2"
+
+[[fields]]
+name = "memory"
+label = "Memory"
+type = "string"
+manifests = true
+pattern = "^[0-9]+(\\.[0-9]+)?(Ki|Mi|Gi|Ti|k|M|G|T)?$"
+pattern_hint = "a Kubernetes memory quantity such as 512Mi or 4Gi"
+description = "Requested and also the limit, so the pod is never killed for using what it asked for."
+
+[[fields]]
+name = "gpu"
+label = "GPUs"
+type = "int"
+default = 0
+manifests = true
+description = "NVIDIA GPUs per pod (nvidia.com/gpu). Link the GPU node pool with 'Schedules on' so the pods land there."
 
 [[fields]]
 name = "db_user"
@@ -114,6 +205,29 @@ kind = "logs_to"
 label = "Logs to"
 targets = ["log_group"]
 cardinality = "many"
+
+# Read by the Kubernetes manifests only: no Terraform mapping consumes these three, and
+# like 'Calls' they add no depends_on and no manual step.
+[[relations]]
+kind = "attachment"
+label = "Runs image from"
+targets = ["container_registry"]
+cardinality = "optional"
+manifests = true
+
+[[relations]]
+kind = "attachment"
+label = "Schedules on (node pool)"
+targets = ["kubernetes_node_pool"]
+cardinality = "optional"
+manifests = true
+
+[[relations]]
+kind = "attachment"
+label = "Receives traffic from (load balancer)"
+targets = ["load_balancer"]
+cardinality = "many"
+manifests = true
 
 # Documentation only: nothing is generated, no depends_on, no manual step. It records
 # which service talks to which so the diagram answers "what breaks if this one does".
@@ -227,12 +341,15 @@ service_account = { attr = "service_account", description = "ServiceAccount the 
 
 [[providers.aws.manual_steps]]
 title = "Apply the Deployment and its ServiceAccount"
+when = { setting = "kubernetes_manifests", equals = "false" }
 body = """
 The association binds `<namespace>/<service account>` in the cluster to the IAM role. The
 ServiceAccount and the Deployment that uses it are not generated: apply a ServiceAccount of
 that exact name in that namespace and set `serviceAccountName` on the pod template. EKS Pod
 Identity needs no annotation on the ServiceAccount, but the cluster **must** run the
-`eks-pod-identity-agent` add-on — tick it in the cluster's Add-ons field.
+`eks-pod-identity-agent` add-on — tick it in the cluster's Add-ons field. Switch on
+**Kubernetes manifests** in the project settings to have them generated in `k8s/`, with the
+image, environment, volumes, node pool and autoscaling the diagram describes.
 """
 
 [[providers.aws.manual_steps]]
@@ -284,7 +401,7 @@ the agent picks them up from EKS Pod Identity.
 
 [[providers.aws.manual_steps]]
 title = "Mount the file system with the EFS CSI driver"
-when = { relation = "attachment", target_type = "file_system" }
+when = { all = [ { relation = "attachment", target_type = "file_system" }, { setting = "kubernetes_manifests", equals = "false" } ] }
 body = """
 The policy lets these pods mount the linked EFS file system; the volume itself is a
 Kubernetes object. Tick `efs_csi` in the cluster's **Add-ons**, then apply a StorageClass,
@@ -406,6 +523,7 @@ subject = { attr = "subject", description = "Service account the pods must run a
 
 [[providers.azure.manual_steps]]
 title = "Label the pods and annotate the ServiceAccount"
+when = { setting = "kubernetes_manifests", equals = "false" }
 body = """
 Azure workload identity only injects a token into pods that ask for it. On the pod
 template add the label
@@ -417,6 +535,7 @@ and annotate the ServiceAccount `<namespace>/<service account>` with
     azure.workload.identity/client-id: <client id of the linked identity>
 
 taking the client id from the linked Role's managed identity (its `client_id` output).
+Switch on **Kubernetes manifests** in the project settings to have both generated in `k8s/`.
 """
 
 [[providers.azure.manual_steps]]
@@ -476,7 +595,7 @@ this link records is which workspace the logs are expected to land in.
 
 [[providers.azure.manual_steps]]
 title = "Mount the file system with the Azure Files CSI driver"
-when = { relation = "attachment", target_type = "file_system" }
+when = { all = [ { relation = "attachment", target_type = "file_system" }, { setting = "kubernetes_manifests", equals = "false" } ] }
 body = """
 Nothing is generated for this link: an Azure Files NFS share is mounted with the built-in
 `file.csi.azure.com` driver, which reads the storage account key from a Kubernetes Secret
@@ -601,6 +720,7 @@ member = { attr = "member", description = "Workload identity member (serviceAcco
 
 [[providers.gcp.manual_steps]]
 title = "Annotate the ServiceAccount"
+when = { setting = "kubernetes_manifests", equals = "false" }
 body = """
 Create the ServiceAccount `<namespace>/<service account>` in the cluster and annotate it
 
@@ -608,6 +728,7 @@ Create the ServiceAccount `<namespace>/<service account>` in the cluster and ann
 
 taking the email from the linked Role's `email` output, then set `serviceAccountName` on
 the pod template. Without the annotation the pods fall back to the node's service account.
+Switch on **Kubernetes manifests** in the project settings to have it generated in `k8s/`.
 """
 
 [[providers.gcp.manual_steps]]
@@ -655,7 +776,7 @@ themselves.
 
 [[providers.gcp.manual_steps]]
 title = "Mount the file system with the Filestore CSI driver"
-when = { relation = "attachment", target_type = "file_system" }
+when = { all = [ { relation = "attachment", target_type = "file_system" }, { setting = "kubernetes_manifests", equals = "false" } ] }
 body = """
 Nothing is generated for this link: a Filestore share is mounted with the
 `filestore.csi.storage.gke.io` driver, which needs no identity of its own — the nodes reach

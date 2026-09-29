@@ -437,6 +437,7 @@ impl Catalog {
                 outputs: IndexMap::new(),
                 manual_steps: Vec::new(),
                 checks: Vec::new(),
+                connection: IndexMap::new(),
             },
         );
         let def = ResourceDef {
@@ -454,6 +455,7 @@ impl Catalog {
                 expects_incoming: false,
                 network_agnostic: false,
                 providers: vec![provider.to_string()],
+                env_prefix: None,
             },
             fields: Vec::new(),
             relations: Vec::new(),

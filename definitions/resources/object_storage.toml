@@ -19,6 +19,7 @@ description = "A bucket / container for unstructured objects."
 kind = "node"
 allowed_parents = ["resource_group"]
 icon = "OBJ"
+env_prefix = "BUCKET"
 
 [[fields]]
 name = "versioning"
@@ -272,6 +273,9 @@ bucket        = { self_block = "main", attr = "id" }
 target_bucket = { relation = "logs_to", attr = "id" }
 target_prefix = { func = "format", args = [ { value = "%s/" }, { field = "name", transform = "kebab" } ] }
 
+[providers.aws.connection]
+NAME = { self_block = "main", attr = "bucket" }
+
 [providers.aws.outputs]
 id  = { attr = "id", description = "Bucket name" }
 arn = { attr = "arn", description = "Bucket ARN" }
@@ -402,6 +406,10 @@ when = { field = "noncurrent_expire_days" }
 [providers.azure.blocks.nested.nested.nested.args]
 delete_after_days_since_creation = { field = "noncurrent_expire_days" }
 
+[providers.azure.connection]
+ACCOUNT   = { self_block = "main", attr = "name" }
+CONTAINER = { self_block = "container", attr = "name" }
+
 [providers.azure.outputs]
 id = { attr = "id", description = "Storage account id" }
 
@@ -518,6 +526,9 @@ block = "condition"
 
 [providers.gcp.blocks.nested.nested.args]
 age = { field = "abort_multipart_days" }
+
+[providers.gcp.connection]
+NAME = { self_block = "main", attr = "name" }
 
 [providers.gcp.outputs]
 id  = { attr = "id", description = "Bucket name" }

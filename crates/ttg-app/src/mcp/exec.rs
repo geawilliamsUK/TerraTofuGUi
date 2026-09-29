@@ -426,7 +426,7 @@ impl TtgApp {
                 let id = self.resolve(&entity)?;
                 Ok(self.reach_to_json(&id))
             }
-            AgentCommand::ExportPreview { provider } => self.export_preview_json(provider),
+            AgentCommand::ExportPreview { provider, k8s } => self.export_preview_json(provider, k8s),
             AgentCommand::Screenshot { .. } => Err("screenshots are handled by the frame loop".into()),
             AgentCommand::EntityAdd {
                 type_id,
@@ -1144,6 +1144,7 @@ impl TtgApp {
                 provider,
                 provider_settings,
                 tags,
+                kubernetes_manifests,
             } => {
                 let before = self.snapshot();
                 if let Some(t) = tool {
@@ -1175,10 +1176,16 @@ impl TtgApp {
                         .map(|(k, v)| (k, v.as_str().map(|s| s.to_string()).unwrap_or(v.to_string())))
                         .collect();
                 }
+                if let Some(k) = kubernetes_manifests {
+                    self.project.settings.kubernetes_manifests = k;
+                }
                 self.finish(before);
-                Ok(
-                    json!({"status": "settings updated", "tool": self.project.settings.tool, "provider": self.project.settings.target_provider}),
-                )
+                Ok(json!({
+                    "status": "settings updated",
+                    "tool": self.project.settings.tool,
+                    "provider": self.project.settings.target_provider,
+                    "kubernetes_manifests": self.project.settings.kubernetes_manifests,
+                }))
             }
             AgentCommand::ProjectSave { path } => {
                 let p = match path {
@@ -1221,11 +1228,11 @@ impl TtgApp {
                     json!({"status": if was_dirty { "prompt shown: the user must choose save / discard / cancel" } else { "new project" }}),
                 )
             }
-            AgentCommand::ExportRun { dir, provider } => {
+            AgentCommand::ExportRun { dir, provider, k8s } => {
                 let provider = provider.unwrap_or(self.project.settings.target_provider.clone());
                 let tool = self.project.settings.tool;
                 let rep = ttg_codegen::export(
-                    &self.project,
+                    &self.with_k8s(k8s),
                     &self.catalog,
                     &provider,
                     tool,
@@ -1271,10 +1278,10 @@ impl TtgApp {
                 relation,
                 providers,
             } => self.bulk_link(select, target, relation, providers),
-            AgentCommand::ExportDiff { dir, provider } => {
+            AgentCommand::ExportDiff { dir, provider, k8s } => {
                 let provider = provider.unwrap_or(self.project.settings.target_provider.clone());
                 let g = ttg_codegen::generate(
-                    &self.project,
+                    &self.with_k8s(k8s),
                     &self.catalog,
                     &provider,
                     self.project.settings.tool,
@@ -1692,6 +1699,7 @@ impl TtgApp {
                 "options": f.options,
                 "description": f.description,
                 "pattern_hint": f.pattern_hint,
+                "manifests": f.manifests,
                 "items": f.items.iter().map(|i| json!({"name": i.name, "type": format!("{:?}", i.field_type).to_lowercase(), "options": i.options, "targets": i.targets})).collect::<Vec<_>>(),
             })
         };
@@ -1710,6 +1718,7 @@ impl TtgApp {
                 "via_parent": r.via_parent,
                 // Empty = every provider.
                 "providers": r.providers,
+                "manifests_only": r.manifests,
             })).collect::<Vec<_>>(),
             "providers": d.providers.iter().map(|(p, m)| (p.clone(), json!({
                 "status": format!("{:?}", m.status).to_lowercase(),
@@ -1819,10 +1828,24 @@ impl TtgApp {
         })
     }
 
-    fn export_preview_json(&mut self, provider: Option<String>) -> R {
+    /// The project to export: the open one, with `settings.kubernetes_manifests`
+    /// overridden for this one call when the agent asked (`k8s`). Nothing is changed in
+    /// the diagram itself, so the override never needs undoing.
+    fn with_k8s(&self, k8s: Option<bool>) -> std::borrow::Cow<'_, ttg_core::Project> {
+        match k8s {
+            Some(on) if on != self.project.settings.kubernetes_manifests => {
+                let mut p = self.project.clone();
+                p.settings.kubernetes_manifests = on;
+                std::borrow::Cow::Owned(p)
+            }
+            _ => std::borrow::Cow::Borrowed(&self.project),
+        }
+    }
+
+    fn export_preview_json(&mut self, provider: Option<String>, k8s: Option<bool>) -> R {
         let provider = provider.unwrap_or(self.project.settings.target_provider.clone());
         let g = ttg_codegen::generate(
-            &self.project,
+            &self.with_k8s(k8s),
             &self.catalog,
             &provider,
             self.project.settings.tool,

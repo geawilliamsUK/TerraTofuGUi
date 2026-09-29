@@ -69,6 +69,12 @@ pub struct Settings {
     /// GCP `default_labels`, Azure a `tags` argument merged into each resource.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub tags: BTreeMap<String, String>,
+    /// Also write a `k8s/` directory of Kubernetes manifests beside the Terraform: per
+    /// workload a Namespace, ServiceAccount, Deployment, Service, volumes and autoscaling,
+    /// filled in from `terraform output` by a small render script. Off by default; left
+    /// out of the file while off so older projects do not change on save.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub kubernetes_manifests: bool,
 }
 
 fn default_provider() -> String {
@@ -84,6 +90,7 @@ impl Default for Settings {
             backend: None,
             state_encryption: false,
             tags: BTreeMap::new(),
+            kubernetes_manifests: false,
         }
     }
 }

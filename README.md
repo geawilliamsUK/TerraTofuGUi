@@ -113,6 +113,15 @@ OpenTofu installed, so a definition change that produces invalid HCL fails the b
   of the last export, changed files expanded and unchanged runs folded, so you can see
   what a re-export would touch. Headless: `ttg diff <project> --out <dir> [--full]`,
   which exits 1 when something would change.
+- **Kubernetes manifests** (Settings ▸ Output, `ttg export --k8s`, MCP `export_run { k8s:
+  true }`): the export also writes `k8s/`, one file per Kubernetes Workload with its
+  ServiceAccount (annotated the way each cloud's workload identity wants), a Deployment
+  whose image, environment, volumes, node selector, tolerations and GPU/CPU/memory come
+  from the diagram, a Service, a KEDA `ScaledObject` for a queue worker or a CPU
+  autoscaler, and on AWS a `TargetGroupBinding` for a workload behind the load balancer.
+  Values only known after `apply` (queue URLs, the file system id, the target group ARN)
+  are `k8s_*` outputs that `k8s/render.sh` / `render.ps1` substitute into `k8s/rendered/`,
+  and the manual steps the manifests replace leave `MANUAL_STEPS.md`.
 - Badges on nodes: red `!` = error (export blocked), orange `!` = warning (manual step),
   `✕` = no mapping for this provider, blue `M` = flagged external/manual.
 - Undo/redo (Ctrl+Z / Ctrl+Y), copy/paste (Ctrl+C / Ctrl+V), delete, select all, save

@@ -170,6 +170,8 @@ pub enum AgentCommand {
     },
     ExportPreview {
         provider: Option<String>,
+        /// Overrides `settings.kubernetes_manifests` for this call only.
+        k8s: Option<bool>,
     },
     /// A PNG of the window. `view` activates a view first, `fit` frames its content and
     /// `hide_panels` drops the side panels for that one frame. `width`/`height` resize
@@ -345,6 +347,7 @@ pub enum AgentCommand {
         provider_settings: Option<serde_json::Map<String, serde_json::Value>>,
         /// Replaces the project's default tags outright; `{}` clears them.
         tags: Option<serde_json::Map<String, serde_json::Value>>,
+        kubernetes_manifests: Option<bool>,
     },
     ProjectSave {
         path: Option<String>,
@@ -358,11 +361,14 @@ pub enum AgentCommand {
     ExportRun {
         dir: String,
         provider: Option<String>,
+        /// Overrides `settings.kubernetes_manifests` for this export only.
+        k8s: Option<bool>,
     },
     /// What an export would change in an existing directory (nothing is written).
     ExportDiff {
         dir: String,
         provider: Option<String>,
+        k8s: Option<bool>,
     },
     /// Has the project changed since revision `since` (user or agent edits)?
     Changes {
