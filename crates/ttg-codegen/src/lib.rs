@@ -12,6 +12,7 @@
 
 pub mod bundle;
 pub mod cost;
+pub mod dataflow;
 pub mod diagnostics;
 pub mod diff;
 pub mod emit;

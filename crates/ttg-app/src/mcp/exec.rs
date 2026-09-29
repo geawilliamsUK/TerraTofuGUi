@@ -47,9 +47,6 @@ impl Movable {
     }
 }
 
-/// Gap left between an anchored note and the thing it explains.
-const NOTE_GAP: f32 = 24.0;
-
 impl TtgApp {
     /// Resolve an id or (case-insensitive) display name to an entity id.
     fn resolve(&self, key: &str) -> Result<Id, String> {
@@ -92,6 +89,9 @@ impl TtgApp {
             "config": e.config,
             "provider_config": e.provider_config,
             "extra": e.extra,
+            "classification": e.classification,
+            "description": e.description,
+            "owner": e.owner,
         })
     }
 
@@ -173,33 +173,10 @@ impl TtgApp {
         }
     }
 
-    /// Everything the active view already draws, as world rects: the entities it shows,
-    /// its grouping boxes, its logical nodes and its notes. Used to find a free spot.
-    fn view_obstacles(&self) -> Vec<ttg_core::view::Rect> {
-        let Some(v) = self.active_view() else {
-            return Vec::new();
-        };
-        let visible = |id: &str| self.is_visible(id);
-        let mut out: Vec<ttg_core::view::Rect> = self
-            .project
-            .entities()
-            .iter()
-            .filter(|e| visible(e.id))
-            .filter_map(|e| ttg_core::view::entity_rect(&self.project, Some(v), e.id, &visible))
-            .collect();
-        out.extend(v.groups.iter().map(ttg_core::view::group_rect));
-        out.extend(v.logicals.iter().map(ttg_core::view::logical_rect));
-        out.extend(
-            v.notes
-                .iter()
-                .map(|n| ttg_core::view::note_rect(&self.project, v, n, &visible)),
-        );
-        out
-    }
-
     /// Where an anchored note goes when the agent gives no position: the first side of
     /// its anchor — right, below, left, above — that is clear of everything the view
-    /// already draws. The answer is an offset from the anchor's box, which is what
+    /// already draws (`ttg_core::view::note_offset_beside`, which `view_arrange_notes`
+    /// and tidy use too). The answer is an offset from the anchor's box, which is what
     /// `Note::position` means once a note has an anchor, so the note keeps travelling
     /// with the thing it explains.
     ///
@@ -214,30 +191,8 @@ impl TtgApp {
         let Some(a) = ttg_core::view::anchor_rect(&self.project, v, anchor, &visible) else {
             return fallback;
         };
-        let (w, h) = (size.w as f32, size.h as f32);
-        let sides = [
-            (a.x + a.w + NOTE_GAP, a.y),
-            (a.x, a.y + a.h + NOTE_GAP),
-            (a.x - w - NOTE_GAP, a.y),
-            (a.x, a.y - h - NOTE_GAP),
-        ];
-        let taken = self.view_obstacles();
-        let offset = |(x, y): (f32, f32)| ttg_core::Position {
-            x: (x - (a.x + a.w)).round() as i32,
-            y: (y - a.y).round() as i32,
-        };
-        for side in sides {
-            let r = ttg_core::view::Rect {
-                x: side.0,
-                y: side.1,
-                w,
-                h,
-            };
-            if !taken.iter().any(|o| o.intersects(r)) {
-                return offset(side);
-            }
-        }
-        offset(sides[0])
+        let taken = ttg_core::view::note_obstacles(&self.project, v, &visible, None);
+        ttg_core::view::note_offset_beside(a, size, &taken)
     }
 
     /// What to store in a note's `position` so that it is *drawn* with its top-left
@@ -351,7 +306,7 @@ impl TtgApp {
                     .filter_map(|l| v.logical(l).map(|l| l.name.clone())).collect::<Vec<_>>(),
             })).collect::<Vec<_>>(),
             "flows": v.flows_in_step_order().iter().map(|f| json!({
-                "id": f.id, "step": f.step, "label": f.label, "dashed": f.dashed, "color": f.color,
+                "id": f.id, "step": f.step, "label": f.label, "dashed": f.dashed, "color": f.color, "data": f.data,
                 "from": ttg_core::view::end_name(&self.project, v, &f.from),
                 "to": ttg_core::view::end_name(&self.project, v, &f.to),
             })).collect::<Vec<_>>(),
@@ -462,9 +417,13 @@ impl TtgApp {
                 extra,
                 extra_provider,
                 extra_block,
+                meta,
             } => {
                 self.check_providers(providers.as_deref())?;
+                // Checked before anything is written, like every other field.
+                let class = self.parse_classification(meta.classification.as_deref())?;
                 let r = self.agent_entity_update(&entity, name, config, provider_config, manual)?;
+                let r = self.apply_entity_meta(&entity, class, &meta, r)?;
                 if let Some(extra) = extra {
                     let id = self.resolve(&entity)?;
                     let prov = extra_provider.unwrap_or(self.project.settings.target_provider.clone());
@@ -897,6 +856,13 @@ impl TtgApp {
                     "view": self.view_name().unwrap_or_else(|| "All".into()),
                     "bounds": b.map(|r| json!({"x": r.min.x, "y": r.min.y, "w": r.width(), "h": r.height()})),
                     "shown": self.project.entities().len() - self.hidden_count(),
+                    // The fit keeps the legend's strip on the right free, so nothing is
+                    // drawn under the panel.
+                    "legend_reserved_px": if self.active_view().is_some_and(|v| v.legend) {
+                        crate::annotations::LEGEND_W + crate::annotations::LEGEND_MARGIN
+                    } else {
+                        0.0
+                    },
                 }))
             }
             AgentCommand::ViewExport { view, format } => {
@@ -910,7 +876,8 @@ impl TtgApp {
                 let text = match format.to_lowercase().as_str() {
                     "md" | "markdown" => ttg_codegen::views::markdown(&self.project, &self.catalog, v),
                     "mermaid" => ttg_codegen::views::mermaid(&self.project, &self.catalog, v),
-                    other => return Err(format!("unknown format \"{other}\" (md | mermaid)")),
+                    "sequence" => ttg_codegen::views::sequence(&self.project, v),
+                    other => return Err(format!("unknown format \"{other}\" (md | mermaid | sequence)")),
                 };
                 Ok(json!({"view": v.name, "format": format.to_lowercase(), "text": text}))
             }
@@ -948,6 +915,7 @@ impl TtgApp {
                 step,
                 color,
                 show_hidden,
+                data,
             } => self.with_view(view, |app| {
                 app.require_view("flows")?;
                 let f = app
@@ -956,7 +924,7 @@ impl TtgApp {
                 let t = app
                     .resolve_end(&to)
                     .ok_or_else(|| format!("no resource, group or logical node \"{to}\""))?;
-                app.add_flow_checked(f, t, &label, dashed, step, color, show_hidden)
+                app.add_flow_checked(f, t, &label, dashed, step, color, data, show_hidden)
             }),
             AgentCommand::NoteAdd {
                 view,
@@ -1112,11 +1080,10 @@ impl TtgApp {
                     "views": self.project.views.iter().map(|v| v.name.clone()).collect::<Vec<_>>(),
                 }))
             }
-            AgentCommand::LayoutTidy { container } => {
-                let c = container.map(|x| self.resolve(&x)).transpose()?;
-                self.tidy(c.as_deref());
-                Ok(json!({"status": "tidied"}))
-            }
+            AgentCommand::LayoutTidy { container, view, by } => self.agent_layout_tidy(container, view, by),
+            // View tools: flows generated from links, notes put back beside their anchors.
+            AgentCommand::ViewGenerate { view, kind, replace } => self.agent_view_generate(view, &kind, replace),
+            AgentCommand::ViewArrangeNotes { view } => self.agent_arrange_notes(view),
             AgentCommand::LayoutAlign { how } => {
                 use ttg_core::layout::Align;
                 let how = match how.as_str() {
@@ -1754,7 +1721,24 @@ impl TtgApp {
                     "left_out": off.iter().map(|(id, _)| self.project.entity(id).map(|e| e.name.to_string()).unwrap_or_default()).collect::<Vec<_>>(),
                 }))
             }).collect::<Map<_, _>>(),
-            "entities": self.project.entities().iter().map(|e| json!({"id": e.id, "name": e.name, "type": e.resource_type, "parent": e.parent})).collect::<Vec<_>>(),
+            "entities": self.project.entities().iter().map(|e| {
+                let mut o = json!({"id": e.id, "name": e.name, "type": e.resource_type, "parent": e.parent});
+                // What each resource is for, only where it has been said.
+                if let Some(c) = e.classification {
+                    o["classification"] = json!(c);
+                }
+                if !e.description.is_empty() {
+                    o["description"] = json!(e.description);
+                }
+                if !e.owner.is_empty() {
+                    o["owner"] = json!(e.owner);
+                }
+                o
+            }).collect::<Vec<_>>(),
+            "classified": ttg_core::Classification::ALL.iter().filter_map(|c| {
+                let n = self.project.entities().iter().filter(|e| e.classification == Some(*c)).count();
+                (n > 0).then(|| (c.key().to_string(), json!(n)))
+            }).collect::<Map<_, _>>(),
         })
     }
 
@@ -1963,4 +1947,167 @@ fn field_names(fields: &[FieldDef]) -> String {
         .map(|f| f.name.as_str())
         .collect::<Vec<_>>()
         .join(", ")
+}
+
+// ---------------------------------------------------------------------------------
+// View tools and entity metadata: generated flows, tidy by flows, notes put back
+// beside their anchors, and what an entity is for.
+
+impl TtgApp {
+    /// `Some(Some(c))` sets, `Some(None)` clears (`""` or `"none"`), `None` leaves alone.
+    fn parse_classification(
+        &self,
+        raw: Option<&str>,
+    ) -> Result<Option<Option<ttg_core::Classification>>, String> {
+        let Some(raw) = raw else { return Ok(None) };
+        if raw.trim().is_empty() || raw.trim().eq_ignore_ascii_case("none") {
+            return Ok(Some(None));
+        }
+        ttg_core::Classification::from_key(raw)
+            .map(|c| Some(Some(c)))
+            .ok_or_else(|| {
+                format!(
+                    "unknown classification \"{raw}\" (one of: {}, or \"none\")",
+                    ttg_core::Classification::ALL
+                        .iter()
+                        .map(|c| c.key())
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                )
+            })
+    }
+
+    /// Write classification, description and owner. Runs right after the rest of
+    /// `entity_update` has committed its undo step and before anything else happens,
+    /// so it belongs to that same step: undo restores the snapshot taken before the
+    /// update, metadata included. The reply's entity is refreshed to show it.
+    fn apply_entity_meta(
+        &mut self,
+        entity: &str,
+        class: Option<Option<ttg_core::Classification>>,
+        meta: &super::EntityMeta,
+        mut reply: J,
+    ) -> R {
+        if meta.is_empty() {
+            return Ok(reply);
+        }
+        let id = self.resolve(entity)?;
+        let (c, d, o) = if let Some(n) = self.project.nodes.get_mut(&id) {
+            (&mut n.classification, &mut n.description, &mut n.owner)
+        } else {
+            let c = self.project.containers.get_mut(&id).ok_or("no such entity")?;
+            (&mut c.classification, &mut c.description, &mut c.owner)
+        };
+        if let Some(v) = class {
+            *c = v;
+        }
+        if let Some(v) = &meta.description {
+            *d = v.trim().to_string();
+        }
+        if let Some(v) = &meta.owner {
+            *o = v.trim().to_string();
+        }
+        self.dirty = true;
+        self.diag_dirty = true;
+        self.refresh_visibility();
+        if reply.get("entity").is_some() {
+            reply["entity"] = self.entity_json(&id);
+        }
+        Ok(reply)
+    }
+
+    /// `layout_tidy`: by links (the whole diagram, a container, or a view in its own
+    /// layout) or by the view's flows; either way a named view gets its anchored notes
+    /// put back beside their anchors, in the same undo step.
+    fn agent_layout_tidy(
+        &mut self,
+        container: Option<String>,
+        view: Option<String>,
+        by: Option<String>,
+    ) -> R {
+        let by = by.unwrap_or_else(|| "links".into()).to_lowercase();
+        if !matches!(by.as_str(), "links" | "flows") {
+            return Err(format!("unknown `by` \"{by}\" (links | flows)"));
+        }
+        if by == "flows" && view.is_none() && self.active_view.is_none() {
+            return Err("tidying by flows needs a view: pass `view` (or activate one)".into());
+        }
+        self.with_view(view, |app| {
+            if by == "flows" {
+                let (moved, notes) = app.tidy_view_by_flows()?;
+                return Ok(json!({
+                    "status": "tidied by flows",
+                    "view": app.view_name(),
+                    "moved": moved,
+                    "notes_rearranged": notes,
+                }));
+            }
+            let c = container.map(|x| app.resolve(&x)).transpose()?;
+            // Tidying a view puts its anchored notes back beside their anchors too.
+            let notes = app.tidy(c.as_deref());
+            Ok(json!({"status": "tidied", "view": app.view_name(), "notes_rearranged": notes}))
+        })
+    }
+
+    fn agent_view_generate(&mut self, view: Option<String>, kind: &str, replace: bool) -> R {
+        let name = |app: &TtgApp, id: &str| {
+            app.active_view()
+                .map(|v| {
+                    ttg_core::view::end_name(
+                        &app.project,
+                        v,
+                        &ttg_core::FlowEnd::Entity {
+                            entity: id.to_string(),
+                        },
+                    )
+                })
+                .unwrap_or_default()
+        };
+        match kind.to_lowercase().as_str() {
+            "data_flow" | "dataflow" | "flows" => self.with_view(view, |app| {
+                app.require_view("generated flows")?;
+                let added = app.generate_view_flows(replace)?;
+                Ok(json!({
+                    "status": format!("{} flow(s) added", added.len()),
+                    "view": app.view_name(),
+                    "added": added.iter().map(|f| json!({
+                        "id": f.id,
+                        "from": name(app, f.from.id()),
+                        "to": name(app, f.to.id()),
+                        "label": f.label,
+                        "dashed": f.dashed,
+                    })).collect::<Vec<_>>(),
+                    "flows": app.active_view().map(|v| v.flows.len()),
+                }))
+            }),
+            "personal_data" | "personal" => {
+                let rep = self.build_personal_data_view()?;
+                Ok(json!({
+                    "status": if rep.refreshed { "view refreshed" } else { "view created" },
+                    "view": self.view_name(),
+                    "sources": rep.sources.iter().map(|id| name(self, id)).collect::<Vec<_>>(),
+                    "reached": rep.reached.iter().map(|id| name(self, id)).collect::<Vec<_>>(),
+                    "dropped_flows": rep.dropped,
+                    "added": rep.added.iter().map(|f| json!({
+                        "id": f.id,
+                        "from": name(self, f.from.id()),
+                        "to": name(self, f.to.id()),
+                        "label": f.label,
+                        "data": f.data,
+                    })).collect::<Vec<_>>(),
+                }))
+            }
+            other => Err(format!("unknown kind \"{other}\" (data_flow | personal_data)")),
+        }
+    }
+
+    fn agent_arrange_notes(&mut self, view: Option<String>) -> R {
+        self.with_view(view, |app| {
+            app.require_view("notes")?;
+            let before = app.snapshot();
+            let moved = app.arrange_view_notes_now();
+            app.finish(before);
+            Ok(json!({"status": format!("{moved} note(s) moved"), "view": app.view_name(), "moved": moved}))
+        })
+    }
 }

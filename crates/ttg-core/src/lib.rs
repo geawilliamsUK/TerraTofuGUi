@@ -6,6 +6,7 @@
 //! `ttg-catalog` and `ttg-codegen` can map that intent to concrete provider resources.
 
 pub mod cost;
+pub mod flow_layout;
 pub mod graph;
 pub mod ir;
 #[cfg(feature = "schema")]

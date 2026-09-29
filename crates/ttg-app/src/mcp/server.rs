@@ -200,6 +200,7 @@ pub fn command_from_json(tool: &str, args: serde_json::Value) -> Result<AgentCom
                 step: a.step,
                 color: a.color,
                 show_hidden: a.show_hidden.unwrap_or(false),
+                data: a.data,
             }
         }
         "view_note_add" => {
@@ -249,7 +250,22 @@ pub fn command_from_json(tool: &str, args: serde_json::Value) -> Result<AgentCom
             let a: TidyArgs = parse(args)?;
             AgentCommand::LayoutTidy {
                 container: a.container,
+                view: a.view,
+                by: a.by,
             }
+        }
+        // View tools: flows generated from links, notes put back beside their anchors.
+        "view_generate" => {
+            let a: ViewGenerateArgs = parse(args)?;
+            AgentCommand::ViewGenerate {
+                view: a.view,
+                kind: a.kind,
+                replace: a.replace.unwrap_or(false),
+            }
+        }
+        "view_arrange_notes" => {
+            let a: ViewNameArg = parse(args)?;
+            AgentCommand::ViewArrangeNotes { view: a.view }
         }
         "layout_align" => {
             let a: AlignArgs = parse(args)?;
@@ -340,7 +356,7 @@ pub struct EntityUpdateArgs {
     #[schemars(description = "Entity id or display name. Give this, or `select` to update many at once")]
     pub entity: Option<String>,
     #[schemars(
-        description = "Bulk update: apply the same config / provider_config / manual / providers / extra to every entity this matches, as ONE undo step. All-or-nothing: if any match refuses a value the whole call changes nothing and the reply lists every refusal. Cannot rename. An empty or non-matching selection is refused"
+        description = "Bulk update: apply the same config / provider_config / manual / providers / extra / classification / description / owner to every entity this matches, as ONE undo step. All-or-nothing: if any match refuses a value the whole call changes nothing and the reply lists every refusal. Cannot rename. An empty or non-matching selection is refused"
     )]
     pub select: Option<SelectArgs>,
     #[schemars(description = "New display name (single entity only)")]
@@ -363,11 +379,28 @@ pub struct EntityUpdateArgs {
     pub extra_provider: Option<String>,
     #[schemars(description = "Block key the extra arguments apply to; defaults to the primary block")]
     pub extra_block: Option<String>,
+    #[schemars(
+        description = "How sensitive the data it holds is: public | internal | confidential | personal | payment; \"none\" or \"\" clears it"
+    )]
+    pub classification: Option<String>,
+    #[schemars(
+        description = "Why the resource exists, in a sentence or two. Emitted as an HCL comment above its blocks and a Description tag on AWS / Azure (cut to 256 characters); \"\" clears it"
+    )]
+    pub description: Option<String>,
+    #[schemars(
+        description = "Team or person who looks after it. Emitted as an Owner tag (AWS, Azure) or owner label (Google Cloud); \"\" clears it"
+    )]
+    pub owner: Option<String>,
 }
 
 impl EntityUpdateArgs {
     /// The single-entity or the bulk command these arguments ask for.
     fn into_command(self) -> Result<AgentCommand, String> {
+        let meta = super::EntityMeta {
+            classification: self.classification,
+            description: self.description,
+            owner: self.owner,
+        };
         match (self.entity, self.select) {
             (Some(entity), None) => Ok(AgentCommand::EntityUpdate {
                 entity,
@@ -379,6 +412,7 @@ impl EntityUpdateArgs {
                 extra: self.extra,
                 extra_provider: self.extra_provider,
                 extra_block: self.extra_block,
+                meta,
             }),
             (None, Some(select)) => {
                 if self.name.is_some() {
@@ -394,6 +428,7 @@ impl EntityUpdateArgs {
                         extra: self.extra,
                         extra_provider: self.extra_provider,
                         extra_block: self.extra_block,
+                        meta,
                     },
                 })
             }
@@ -587,7 +622,9 @@ pub struct ViewUpdateArgs {
 #[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
 pub struct ViewExportArgs {
     pub view: Option<String>,
-    #[schemars(description = "`md` (default) or `mermaid`")]
+    #[schemars(
+        description = "`md` (default), `mermaid` (flowchart) or `sequence` (Mermaid sequenceDiagram of the numbered flows)"
+    )]
     pub format: Option<String>,
 }
 
@@ -621,6 +658,10 @@ pub struct FlowAddArgs {
     pub step: Option<u32>,
     #[schemars(description = "`#rrggbb` or a group palette colour; the default ink when omitted")]
     pub color: Option<String>,
+    #[schemars(
+        description = "What travels along it, e.g. `call audio`: drawn under the label and listed in the exports"
+    )]
+    pub data: Option<String>,
     #[schemars(description = "View to draw in; defaults to the active view")]
     pub view: Option<String>,
     #[schemars(
@@ -695,6 +736,31 @@ pub struct TidyArgs {
         description = "Only tidy the contents of this container (id or name); omit for the whole diagram"
     )]
     pub container: Option<String>,
+    #[schemars(
+        description = "Tidy this view, in its own layout (the shared layout never moves), then put its anchored notes back beside their anchors"
+    )]
+    pub view: Option<String>,
+    #[schemars(
+        description = "`links` (default): columns by dependency. `flows`: the view's data flows left to right in step order, crossings reduced, grouping boxes refitted around their members; needs a view"
+    )]
+    pub by: Option<String>,
+}
+
+/// Arguments of `view_generate`.
+#[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
+pub struct ViewGenerateArgs {
+    #[schemars(
+        description = "View to draw the flows in (`data_flow`); defaults to the active view. Ignored for `personal_data`, which has a view of its own"
+    )]
+    pub view: Option<String>,
+    #[schemars(
+        description = "`data_flow`: flows between the view's visible resources derived from their data-carrying links (sends to, reads, uses, logs to, dead letters, calls, mounts, forwards to), in the direction the data moves. `personal_data`: build or refresh the view \"Where personal data goes\" from the resources classified personal or payment"
+    )]
+    pub kind: String,
+    #[schemars(
+        description = "data_flow only: first remove the view's resource-to-resource flows (flows from or to a group or logical node stay). Default false: pairs that already have a flow are left alone"
+    )]
+    pub replace: Option<bool>,
 }
 
 #[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
@@ -1199,7 +1265,7 @@ impl TtgServer {
     }
 
     #[tool(
-        description = "Rename, set abstract/provider field values (checked against the definition) or the external flag. Pass `entity` for one, or `select` ({ types, name_glob, ids }, every criterion given must match) to apply the same values to every match as ONE undo step; a bulk update is all-or-nothing, cannot rename, refuses an empty or non-matching selection, and lists what changed."
+        description = "Rename, set abstract/provider field values (checked against the definition), the external flag, or what the resource is for: `classification` (public | internal | confidential | personal | payment), `description` and `owner` (emitted as tags / labels and an HCL comment). Pass `entity` for one, or `select` ({ types, name_glob, ids }, every criterion given must match) to apply the same values to every match as ONE undo step; a bulk update is all-or-nothing, cannot rename, refuses an empty or non-matching selection, and lists what changed."
     )]
     async fn entity_update(&self, Parameters(a): Parameters<EntityUpdateArgs>) -> CallToolResult {
         match a.into_command() {
@@ -1342,7 +1408,7 @@ impl TtgServer {
     }
 
     #[tool(
-        description = "A view as a document: `md` gives the description, a table of the groups with their members, the flows in step order and the notes; `mermaid` gives a flowchart LR with the groups as subgraphs. For a picture, use screenshot with fit and hide_panels."
+        description = "A view as a document: `md` gives the description, a table of the resources it shows (with classification, description and owner columns when any is set), the groups with their members, the flows in step order and the notes; `mermaid` gives a flowchart LR with the groups as subgraphs; `sequence` gives a Mermaid sequenceDiagram of the numbered flows (participants in order of appearance, shared step numbers as par blocks, dashed flows as -->>). For a picture, use screenshot with fit and hide_panels."
     )]
     async fn view_export(&self, Parameters(a): Parameters<ViewExportArgs>) -> CallToolResult {
         self.run(AgentCommand::ViewExport {
@@ -1381,6 +1447,7 @@ impl TtgServer {
             step: a.step,
             color: a.color,
             show_hidden: a.show_hidden.unwrap_or(false),
+            data: a.data,
         })
         .await
     }
@@ -1430,12 +1497,37 @@ impl TtgServer {
         .await
     }
 
-    #[tool(description = "Auto-layout: columns by dependency, containers fitted to contents. Undoable.")]
+    #[tool(
+        description = "Auto-layout. `by: links` (default): columns by dependency, containers fitted to contents. `by: flows` with a `view`: that view's data flows left to right in step order, placed in the view's own layout only. With a `view`, its anchored notes are put back beside their anchors afterwards. Undoable."
+    )]
     async fn layout_tidy(&self, Parameters(a): Parameters<TidyArgs>) -> CallToolResult {
         self.run(AgentCommand::LayoutTidy {
             container: a.container,
+            view: a.view,
+            by: a.by,
         })
         .await
+    }
+
+    // View tools: flows generated from links, notes put back beside their anchors.
+
+    #[tool(
+        description = "Generate view content from the model. `kind: data_flow` draws flows between the view's visible resources from their data-carrying links (structural links such as network membership, IAM bindings and encryption produce nothing), labelled by what the link does, never duplicating a pair that already has a flow; the reply lists what was added. `kind: personal_data` builds or refreshes the view \"Where personal data goes\": resources classified personal or payment, what their data reaches one link away, and the flows between them. One undo step."
+    )]
+    async fn view_generate(&self, Parameters(a): Parameters<ViewGenerateArgs>) -> CallToolResult {
+        self.run(AgentCommand::ViewGenerate {
+            view: a.view,
+            kind: a.kind,
+            replace: a.replace.unwrap_or(false),
+        })
+        .await
+    }
+
+    #[tool(
+        description = "Put every anchored note of a view back beside what it explains (the first clear side: right, below, left, above), e.g. after moving things. Free notes stay put. layout_tidy with a view does this itself."
+    )]
+    async fn view_arrange_notes(&self, Parameters(a): Parameters<ViewNameArg>) -> CallToolResult {
+        self.run(AgentCommand::ViewArrangeNotes { view: a.view }).await
     }
 
     #[tool(description = "Align the current selection (2+ items).")]

@@ -50,3 +50,6 @@ prefix = "random_"
 [default_tags]
 arg = "default_labels"
 sanitize_labels = true
+# An entity's owner becomes an `owner` label (label-safe, at most 63 characters); its
+# description does not fit in a label and is only an HCL comment here.
+entity_arg = "labels"

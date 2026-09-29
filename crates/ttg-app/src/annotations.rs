@@ -3,6 +3,7 @@
 //! codegen; it is the "architecture map" side of a view.
 
 use crate::app::{Drag, TtgApp};
+use crate::canvas::Side;
 use egui::{Align2, Color32, CornerRadius, FontId, Pos2, Rect, Sense, Stroke, StrokeKind, Ui, Vec2};
 use ttg_core::{
     view as geom, Flow, FlowEnd, Group, Id, Logical, Note, NoteAnchor, Position, Project, Size, View,
@@ -228,6 +229,7 @@ impl TtgApp {
         dashed: bool,
         step: Option<u32>,
         color: Option<String>,
+        data: Option<String>,
     ) -> Option<Id> {
         self.active_view?;
         if from == to {
@@ -243,6 +245,7 @@ impl TtgApp {
             dashed,
             step,
             color,
+            data: data.filter(|d| !d.trim().is_empty()),
         });
         self.finish(before);
         self.selected_annotation = Some(Annotation::Flow(id.clone()));
@@ -388,7 +391,7 @@ impl TtgApp {
     /// Complete a pending "data flow from …" with a clicked target.
     pub fn finish_flow_to(&mut self, to: FlowEnd) {
         if let Some(from) = self.flow_from.take() {
-            if self.add_flow(from, to, "", false, None, None).is_some() {
+            if self.add_flow(from, to, "", false, None, None, None).is_some() {
                 self.status = "Data flow added; give it a label in the inspector".into();
             } else {
                 self.status = "A flow needs two different ends".into();
@@ -631,38 +634,209 @@ fn place_label(pts: &[Pos2], base: usize, size: Vec2, placed: &[Rect]) -> Rect {
         .unwrap_or_else(|| Rect::from_center_size(pts[base.min(pts.len() - 1)], size))
 }
 
+/// The label box for one flow when it cannot sit on its own curve: the round-2 slide
+/// along the curve first; where six or more flows meet one node that still leaves
+/// labels on top of each other, so the label then steps off the curve, perpendicular to
+/// it, one, two or three label-heights either side (nearest first), and is drawn with a
+/// short leader line back to the point it belongs to — the second value.
+fn place_label_spread(pts: &[Pos2], base: usize, size: Vec2, placed: &[Rect]) -> (Rect, Option<Pos2>) {
+    let clear = |r: &Rect| !placed.iter().any(|p| p.intersects(*r));
+    let slots: Vec<usize> = label_slots(base).into_iter().filter(|i| *i < pts.len()).collect();
+    if let Some(r) = slots
+        .iter()
+        .map(|i| Rect::from_center_size(pts[*i], size))
+        .find(|r| clear(r))
+    {
+        return (r, None);
+    }
+    for k in 1..=3 {
+        for sign in [1.0_f32, -1.0] {
+            for &i in &slots {
+                let n = curve_normal(pts, i);
+                let c = pts[i] + n * sign * k as f32 * (size.y + 6.0);
+                let r = Rect::from_center_size(c, size);
+                if clear(&r) {
+                    return (r, Some(pts[i]));
+                }
+            }
+        }
+    }
+    (place_label(pts, base, size, placed), None)
+}
+
+/// The point `d` along a polyline from its start (its end when it is shorter).
+fn point_along(pts: &[Pos2], d: f32) -> Pos2 {
+    let mut left = d;
+    for w in pts.windows(2) {
+        let len = (w[1] - w[0]).length();
+        if len >= left && len > 0.0 {
+            return w[0] + (w[1] - w[0]) * (left / len);
+        }
+        left -= len;
+    }
+    pts.last().copied().unwrap_or_default()
+}
+
+/// Unit normal of a sampled curve at point `i`.
+fn curve_normal(pts: &[Pos2], i: usize) -> Vec2 {
+    let a = pts[i.saturating_sub(1)];
+    let b = pts[(i + 1).min(pts.len() - 1)];
+    let d = b - a;
+    if d.length_sq() < 1e-6 {
+        return Vec2::Y;
+    }
+    let d = d.normalized();
+    Vec2::new(-d.y, d.x)
+}
+
+/// `n + 1` points evenly spaced along a polyline, so an orthogonal route offers its
+/// label the same 25 slots a curve does.
+fn resample(pts: &[Pos2], n: usize) -> Vec<Pos2> {
+    let total: f32 = pts.windows(2).map(|w| (w[1] - w[0]).length()).sum();
+    if pts.len() < 2 || total <= 0.0 {
+        return vec![pts.first().copied().unwrap_or_default(); n + 1];
+    }
+    let mut out = Vec::with_capacity(n + 1);
+    let (mut seg, mut walked) = (0usize, 0.0_f32);
+    for k in 0..=n {
+        let want = total * k as f32 / n as f32;
+        while seg + 1 < pts.len() - 1 && walked + (pts[seg + 1] - pts[seg]).length() < want {
+            walked += (pts[seg + 1] - pts[seg]).length();
+            seg += 1;
+        }
+        let len = (pts[seg + 1] - pts[seg]).length().max(1e-6);
+        let t = ((want - walked) / len).clamp(0.0, 1.0);
+        out.push(pts[seg] + (pts[seg + 1] - pts[seg]) * t);
+    }
+    out
+}
+
+/// Where each flow attaches: the facing sides of its two ends, and its place among the
+/// flows sharing that side of that end, ordered by where their other ends are so they
+/// fan out without crossing at the node. Keyed by (flow index, is-the-source-end).
+type Attach = std::collections::HashMap<(usize, bool), (usize, usize)>;
+/// Per (end, side): (position of the other end along the side, flow index, is-source).
+type SideSlots = std::collections::HashMap<(String, Side), Vec<(f32, usize, bool)>>;
+
+fn attachments(ends: &[Option<(Rect, Rect, Side, Side)>], ids: &[(String, String)]) -> Attach {
+    let mut per = SideSlots::default();
+    for (fi, e) in ends.iter().enumerate() {
+        let Some((ar, br, sa, sb)) = e else { continue };
+        let along = |side: Side, other: Rect| {
+            if side.horizontal() {
+                other.center().y
+            } else {
+                other.center().x
+            }
+        };
+        per.entry((ids[fi].0.clone(), *sa))
+            .or_default()
+            .push((along(*sa, *br), fi, true));
+        per.entry((ids[fi].1.clone(), *sb))
+            .or_default()
+            .push((along(*sb, *ar), fi, false));
+    }
+    let mut out = Attach::new();
+    for list in per.values_mut() {
+        list.sort_by(|a, b| a.0.total_cmp(&b.0).then(a.1.cmp(&b.1)));
+        let n = list.len();
+        for (i, (_, fi, src)) in list.iter().enumerate() {
+            out.insert((*fi, *src), (i, n));
+        }
+    }
+    out
+}
+
 /// Draw the active view's data-flow arrows (above nodes) and handle selection.
+///
+/// Flows sharing a side of a node fan out along it. With View ▸ Edge style ▸
+/// Orthogonal and "Route around nodes" on, flows are routed like the structural links
+/// (`canvas::routed_path`); otherwise they are curves. Labels avoid the nodes and each
+/// other: they slide along their own arrow, then step off it with a leader line
+/// ([`place_label_spread`]). While presenting, the current step is drawn heavier and
+/// everything else faded.
 pub fn draw_flows(app: &mut TtgApp, ui: &mut Ui, origin: Pos2) {
+    use crate::canvas::{choose_sides, routed_path, side_point};
     let Some(view) = app.active_view() else { return };
     let flows: Vec<Flow> = view.flows.clone();
     let crowd = crowding(&flows);
     let zoom = app.camera.zoom;
     let painter = ui.painter_at(app.canvas_rect);
     let ink = Color32::from_rgb(45, 55, 75);
-    // Label boxes already drawn this frame; the next one slides along its curve until
-    // it clears them, so arrows meeting at one node stay readable.
-    let mut placed: Vec<Rect> = Vec::new();
+    let routed = app.edge_style == crate::app::EdgeStyle::Orthogonal && app.avoid_obstacles;
+
+    // Pass 1: both ends of every flow on screen, and the sides they face.
+    let ends: Vec<Option<(Rect, Rect, Side, Side)>> = flows
+        .iter()
+        .map(|f| {
+            let ar = app.camera.rect_to_screen(origin, app.end_rect(&f.from)?);
+            let br = app.camera.rect_to_screen(origin, app.end_rect(&f.to)?);
+            let (sa, sb) = choose_sides(ar, br);
+            Some((ar, br, sa, sb))
+        })
+        .collect();
+    let ids: Vec<(String, String)> = flows
+        .iter()
+        .map(|f| (f.from.id().to_string(), f.to.id().to_string()))
+        .collect();
+    let attach = attachments(&ends, &ids);
+
+    // What routes and labels keep clear of: every node and logical node on screen.
+    let mut nodes: Vec<(String, Rect)> = app
+        .project
+        .nodes
+        .keys()
+        .filter(|id| app.is_visible(id))
+        .filter_map(|id| {
+            app.entity_rect(id)
+                .map(|r| (id.clone(), app.camera.rect_to_screen(origin, r)))
+        })
+        .collect();
+    nodes.extend(view.logicals.iter().map(|l| {
+        (
+            l.id.clone(),
+            app.camera.rect_to_screen(origin, to_rect(geom::logical_rect(l))),
+        )
+    }));
+    // Label boxes already drawn this frame (and the nodes): the next one looks for a
+    // spot clear of all of them, so arrows meeting at one node stay readable.
+    let mut placed: Vec<Rect> = nodes.iter().map(|(_, r)| *r).collect();
     for (fi, f) in flows.iter().enumerate() {
-        let (Some(ar), Some(br)) = (app.end_rect(&f.from), app.end_rect(&f.to)) else {
+        let Some((ar, br, sa, sb)) = ends[fi] else {
             continue;
         };
-        let ar = app.camera.rect_to_screen(origin, ar);
-        let br = app.camera.rect_to_screen(origin, br);
-        // Attach on the facing sides, centred.
-        let (a, b, na, nb) = facing_points(ar, br);
+        let at = |src: bool| attach.get(&(fi, src)).copied().unwrap_or((0, 1));
+        let (ia, na_count) = at(true);
+        let (ib, nb_count) = at(false);
+        let a = side_point(ar, sa, ia, na_count, zoom);
+        let b = side_point(br, sb, ib, nb_count, zoom);
+        let presented = app.presents_flow(f);
         let selected = app.selected_annotation == Some(Annotation::Flow(f.id.clone()));
         let own = f.color.as_deref().and_then(parse_color);
-        let color = if selected {
+        let mut color = if selected {
             Color32::from_rgb(30, 100, 220)
         } else {
             own.unwrap_or(ink)
         };
-        let w = (3.0 * zoom).clamp(2.0, 4.5);
-        let dist = (b - a).length();
-        let k = (dist * 0.4).max(50.0 * zoom.max(0.5));
-        let c1 = a + na * k;
-        let c2 = b + nb * k;
-        let pts = bezier_points(a, c1, c2, b, 24);
+        let mut w = (3.0 * zoom).clamp(2.0, 4.5);
+        match presented {
+            Some(true) => w *= 1.6,
+            Some(false) => color = color.gamma_multiply(0.18),
+            None => {}
+        }
+        let pts: Vec<Pos2> = if routed {
+            let obs: Vec<Rect> = nodes
+                .iter()
+                .filter(|(id, _)| id != f.from.id() && id != f.to.id())
+                .map(|(_, r)| *r)
+                .collect();
+            routed_path(a, sa, b, sb, &obs, zoom)
+        } else {
+            let dist = (b - a).length();
+            let k = (dist * 0.4).max(50.0 * zoom.max(0.5));
+            bezier_points(a, a + sa.normal() * k, b + sb.normal() * k, b, 24)
+        };
+        let samples = if routed { resample(&pts, 24) } else { pts.clone() };
         let stroke = Stroke::new(w, color);
         if f.dashed {
             for seg in pts.windows(2) {
@@ -671,7 +845,8 @@ pub fn draw_flows(app: &mut TtgApp, ui: &mut Ui, origin: Pos2) {
         } else {
             painter.add(egui::Shape::line(pts.clone(), stroke));
         }
-        let dir = (b - c2).normalized();
+        let n_pts = pts.len();
+        let dir = (pts[n_pts - 1] - pts[n_pts - 2]).normalized();
         let n = Vec2::new(-dir.y, dir.x);
         let l = (14.0 * zoom).clamp(9.0, 18.0);
         painter.add(egui::Shape::convex_polygon(
@@ -679,10 +854,13 @@ pub fn draw_flows(app: &mut TtgApp, ui: &mut Ui, origin: Pos2) {
             color,
             Stroke::NONE,
         ));
-        // Step badge, just outside the source.
+        // Step badge, just outside the source, on the arrow as it leaves; flows leaving
+        // one side side by side stagger their badges so the numbers stay readable.
         if let Some(step) = f.step {
-            let c = pts[2] + na * 4.0 * zoom;
+            let c = point_along(&pts, (16.0 + 24.0 * (ia % 3) as f32) * zoom.max(0.7));
             let r = (10.0 * zoom).clamp(7.0, 13.0);
+            // Labels keep clear of the badges too.
+            placed.push(Rect::from_center_size(c, Vec2::splat(2.0 * r)));
             painter.circle_filled(c, r, color);
             painter.circle_stroke(c, r, Stroke::new(1.5_f32, Color32::WHITE));
             painter.text(
@@ -698,14 +876,34 @@ pub fn draw_flows(app: &mut TtgApp, ui: &mut Ui, origin: Pos2) {
         } else {
             f.label.clone()
         };
-        let font = FontId::proportional((12.0 * zoom).max(7.0));
-        let galley = painter.layout_no_wrap(label, font, Color32::WHITE);
-        let box_size = galley.size() + Vec2::new(12.0, 6.0);
-        let lr = place_label(&pts, label_index(crowd[fi]), box_size, &placed);
+        let text = if presented == Some(false) {
+            Color32::from_white_alpha(120)
+        } else {
+            Color32::WHITE
+        };
+        let galley = painter.layout_no_wrap(label, FontId::proportional((12.0 * zoom).max(7.0)), text);
+        // What travels along it, on a second, smaller line.
+        let data = f
+            .data
+            .as_ref()
+            .map(|d| painter.layout_no_wrap(d.clone(), FontId::proportional((10.5 * zoom).max(6.0)), text));
+        let dsize = data.as_ref().map(|g| g.size()).unwrap_or(Vec2::ZERO);
+        let box_size =
+            Vec2::new(galley.size().x.max(dsize.x), galley.size().y + dsize.y) + Vec2::new(12.0, 6.0);
+        let (lr, leader) = place_label_spread(&samples, label_index(crowd[fi]), box_size, &placed);
         placed.push(lr);
+        if let Some(p) = leader {
+            let edge = Pos2::new(p.x.clamp(lr.left(), lr.right()), p.y.clamp(lr.top(), lr.bottom()));
+            painter.line_segment([p, edge], Stroke::new(1.0_f32, color));
+            painter.circle_filled(p, 2.5, color);
+        }
         let resp = ui.interact(lr, ui.id().with(("flow", &f.id)), Sense::click());
         painter.rect_filled(lr, CornerRadius::same(6), color);
-        painter.galley(lr.min + Vec2::new(6.0, 3.0), galley, Color32::WHITE);
+        let gh = galley.size().y;
+        painter.galley(lr.min + Vec2::new(6.0, 3.0), galley, text);
+        if let Some(d) = data {
+            painter.galley(lr.min + Vec2::new(6.0, 3.0 + gh), d, text);
+        }
         if resp.clicked() {
             app.select_annotation(Annotation::Flow(f.id.clone()));
         }
@@ -787,6 +985,7 @@ pub fn draw_logicals(app: &mut TtgApp, ui: &mut Ui, origin: Pos2) {
             FontId::proportional((11.0 * zoom).max(5.0)),
             Color32::from_gray(140),
         );
+        present_wash(&painter, app.presents_end(&l.id), sr, cr);
 
         let resp = ui.interact(sr, ui.id().with(("logical", &l.id)), Sense::click_and_drag());
         if resp.clicked() {
@@ -893,6 +1092,21 @@ pub fn draw_notes(app: &mut TtgApp, ui: &mut Ui, origin: Pos2) {
             );
             painter.galley(Pos2::new(sr.min.x + pad, y), g, Color32::from_gray(90));
         }
+        // While presenting, a note stays bright only when it is about this step.
+        if app.presented_step().is_some() {
+            let about = n.anchor.as_ref().is_some_and(|a| match a {
+                NoteAnchor::Flow { flow } => {
+                    app.active_view()
+                        .and_then(|v| v.flow(flow))
+                        .and_then(|f| app.presents_flow(f))
+                        == Some(true)
+                }
+                NoteAnchor::End(e) => app.presents_end(e.id()) == Some(true),
+            });
+            if !about {
+                present_wash(&painter, Some(false), sr, CornerRadius::same(6));
+            }
+        }
 
         let resp = ui.interact(sr, ui.id().with(("note", &n.id)), Sense::click_and_drag());
         if resp.clicked() {
@@ -934,6 +1148,25 @@ pub fn draw_notes(app: &mut TtgApp, ui: &mut Ui, origin: Pos2) {
     }
 }
 
+/// While presenting: fade what the current step does not touch (`Some(false)`) and
+/// ring what it does (`Some(true)`).
+fn present_wash(painter: &egui::Painter, presented: Option<bool>, sr: Rect, cr: CornerRadius) {
+    match presented {
+        Some(false) => {
+            painter.rect_filled(sr, cr, Color32::from_rgba_unmultiplied(246, 247, 249, 200));
+        }
+        Some(true) => {
+            painter.rect_stroke(
+                sr.expand(4.0),
+                CornerRadius::same(8),
+                Stroke::new(3.0_f32, Color32::from_rgb(30, 100, 220)),
+                StrokeKind::Outside,
+            );
+        }
+        None => {}
+    }
+}
+
 /// Accumulate a drag into whole world units, returning the step to apply.
 fn drag_step(drag: &mut Drag, delta: Vec2, zoom: f32) -> Option<(i32, i32)> {
     let Drag::Move { accum, .. } = drag else {
@@ -963,6 +1196,32 @@ fn dashed_outline(painter: &egui::Painter, r: Rect, color: Color32) {
     }
 }
 
+/// Width of the legend panel and its distance from the canvas corner.
+pub const LEGEND_W: f32 = 210.0;
+pub const LEGEND_MARGIN: f32 = 16.0;
+/// Height kept free at the bottom of a fit while presenting, for the step caption.
+const CAPTION_RESERVE: f32 = 150.0;
+
+impl TtgApp {
+    /// The part of the canvas "zoom to fit" may fill. The legend floats over the
+    /// top-right corner, so with the legend on, the strip it covers is taken off the
+    /// right-hand side and the fitted drawing ends to its left: nothing is ever under
+    /// it, in the app or in a fitted screenshot. (The alternative — drawing the legend
+    /// inside the fitted bounds — would move it with the drawing and change what a
+    /// view's bounds mean to `view_fit`.) While presenting, the caption's strip at the
+    /// bottom is kept free the same way.
+    pub fn fit_area(&self, canvas: Rect) -> Rect {
+        let mut r = canvas;
+        if self.active_view().is_some_and(|v| v.legend) {
+            r.max.x = (r.max.x - LEGEND_W - LEGEND_MARGIN).max(r.min.x + 200.0);
+        }
+        if self.presented_step().is_some() {
+            r.max.y = (r.max.y - CAPTION_RESERVE).max(r.min.y + 200.0);
+        }
+        r
+    }
+}
+
 /// The legend: what the colours and line styles on this view mean.
 pub fn legend(app: &mut TtgApp, ui: &mut Ui) {
     use egui::RichText;
@@ -987,10 +1246,12 @@ pub fn legend(app: &mut TtgApp, ui: &mut Ui) {
         })
         .collect();
     let logicals = !v.logicals.is_empty();
-    let pos = app.canvas_rect.right_top() + Vec2::new(-16.0, 16.0);
+    let pos = app.canvas_rect.right_top() + Vec2::new(-LEGEND_MARGIN, LEGEND_MARGIN);
     let mut close = false;
     egui::Area::new(ui.id().with("view-legend"))
-        .fixed_pos(pos - Vec2::new(210.0, 0.0))
+        .fixed_pos(pos - Vec2::new(LEGEND_W, 0.0))
+        // No fade-in: a screenshot taken a few frames after switching views shows it whole.
+        .fade_in(false)
         .order(egui::Order::Foreground)
         .show(ui.ctx(), |ui| {
             egui::Frame::popup(ui.style()).show(ui, |ui| {
@@ -1075,42 +1336,6 @@ fn line_key(ui: &mut Ui, dashed: bool, label: &str) {
         }
         ui.label(egui::RichText::new(label).small().color(Color32::from_gray(80)));
     });
-}
-
-/// Points on the facing sides of two rects plus their outward normals.
-fn facing_points(ar: Rect, br: Rect) -> (Pos2, Pos2, Vec2, Vec2) {
-    let d = br.center() - ar.center();
-    if d.x.abs() >= d.y.abs() {
-        if d.x >= 0.0 {
-            (
-                Pos2::new(ar.right(), ar.center().y),
-                Pos2::new(br.left(), br.center().y),
-                Vec2::X,
-                -Vec2::X,
-            )
-        } else {
-            (
-                Pos2::new(ar.left(), ar.center().y),
-                Pos2::new(br.right(), br.center().y),
-                -Vec2::X,
-                Vec2::X,
-            )
-        }
-    } else if d.y >= 0.0 {
-        (
-            Pos2::new(ar.center().x, ar.bottom()),
-            Pos2::new(br.center().x, br.top()),
-            Vec2::Y,
-            -Vec2::Y,
-        )
-    } else {
-        (
-            Pos2::new(ar.center().x, ar.top()),
-            Pos2::new(br.center().x, br.bottom()),
-            -Vec2::Y,
-            Vec2::Y,
-        )
-    }
 }
 
 /// Inspector for the selected group or flow.
@@ -1235,6 +1460,22 @@ pub fn annotation_inspector(app: &mut TtgApp, ui: &mut Ui, a: &Annotation) {
                 if r.changed() {
                     if let Some(fm) = app.active_view_mut().and_then(|v| v.flow_mut(id)) {
                         fm.label = label.clone();
+                    }
+                    app.dirty = true;
+                }
+                track_edit(app, &r);
+            });
+            let mut data = f.data.clone().unwrap_or_default();
+            ui.horizontal(|ui| {
+                ui.label("Data");
+                let r = ui.add(
+                    egui::TextEdit::singleline(&mut data)
+                        .desired_width(f32::INFINITY)
+                        .hint_text("what travels along it, e.g. call audio"),
+                );
+                if r.changed() {
+                    if let Some(fm) = app.active_view_mut().and_then(|v| v.flow_mut(id)) {
+                        fm.data = Some(data.clone()).filter(|d| !d.trim().is_empty());
                     }
                     app.dirty = true;
                 }
@@ -1554,5 +1795,42 @@ mod tests {
         assert!(pts.iter().any(|p| (p.x - r.center().x).abs() < 0.01), "{r:?}");
         // With nothing in the way it keeps the spot it asked for.
         assert_eq!(place_label(&pts, 12, size, &[]).center(), pts[12]);
+    }
+
+    #[test]
+    fn a_label_with_no_room_on_its_curve_steps_off_it_with_a_leader() {
+        let pts = curve();
+        let size = Vec2::new(70.0, 20.0);
+        // Six flows meeting here: every slot along this arrow is already taken.
+        let placed: Vec<Rect> = (0..=24).map(|i| Rect::from_center_size(pts[i], size)).collect();
+        let (r, leader) = place_label_spread(&pts, 12, size, &placed);
+        assert!(placed.iter().all(|p| !p.intersects(r)), "still overlaps: {r:?}");
+        // Straight above or below the curve (its normal), one label-height away, and
+        // tied back to the point on the curve it belongs to.
+        let at = leader.expect("a leader line back to the curve");
+        assert!(pts.contains(&at));
+        assert!((r.center().x - at.x).abs() < 0.01, "{r:?} {at:?}");
+        assert!(
+            (r.center().y - at.y).abs() <= 3.0 * (size.y + 6.0),
+            "{r:?} {at:?}"
+        );
+        // Room on the curve: no leader.
+        assert!(place_label_spread(&pts, 12, size, &[]).1.is_none());
+    }
+
+    #[test]
+    fn a_polyline_is_resampled_evenly_and_walked_by_distance() {
+        let l = vec![
+            Pos2::new(0.0, 0.0),
+            Pos2::new(100.0, 0.0),
+            Pos2::new(100.0, 100.0),
+        ];
+        let s = resample(&l, 4);
+        assert_eq!(s.len(), 5);
+        assert_eq!(s[0], l[0]);
+        assert_eq!(s[2], Pos2::new(100.0, 0.0));
+        assert_eq!(s[4], l[2]);
+        assert_eq!(point_along(&l, 150.0), Pos2::new(100.0, 50.0));
+        assert_eq!(point_along(&l, 999.0), l[2]);
     }
 }

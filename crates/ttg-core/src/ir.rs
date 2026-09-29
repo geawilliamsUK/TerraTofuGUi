@@ -158,6 +158,60 @@ pub type ExtraArgs = serde_json::Map<String, serde_json::Value>;
 /// provider id -> block key -> extra arguments.
 pub type Extras = BTreeMap<ProviderId, BTreeMap<String, ExtraArgs>>;
 
+/// How sensitive the data a resource holds (or handles) is. Documentation today —
+/// views filter on it and "Where personal data goes" is built from it — and the key
+/// posture rules will read later. Absent means "not classified", not "public".
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[serde(rename_all = "lowercase")]
+pub enum Classification {
+    Public,
+    Internal,
+    Confidential,
+    /// Personal data (GDPR's sense): anything that identifies a person or is about one.
+    Personal,
+    /// Payment card or bank data (PCI scope).
+    Payment,
+}
+
+impl Classification {
+    pub const ALL: [Classification; 5] = [
+        Classification::Public,
+        Classification::Internal,
+        Classification::Confidential,
+        Classification::Personal,
+        Classification::Payment,
+    ];
+    /// The identifier used in project files and by the agent tools.
+    pub fn key(self) -> &'static str {
+        match self {
+            Classification::Public => "public",
+            Classification::Internal => "internal",
+            Classification::Confidential => "confidential",
+            Classification::Personal => "personal",
+            Classification::Payment => "payment",
+        }
+    }
+    pub fn display_name(self) -> &'static str {
+        match self {
+            Classification::Public => "Public",
+            Classification::Internal => "Internal",
+            Classification::Confidential => "Confidential",
+            Classification::Personal => "Personal data",
+            Classification::Payment => "Payment data",
+        }
+    }
+    pub fn from_key(s: &str) -> Option<Classification> {
+        Classification::ALL
+            .into_iter()
+            .find(|c| c.key().eq_ignore_ascii_case(s.trim()))
+    }
+    /// Personal or payment data: what "Where personal data goes" starts from.
+    pub fn is_personal(self) -> bool {
+        matches!(self, Classification::Personal | Classification::Payment)
+    }
+}
+
 /// A leaf resource on the canvas.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
@@ -186,6 +240,16 @@ pub struct Node {
     /// Extra provider arguments beyond what the mapping sets (schema-validated).
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub extra: Extras,
+    /// How sensitive the data it holds is; absent = not classified.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub classification: Option<Classification>,
+    /// Why this resource exists. An HCL comment above its blocks, and a `Description`
+    /// tag where the provider's tags can hold one (see `ttg_codegen::emit`).
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub description: String,
+    /// Who looks after it: a team or a person. Emitted as an `Owner` tag / `owner` label.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub owner: String,
 }
 
 /// A resource that can hold other resources (VPC, Resource Group, Project).
@@ -213,6 +277,15 @@ pub struct Container {
     /// Extra provider arguments beyond what the mapping sets (schema-validated).
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub extra: Extras,
+    /// How sensitive the data it holds is; absent = not classified.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub classification: Option<Classification>,
+    /// Why this resource exists (see `Node::description`).
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub description: String,
+    /// Who looks after it (see `Node::owner`).
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub owner: String,
 }
 
 /// Kinds of relationship an edge can express. Direction is always
@@ -394,6 +467,9 @@ pub struct ViewFilter {
     /// and a filter that silently dropped the key would draw the wrong picture.
     #[serde(default, alias = "hide_links", skip_serializing_if = "is_false")]
     pub hide_edges: bool,
+    /// Only entities classified as one of these (empty = all, classified or not).
+    #[serde(default, skip_serializing_if = "BTreeSet::is_empty")]
+    pub classifications: BTreeSet<Classification>,
 }
 
 fn default_depth() -> u32 {
@@ -424,6 +500,7 @@ impl Default for ViewFilter {
             types: BTreeSet::new(),
             name_glob: String::new(),
             hide_edges: false,
+            classifications: BTreeSet::new(),
         }
     }
 }
@@ -442,6 +519,7 @@ impl ViewFilter {
             && self.types.is_empty()
             && self.name_glob.is_empty()
             && !self.hide_edges
+            && self.classifications.is_empty()
     }
 }
 
@@ -613,6 +691,11 @@ pub struct Flow {
     /// `#rrggbb`; the default ink colour when absent.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub color: Option<String>,
+    /// What travels along it, in words ("call audio", "card token"): drawn under the
+    /// label and listed in the exports. Free text; the label says what happens, this
+    /// says what it happens to.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub data: Option<String>,
 }
 
 /// A named, saved view shown as a tab above the canvas: a filter (what is shown), an
@@ -729,6 +812,9 @@ pub struct EntityRef<'a> {
     pub is_container: bool,
     pub position: Position,
     pub extra: &'a Extras,
+    pub classification: Option<Classification>,
+    pub description: &'a str,
+    pub owner: &'a str,
 }
 
 impl<'a> EntityRef<'a> {
@@ -782,6 +868,9 @@ impl Project {
                 is_container: false,
                 position: n.position,
                 extra: &n.extra,
+                classification: n.classification,
+                description: &n.description,
+                owner: &n.owner,
             });
         }
         self.containers.get(id).map(|c| EntityRef {
@@ -795,6 +884,9 @@ impl Project {
             is_container: true,
             position: c.position,
             extra: &c.extra,
+            classification: c.classification,
+            description: &c.description,
+            owner: &c.owner,
         })
     }
 
@@ -1183,6 +1275,7 @@ mod tests {
         v.filter.types = ["subnet".to_string()].into_iter().collect();
         v.filter.name_glob = "job*".into();
         v.filter.hide_edges = true;
+        v.filter.classifications = [Classification::Personal].into_iter().collect();
         v.groups.push(Group {
             id: "g1".into(),
             label: "box".into(),
@@ -1206,6 +1299,7 @@ mod tests {
             dashed: true,
             step: Some(2),
             color: Some("#c95555".into()),
+            data: Some("session cookie".into()),
         });
         v.notes.push(Note {
             id: "n1".into(),
@@ -1231,6 +1325,32 @@ mod tests {
         assert!(old.filter.is_empty());
     }
 
+    /// Classification, description and owner survive the project file, stay out of it
+    /// when unset, and an entity written before they existed still loads.
+    #[test]
+    fn entity_metadata_round_trips() {
+        let old: Node = serde_json::from_str(
+            r#"{"id":"n","name":"n","resource_type":"object_storage","position":{"x":0,"y":0}}"#,
+        )
+        .unwrap();
+        assert!(old.classification.is_none() && old.description.is_empty() && old.owner.is_empty());
+        let text = serde_json::to_string(&old).unwrap();
+        assert!(
+            !text.contains("classification") && !text.contains("owner"),
+            "{text}"
+        );
+        let mut n = old.clone();
+        n.classification = Some(Classification::Personal);
+        n.description = "Call recordings, kept 90 days".into();
+        n.owner = "Platform team".into();
+        let text = serde_json::to_string(&n).unwrap();
+        assert!(text.contains(r#""classification":"personal""#), "{text}");
+        let back: Node = serde_json::from_str(&text).unwrap();
+        assert_eq!(back, n);
+        assert_eq!(Classification::from_key("PAYMENT"), Some(Classification::Payment));
+        assert!(Classification::Payment.is_personal() && !Classification::Internal.is_personal());
+    }
+
     #[test]
     fn containment_cycle_rejected() {
         let mut p = Project::new("t");
@@ -1249,6 +1369,9 @@ mod tests {
                     manual: false,
                     providers: Vec::new(),
                     extra: Default::default(),
+                    classification: None,
+                    description: String::new(),
+                    owner: String::new(),
                 },
             );
         }

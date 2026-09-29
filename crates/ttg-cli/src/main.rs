@@ -5,7 +5,7 @@
 //! ttg export     <project.ttg.json> --provider aws --tool opentofu --out ./out/aws [--validate] [--k8s]
 //! ttg export-all <project.ttg.json> --tool opentofu --out ./out [--zip] [--validate] [--k8s]
 //! ttg catalog    [--definitions ./definitions]
-//! ttg view       export <project.ttg.json> <view> [--format md|mermaid] [--out doc.md]
+//! ttg view       export <project.ttg.json> <view> [--format md|mermaid|sequence] [--out doc.md]
 //! ttg cost       <project.ttg.json> [--provider aws] [--region eu-west-2] [--by type] [--json]
 //! ```
 
@@ -164,6 +164,8 @@ enum ViewFormat {
     Md,
     /// A Mermaid `flowchart LR`: groups as subgraphs, logical nodes dashed.
     Mermaid,
+    /// A Mermaid `sequenceDiagram` of the numbered flows, steps in order.
+    Sequence,
 }
 
 #[derive(Subcommand)]
@@ -458,6 +460,7 @@ fn main() -> Result<()> {
                 let text = match format {
                     ViewFormat::Md => ttg_codegen::views::markdown(&p, &cat, v),
                     ViewFormat::Mermaid => ttg_codegen::views::mermaid(&p, &cat, v),
+                    ViewFormat::Sequence => ttg_codegen::views::sequence(&p, v),
                 };
                 match out {
                     Some(o) => {

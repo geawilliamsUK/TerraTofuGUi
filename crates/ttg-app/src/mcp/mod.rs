@@ -137,6 +137,8 @@ pub struct EntityChanges {
     pub extra: Option<serde_json::Map<String, serde_json::Value>>,
     pub extra_provider: Option<String>,
     pub extra_block: Option<String>,
+    /// Classification, description and owner.
+    pub meta: EntityMeta,
 }
 
 impl EntityChanges {
@@ -146,6 +148,22 @@ impl EntityChanges {
             && self.manual.is_none()
             && self.providers.is_none()
             && self.extra.is_none()
+            && self.meta.is_empty()
+    }
+}
+
+/// What an entity is for, as `entity_update` sets it: each `Some` replaces the value,
+/// and an empty string (or `"none"` for the classification) clears it.
+#[derive(Debug, Clone, Default)]
+pub struct EntityMeta {
+    pub classification: Option<String>,
+    pub description: Option<String>,
+    pub owner: Option<String>,
+}
+
+impl EntityMeta {
+    pub fn is_empty(&self) -> bool {
+        self.classification.is_none() && self.description.is_none() && self.owner.is_none()
     }
 }
 
@@ -202,6 +220,8 @@ pub enum AgentCommand {
         extra: Option<serde_json::Map<String, serde_json::Value>>,
         extra_provider: Option<String>,
         extra_block: Option<String>,
+        /// Classification, description and owner.
+        meta: EntityMeta,
     },
     SchemaSearch {
         provider: Option<String>,
@@ -306,6 +326,8 @@ pub enum AgentCommand {
         color: Option<String>,
         /// Add a hidden end to the view's filter instead of only warning about it.
         show_hidden: bool,
+        /// What travels along it ("call audio").
+        data: Option<String>,
     },
     NoteAdd {
         view: Option<String>,
@@ -334,6 +356,24 @@ pub enum AgentCommand {
     },
     LayoutTidy {
         container: Option<String>,
+        /// Tidy this view (in its own layout) and put its anchored notes back beside
+        /// their anchors afterwards.
+        view: Option<String>,
+        /// `links` (the default: columns by dependency) or `flows` (the view's data
+        /// flows, left to right in step order; needs a view).
+        by: Option<String>,
+    },
+    // View tools: flows generated from links, notes put back beside their anchors.
+    /// Derive flows from the links (`data_flow`) or build "Where personal data goes"
+    /// (`personal_data`).
+    ViewGenerate {
+        view: Option<String>,
+        kind: String,
+        replace: bool,
+    },
+    /// Put every anchored note of a view back beside what it explains.
+    ViewArrangeNotes {
+        view: Option<String>,
     },
     LayoutAlign {
         how: String,

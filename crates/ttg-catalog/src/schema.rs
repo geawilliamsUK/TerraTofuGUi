@@ -953,6 +953,12 @@ pub struct DefaultTagsDef {
     /// which Google Cloud labels require.
     #[serde(default)]
     pub sanitize_labels: bool,
+    /// The argument a resource carries its own tags in (`tags`, GCP `labels`). An
+    /// entity's `owner` — and its `description`, where tag values can hold prose (not
+    /// on label providers) — are merged into it on every emitted resource whose schema
+    /// has it. Absent = the provider gets no per-entity tags.
+    #[serde(default)]
+    pub entity_arg: Option<String>,
 }
 
 #[derive(Debug, Clone, Deserialize)]

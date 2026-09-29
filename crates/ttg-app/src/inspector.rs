@@ -311,6 +311,8 @@ fn entity_inspector(app: &mut TtgApp, ui: &mut Ui, id: &Id) {
             provider_checkboxes(app, ui, id, None);
             ui.end_row();
 
+            entity_meta_rows(app, ui, id);
+
             if !is_container {
                 ui.label("Size");
                 ui.horizontal(|ui| {
@@ -546,6 +548,78 @@ fn entity_inspector(app: &mut TtgApp, ui: &mut Ui, id: &Id) {
             }
         }
     });
+}
+
+/// The entity's classification, owner and description: what it is for, emitted as
+/// tags / labels and an HCL comment, and listed in the view exports.
+fn entity_meta_rows(app: &mut TtgApp, ui: &mut Ui, id: &str) {
+    use ttg_core::Classification;
+    type Meta<'a> = (&'a mut Option<Classification>, &'a mut String, &'a mut String);
+    fn meta<'a>(app: &'a mut TtgApp, id: &str) -> Option<Meta<'a>> {
+        if let Some(n) = app.project.nodes.get_mut(id) {
+            return Some((&mut n.classification, &mut n.owner, &mut n.description));
+        }
+        let c = app.project.containers.get_mut(id)?;
+        Some((&mut c.classification, &mut c.owner, &mut c.description))
+    }
+    let Some(e) = app.project.entity(id) else { return };
+    let (cur, mut owner, mut desc) = (e.classification, e.owner.to_string(), e.description.to_string());
+
+    ui.label("Classification")
+        .on_hover_text("How sensitive the data it holds is. Views can filter on it, and View ▸ Build \"Where personal data goes\" starts from personal and payment data.");
+    egui::ComboBox::from_id_salt(("classification", id))
+        .selected_text(cur.map(|c| c.display_name()).unwrap_or("not classified"))
+        .width(ui.available_width())
+        .show_ui(ui, |ui| {
+            let mut pick: Option<Option<Classification>> = None;
+            if ui.selectable_label(cur.is_none(), "not classified").clicked() {
+                pick = Some(None);
+            }
+            for c in Classification::ALL {
+                if ui.selectable_label(cur == Some(c), c.display_name()).clicked() {
+                    pick = Some(Some(c));
+                }
+            }
+            if let Some(c) = pick.filter(|c| *c != cur) {
+                let before = app.snapshot();
+                if let Some((class, _, _)) = meta(app, id) {
+                    *class = c;
+                }
+                app.finish(before);
+            }
+        });
+    ui.end_row();
+
+    ui.label("Owner");
+    let r = ui.add(
+        egui::TextEdit::singleline(&mut owner)
+            .desired_width(f32::INFINITY)
+            .hint_text("team or person"),
+    );
+    track_text_edit(app, &r);
+    if r.changed() {
+        if let Some((_, o, _)) = meta(app, id) {
+            *o = owner;
+        }
+    }
+    r.on_hover_text("An Owner tag on AWS and Azure, an owner label on Google Cloud.");
+    ui.end_row();
+
+    ui.label("Description");
+    let r = ui.add(
+        egui::TextEdit::multiline(&mut desc)
+            .desired_width(f32::INFINITY)
+            .desired_rows(2)
+            .hint_text("why this resource exists"),
+    );
+    track_text_edit(app, &r);
+    if r.changed() {
+        if let Some((_, _, d)) = meta(app, id) {
+            *d = desc;
+        }
+    }
+    r.on_hover_text("A comment above its blocks in the generated HCL, and a Description tag on AWS and Azure (cut to 256 characters).");
+    ui.end_row();
 }
 
 fn set_name(app: &mut TtgApp, id: &str, name: String) {

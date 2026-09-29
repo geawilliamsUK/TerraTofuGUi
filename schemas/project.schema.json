@@ -284,6 +284,25 @@
               "additionalProperties": true
             }
           }
+        },
+        "classification": {
+          "description": "How sensitive the data it holds is; absent = not classified.",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Classification"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "description": {
+          "description": "Why this resource exists (see `Node::description`).",
+          "type": "string"
+        },
+        "owner": {
+          "description": "Who looks after it (see `Node::owner`).",
+          "type": "string"
         }
       },
       "required": [
@@ -359,6 +378,29 @@
       "required": [
         "w",
         "h"
+      ]
+    },
+    "Classification": {
+      "description": "How sensitive the data a resource holds (or handles) is. Documentation today —\nviews filter on it and \"Where personal data goes\" is built from it — and the key\nposture rules will read later. Absent means \"not classified\", not \"public\".",
+      "oneOf": [
+        {
+          "type": "string",
+          "enum": [
+            "public",
+            "internal",
+            "confidential"
+          ]
+        },
+        {
+          "description": "Personal data (GDPR's sense): anything that identifies a person or is about one.",
+          "type": "string",
+          "const": "personal"
+        },
+        {
+          "description": "Payment card or bank data (PCI scope).",
+          "type": "string",
+          "const": "payment"
+        }
       ]
     },
     "Node": {
@@ -438,6 +480,25 @@
               "additionalProperties": true
             }
           }
+        },
+        "classification": {
+          "description": "How sensitive the data it holds is; absent = not classified.",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Classification"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "description": {
+          "description": "Why this resource exists. An HCL comment above its blocks, and a `Description`\ntag where the provider's tags can hold one (see `ttg_codegen::emit`).",
+          "type": "string"
+        },
+        "owner": {
+          "description": "Who looks after it: a team or a person. Emitted as an `Owner` tag / `owner` label.",
+          "type": "string"
         }
       },
       "required": [
@@ -710,6 +771,14 @@
         "hide_edges": {
           "description": "Hide the structural links, so a view shows only its data-flow arrows.\n`hide_links` is accepted as a spelling of the same flag: agents reach for it,\nand a filter that silently dropped the key would draw the wrong picture.",
           "type": "boolean"
+        },
+        "classifications": {
+          "description": "Only entities classified as one of these (empty = all, classified or not).",
+          "type": "array",
+          "uniqueItems": true,
+          "items": {
+            "$ref": "#/$defs/Classification"
+          }
         }
       }
     },
@@ -821,6 +890,13 @@
         },
         "color": {
           "description": "`#rrggbb`; the default ink colour when absent.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "data": {
+          "description": "What travels along it, in words (\"call audio\", \"card token\"): drawn under the\nlabel and listed in the exports. Free text; the label says what happens, this\nsays what it happens to.",
           "type": [
             "string",
             "null"

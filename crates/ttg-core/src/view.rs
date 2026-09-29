@@ -193,6 +193,111 @@ pub fn note_rect(p: &Project, v: &View, n: &Note, visible: &dyn Fn(&str) -> bool
     }
 }
 
+/// Gap left between an anchored note and the thing it explains.
+pub const NOTE_GAP: f32 = 24.0;
+/// Height of a grouping box's label strip: a note may overlap a box, not its label.
+pub const GROUP_LABEL_H: f32 = 26.0;
+
+/// What a note placed beside `anchor` stores as its `position`: the offset from the
+/// anchor's top-right corner (see [`note_rect`]) of the first spot that is clear of
+/// `taken`. Tried in order: right, below, left, above, then the same four sides slid
+/// along by one and two note-lengths, so a crowded anchor still gets a spot of its
+/// own nearby rather than a long leader line. With nothing clear it goes to the right.
+pub fn note_offset_beside(anchor: Rect, size: Size, taken: &[Rect]) -> Position {
+    let a = anchor;
+    let (w, h) = (size.w as f32, size.h as f32);
+    let offset = |(x, y): (f32, f32)| Position {
+        x: (x - (a.x + a.w)).round() as i32,
+        y: (y - a.y).round() as i32,
+    };
+    let right = (a.x + a.w + NOTE_GAP, a.y);
+    let mut spots = vec![
+        right,
+        (a.x, a.y + a.h + NOTE_GAP),
+        (a.x - w - NOTE_GAP, a.y),
+        (a.x, a.y - h - NOTE_GAP),
+    ];
+    for k in 1..=2 {
+        let (dx, dy) = ((w + NOTE_GAP) * k as f32, (h + NOTE_GAP) * k as f32);
+        spots.extend([
+            (right.0, a.y + dy),
+            (right.0, a.y - dy),
+            (a.x + dx, a.y + a.h + NOTE_GAP),
+            (a.x - w - NOTE_GAP, a.y + dy),
+            (a.x - dx, a.y - h - NOTE_GAP),
+        ]);
+    }
+    spots
+        .into_iter()
+        .find(|&(x, y)| {
+            let r = Rect { x, y, w, h };
+            !taken.iter().any(|o| o.intersects(r))
+        })
+        .map(offset)
+        .unwrap_or_else(|| offset(right))
+}
+
+/// What a note must stay clear of in `v`: the resources the view shows, its logical
+/// nodes, the header strips of containers and grouping boxes (a note may sit inside a
+/// network or a box — it is not a member unless it is free-floating — but must not hide
+/// what the box is called) and every note except `skip`.
+pub fn note_obstacles(
+    p: &Project,
+    v: &View,
+    visible: &dyn Fn(&str) -> bool,
+    skip: Option<&str>,
+) -> Vec<Rect> {
+    let mut out: Vec<Rect> = p
+        .entities()
+        .iter()
+        .filter(|e| visible(e.id))
+        .filter_map(|e| {
+            let r = entity_rect(p, Some(v), e.id, visible)?;
+            Some(if e.is_container {
+                Rect {
+                    h: CONTAINER_HEADER.min(r.h),
+                    ..r
+                }
+            } else {
+                r
+            })
+        })
+        .collect();
+    out.extend(v.groups.iter().map(|g| Rect {
+        h: GROUP_LABEL_H,
+        ..group_rect(g)
+    }));
+    out.extend(v.logicals.iter().map(logical_rect));
+    out.extend(
+        v.notes
+            .iter()
+            .filter(|n| Some(n.id.as_str()) != skip)
+            .map(|n| note_rect(p, v, n, visible)),
+    );
+    out
+}
+
+/// Put every anchored note back beside what it explains, one after another so each
+/// sees the ones already placed. Free notes stay where they are. Returns how many
+/// notes moved. Used after a layout change, when notes would otherwise hang at their
+/// old offsets on long leader lines.
+pub fn arrange_notes(p: &Project, v: &mut View, visible: &dyn Fn(&str) -> bool) -> usize {
+    let mut moved = 0;
+    for i in 0..v.notes.len() {
+        let n = &v.notes[i];
+        let Some(a) = n.anchor.as_ref().and_then(|a| anchor_rect(p, v, a, visible)) else {
+            continue;
+        };
+        let taken = note_obstacles(p, v, visible, Some(&n.id));
+        let off = note_offset_beside(a, n.size, &taken);
+        if v.notes[i].position != off {
+            v.notes[i].position = off;
+            moved += 1;
+        }
+    }
+    moved
+}
+
 /// Entities whose centre lies inside the group's box (and that the view shows).
 pub fn group_members(p: &Project, v: &View, gid: &str, visible: &dyn Fn(&str) -> bool) -> Vec<Id> {
     let Some(r) = v.group(gid).map(group_rect) else {
@@ -315,6 +420,9 @@ mod tests {
                 manual: false,
                 providers: Vec::new(),
                 extra: Default::default(),
+                classification: None,
+                description: String::new(),
+                owner: String::new(),
             },
         );
         for (id, x) in [("a", 100), ("b", 400)] {
@@ -332,6 +440,9 @@ mod tests {
                     manual: false,
                     providers: Vec::new(),
                     extra: Default::default(),
+                    classification: None,
+                    description: String::new(),
+                    owner: String::new(),
                 },
             );
         }
@@ -466,5 +577,51 @@ mod tests {
         let after = note_rect(&p, &v, &n, &all);
         assert_eq!(after.x - before.x, 400.0);
         assert_eq!(after.y - before.y, 200.0);
+    }
+
+    #[test]
+    fn arranging_notes_brings_them_back_beside_their_anchors() {
+        let p = project_with_two_nodes();
+        let mut v = View::new("map", Default::default());
+        for (id, anchor) in [("n1", "a"), ("n2", "a")] {
+            v.notes.push(Note {
+                id: id.into(),
+                title: id.into(),
+                body: String::new(),
+                // A long way off, as after the anchor moved and the note kept its offset.
+                position: Position { x: 1500, y: 900 },
+                size: Size { w: 200, h: 80 },
+                anchor: Some(NoteAnchor::End(FlowEnd::Entity {
+                    entity: anchor.into(),
+                })),
+            });
+        }
+        v.notes.push(Note {
+            id: "free".into(),
+            title: "free".into(),
+            body: String::new(),
+            position: Position { x: 3000, y: 3000 },
+            size: Size { w: 200, h: 80 },
+            anchor: None,
+        });
+        assert_eq!(arrange_notes(&p, &mut v, &all), 2);
+        let a = entity_rect(&p, Some(&v), "a", &all).unwrap();
+        let near = |r: Rect| {
+            let (cx, cy) = r.center();
+            let (ax, ay) = a.center();
+            ((cx - ax).powi(2) + (cy - ay).powi(2)).sqrt() < 500.0
+        };
+        let r1 = note_rect(&p, &v, &v.notes[0], &all);
+        let r2 = note_rect(&p, &v, &v.notes[1], &all);
+        assert!(near(r1) && near(r2), "{r1:?} {r2:?} vs {a:?}");
+        // Neither covers its anchor, the other node, or the other note.
+        let b = entity_rect(&p, Some(&v), "b", &all).unwrap();
+        for r in [r1, r2] {
+            assert!(!r.intersects(a) && !r.intersects(b), "{r:?}");
+        }
+        assert!(!r1.intersects(r2), "{r1:?} {r2:?}");
+        // The free note is not touched, and a second run changes nothing.
+        assert_eq!(v.notes[2].position, Position { x: 3000, y: 3000 });
+        assert_eq!(arrange_notes(&p, &mut v, &all), 0);
     }
 }

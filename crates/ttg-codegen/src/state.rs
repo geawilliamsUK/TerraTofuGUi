@@ -652,6 +652,9 @@ fn node(cat: &Catalog, id: &str, name: &str, resource_type: &str) -> Node {
         manual: false,
         providers: Vec::new(),
         extra: Default::default(),
+        classification: None,
+        description: String::new(),
+        owner: String::new(),
     }
 }
 
@@ -703,6 +706,9 @@ fn add_store(mini: &mut Project, main: &Project, cfg: &BackendConfig, cat: &Cata
                 )]
                 .into_iter()
                 .collect(),
+                classification: None,
+                description: String::new(),
+                owner: String::new(),
             };
             mini.containers.insert(rg.id.clone(), rg);
             n.parent = Some(STORE_RG_ID.into());

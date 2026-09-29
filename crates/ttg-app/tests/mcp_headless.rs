@@ -2217,3 +2217,202 @@ fn headless_cost_estimate() {
     let (_, ch) = c.call("project_changes", json!({}));
     assert_eq!(ch["revision"].as_u64().unwrap(), rev0);
 }
+
+/// Views and metadata: flows generated from the links, tidy by flows with
+/// the notes put back beside their anchors, the sequence export, and an entity's
+/// classification, description and owner — round trip, filter, and the personal-data
+/// view built from them.
+#[test]
+fn headless_views_and_metadata() {
+    let server = start("job-pipeline.ttg.json");
+    let mut c = Client::new(&server);
+    c.initialize();
+
+    let tools = c.request("tools/list", json!({}));
+    let names: Vec<&str> = tools["tools"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|t| t["name"].as_str().unwrap())
+        .collect();
+    for want in ["view_generate", "view_arrange_notes"] {
+        assert!(names.contains(&want), "missing tool {want}: {names:?}");
+    }
+    let flows_in = |c: &mut Client| -> usize {
+        let (_, v) = c.call("view_get", json!({"name": "Data flow"}));
+        v["flows"].as_array().unwrap().len()
+    };
+
+    // --- Flows from the links, one undo step, never duplicating a pair.
+    let before = flows_in(&mut c);
+    let (err, gen) = c.call("view_generate", json!({"view": "Data flow", "kind": "data_flow"}));
+    assert!(!err, "{gen}");
+    let added = gen["added"].as_array().unwrap();
+    assert!(!added.is_empty(), "{gen}");
+    // The secrets are read by the runner: the data moves secret -> runner.
+    assert!(
+        added.iter().any(|f| f["from"] == json!("DBUser")
+            && f["to"] == json!("JobRunner")
+            && f["label"] == json!("read by")),
+        "{gen}"
+    );
+    // The gateway -> queue flow was drawn by hand; it is not drawn again.
+    assert!(!added.iter().any(|f| f["to"] == json!("jobs queue")), "{gen}");
+    assert_eq!(flows_in(&mut c), before + added.len());
+    let (err, again) = c.call("view_generate", json!({"view": "Data flow", "kind": "data_flow"}));
+    assert!(!err, "{again}");
+    assert_eq!(again["added"], json!([]), "{again}");
+    // A generation that changed nothing left no undo step behind: one undo takes the
+    // first one back.
+    let (err, _) = c.call("undo", json!({}));
+    assert!(!err);
+    assert_eq!(flows_in(&mut c), before, "one undo per generation");
+    let (err, msg) = c.call("view_generate", json!({"view": "Data flow", "kind": "nonsense"}));
+    assert!(err, "{msg}");
+
+    // --- A note far from its anchor comes back beside it.
+    let (err, moved) = c.call(
+        "entity_move",
+        json!({"view": "Data flow", "entity": "Why a queue in the middle", "x": 4000, "y": 3000}),
+    );
+    assert!(!err, "{moved}");
+    let note_at = |c: &mut Client| -> (f64, f64) {
+        let (_, v) = c.call("view_get", json!({"name": "Data flow"}));
+        let p = &v["notes"][0]["offset"];
+        (p["x"].as_f64().unwrap(), p["y"].as_f64().unwrap())
+    };
+    let far = note_at(&mut c);
+    assert!(far.0 > 1000.0, "{far:?}");
+    let (err, arranged) = c.call("view_arrange_notes", json!({"view": "Data flow"}));
+    assert!(!err, "{arranged}");
+    assert_eq!(arranged["moved"], json!(1), "{arranged}");
+    // The stored position is the offset from the anchor: now a short one.
+    let near = note_at(&mut c);
+    assert!(near.0.abs() < 600.0 && near.1.abs() < 600.0, "{near:?}");
+
+    // --- Tidy by flows, in the view's own layout only, notes following.
+    let proj = |c: &mut Client| -> Value {
+        let r = c.request("resources/read", json!({"uri": "ttg://project"}));
+        serde_json::from_str(r["contents"][0]["text"].as_str().unwrap()).unwrap()
+    };
+    let shared_before = proj(&mut c)["nodes"]["fn-runner"]["position"].clone();
+    let (err, msg) = c.call("layout_tidy", json!({"by": "flows"}));
+    assert!(err, "flows need a view: {msg}");
+    let (err, tidied) = c.call("layout_tidy", json!({"view": "Data flow", "by": "flows"}));
+    assert!(!err, "{tidied}");
+    assert!(tidied["moved"].as_u64().unwrap() > 0, "{tidied}");
+    let p = proj(&mut c);
+    assert_eq!(
+        p["nodes"]["fn-runner"]["position"], shared_before,
+        "the shared layout never moves"
+    );
+    let pos = &p["views"][0]["layout"]["positions"];
+    let x = |id: &str| pos[id]["x"].as_i64().unwrap_or_else(|| panic!("{id}: {pos}"));
+    // Left to right in step order: gateway (2) -> queue (3) -> runner (4) -> db.
+    assert!(
+        x("fn-gateway") < x("q-jobs") && x("q-jobs") < x("fn-runner") && x("fn-runner") < x("db-jobs"),
+        "{pos}"
+    );
+    let (err, _) = c.call("layout_tidy", json!({"view": "Data flow"}));
+    assert!(!err);
+
+    // --- The numbered flows as a sequence diagram.
+    let (err, seq) = c.call("view_export", json!({"view": "Data flow", "format": "sequence"}));
+    assert!(!err, "{seq}");
+    let text = seq["text"].as_str().unwrap();
+    assert!(text.starts_with("sequenceDiagram"), "{text}");
+    assert!(text.contains("2. job requests"), "{text}");
+
+    // --- Classification, description and owner round trip.
+    let (err, upd) = c.call(
+        "entity_update",
+        json!({"entity": "jobs db", "classification": "personal", "description": "Job state and results, per customer", "owner": "Data team"}),
+    );
+    assert!(!err, "{upd}");
+    assert_eq!(upd["entity"]["classification"], json!("personal"), "{upd}");
+    assert_eq!(upd["entity"]["owner"], json!("Data team"), "{upd}");
+    let (err, msg) = c.call(
+        "entity_update",
+        json!({"entity": "jobs db", "classification": "secret-ish"}),
+    );
+    assert!(err, "{msg}");
+    let p = proj(&mut c);
+    assert_eq!(p["nodes"]["db-jobs"]["classification"], json!("personal"));
+    assert_eq!(
+        p["nodes"]["db-jobs"]["description"],
+        json!("Job state and results, per customer")
+    );
+    let (_, summary) = c.call("project_summary", json!({}));
+    assert_eq!(summary["classified"]["personal"], json!(1), "{summary}");
+    let db = summary["entities"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|e| e["id"] == json!("db-jobs"))
+        .unwrap();
+    assert_eq!(db["owner"], json!("Data team"), "{db}");
+    // One undo takes the whole update back.
+    let (err, _) = c.call("undo", json!({}));
+    assert!(!err);
+    assert!(proj(&mut c)["nodes"]["db-jobs"].get("classification").is_none());
+    let (err, _) = c.call("redo", json!({}));
+    assert!(!err);
+    // The Markdown export gains the columns.
+    let (_, md) = c.call("view_export", json!({"view": "Data flow"}));
+    assert!(
+        md["text"]
+            .as_str()
+            .unwrap()
+            .contains("| Classification | Description | Owner |"),
+        "{md}"
+    );
+
+    // The bulk form sets them on every match, as one undo step.
+    let (err, bulk) = c.call(
+        "entity_update",
+        json!({"select": {"types": ["object_storage"]}, "owner": "Storage team", "classification": "internal"}),
+    );
+    assert!(!err, "{bulk}");
+    assert_eq!(bulk["changed"], json!(2), "{bulk}");
+    let p = proj(&mut c);
+    for id in ["obj-gateway", "obj-runner"] {
+        assert_eq!(p["nodes"][id]["owner"], json!("Storage team"), "{id}");
+        assert_eq!(p["nodes"][id]["classification"], json!("internal"), "{id}");
+    }
+    let (err, _) = c.call("undo", json!({}));
+    assert!(!err);
+    assert!(proj(&mut c)["nodes"]["obj-gateway"].get("owner").is_none());
+
+    // The classification filter shows only what is classified that way.
+    let (err, set) = c.call(
+        "view_set",
+        json!({"filter": {"classifications": ["personal"], "containers": false}}),
+    );
+    assert!(!err, "{set}");
+    let (_, fit) = c.call("view_fit", json!({}));
+    assert_eq!(fit["shown"], json!(1), "{fit}");
+    let (err, _) = c.call("view_set", json!({"filter": {}}));
+    assert!(!err);
+
+    // "Where personal data goes": the database and the runner that uses it.
+    let (err, pd) = c.call("view_generate", json!({"kind": "personal_data"}));
+    assert!(!err, "{pd}");
+    assert_eq!(pd["status"], json!("view created"), "{pd}");
+    assert_eq!(pd["sources"], json!(["jobs db"]), "{pd}");
+    assert!(
+        pd["reached"].as_array().unwrap().contains(&json!("JobRunner")),
+        "{pd}"
+    );
+    let (_, v) = c.call("view_get", json!({"name": "Where personal data goes"}));
+    let shown: Vec<&str> = v["shown"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|e| e["name"].as_str().unwrap())
+        .collect();
+    assert!(shown.contains(&"jobs db") && shown.contains(&"JobRunner"), "{v}");
+    assert!(!v["flows"].as_array().unwrap().is_empty(), "{v}");
+    let (err, again) = c.call("view_generate", json!({"kind": "personal_data"}));
+    assert!(!err, "{again}");
+    assert_eq!(again["status"], json!("view refreshed"), "{again}");
+}

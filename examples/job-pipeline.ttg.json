@@ -31,7 +31,9 @@
         "h": 1100
       },
       "parent": null,
-      "manual": false
+      "manual": false,
+      "description": "Everything the job pipeline needs, in one place so it can be torn down together.",
+      "owner": "Platform team"
     },
     "vnet-22222222": {
       "id": "vnet-22222222",
@@ -54,7 +56,9 @@
         "h": 740
       },
       "parent": "rg-11111111",
-      "manual": false
+      "manual": false,
+      "description": "Private network for the runner and the database; only the NAT gateway reaches out.",
+      "owner": "Platform team"
     },
     "kv-33333333": {
       "id": "kv-33333333",

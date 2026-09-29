@@ -154,6 +154,7 @@ pub fn show(app: &mut TtgApp, ui: &mut Ui) {
                 app.edge_style == EdgeStyle::Orthogonal,
                 egui::Checkbox::new(&mut app.avoid_obstacles, "Route around nodes"),
             );
+            crate::view_tools::view_menu(app, ui);
         });
         #[cfg(feature = "mcp")]
         ui.menu_button("Agent", |ui| {

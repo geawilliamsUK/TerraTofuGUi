@@ -41,3 +41,5 @@ prefix = "random_"
 # argument of every emitted resource whose schema has one.
 [default_tags]
 resource_arg = "tags"
+# An entity's Owner and Description tags go into the same argument.
+entity_arg = "tags"

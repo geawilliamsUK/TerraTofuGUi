@@ -3866,3 +3866,65 @@ fn relational_database_instance_class_override_affects_performance_insights_chec
         "{d:?}"
     );
 }
+
+/// An entity's owner and description reach the HCL: tags on AWS and Azure (the
+/// resource's value winning over the project-wide one), an `owner` label on Google
+/// Cloud with no description label, and the full description as a comment everywhere.
+#[test]
+fn owner_and_description_become_tags_labels_and_comments() {
+    let cat = Catalog::builtin();
+    let norm = |s: &str| s.split_whitespace().collect::<Vec<_>>().join(" ");
+    let mut p = example("job-pipeline.ttg.json");
+    p.settings.tags = [
+        ("Owner".to_string(), "platform".to_string()),
+        ("Project".to_string(), "Jobs".to_string()),
+    ]
+    .into_iter()
+    .collect();
+    let obj = p.nodes.get_mut("obj-gateway").unwrap();
+    obj.owner = "ASR Team".into();
+    obj.description = "Uploads from the gateway;\nread by the runner (one per job) & kept 30 days".into();
+    obj.classification = Some(ttg_core::Classification::Personal);
+    // A description too long for a tag value is cut, not rejected.
+    p.nodes.get_mut("obj-runner").unwrap().description = "x".repeat(400);
+
+    for provider in ["aws", "azure", "gcp"] {
+        let g = generate(&p, &cat, provider, Tool::OpenTofu).unwrap();
+        let st = &g.files["storage.tf"];
+        // The comment above the entity's first block, every provider alike.
+        assert!(
+            st.contains(
+                "# Uploads from the gateway;\n# read by the runner (one per job) & kept 30 days\n# Owner: ASR Team\n# Classification: personal\n"
+            ),
+            "{provider}: {st}"
+        );
+        let n = norm(st);
+        if provider == "gcp" {
+            assert!(n.contains("owner = \"asr-team\""), "{provider}: {n}");
+            assert!(!n.contains("Description ="), "{provider}: {n}");
+        } else {
+            assert!(n.contains("Owner = \"ASR Team\""), "{provider}: {n}");
+            assert!(
+                n.contains(
+                    "Description = \"Uploads from the gateway read by the runner one per job kept 30 days\""
+                ),
+                "{provider}: {n}"
+            );
+            // The project's Owner never overrides the entity's own (it still reaches the
+            // resources that have none).
+            let start = n.find("\"gateway_storage\" {").unwrap();
+            let block = &n[start..];
+            let block = &block[..block.find(" resource \"").unwrap_or(block.len())];
+            assert!(block.contains("Owner = \"ASR Team\""), "{provider}: {block}");
+            assert!(!block.contains("Owner = \"platform\""), "{provider}: {block}");
+            let cut = format!("Description = \"{}...\"", "x".repeat(253));
+            assert!(
+                n.contains(&cut),
+                "{provider}: a long description is cut to 256 characters"
+            );
+        }
+    }
+    // AWS keeps the project's tags on the provider, where the resource's value wins.
+    let g = generate(&p, &cat, "aws", Tool::OpenTofu).unwrap();
+    assert!(norm(&g.files["providers.tf"]).contains("Owner = \"platform\""));
+}

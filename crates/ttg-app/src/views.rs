@@ -6,7 +6,7 @@ use crate::app::TtgApp;
 use egui::{Color32, RichText, Ui};
 use std::collections::BTreeSet;
 use ttg_codegen::views::visible_set;
-use ttg_core::{Id, Origin, Relation, View, ViewFilter};
+use ttg_core::{Classification, Id, Origin, Relation, View, ViewFilter};
 
 impl TtgApp {
     /// Recompute the visible set for this frame and drop hidden entities from the
@@ -257,6 +257,21 @@ pub fn bar(app: &mut TtgApp, ui: &mut Ui) {
                 }
                 app.finish(before);
             }
+            let numbered = app
+                .active_view()
+                .is_some_and(|v| v.flows.iter().any(|f| f.step.is_some()));
+            if numbered
+                && ui
+                    .small_button(if app.presentation.is_some() { "■ Stop" } else { "▶ Present" })
+                    .on_hover_text("Step through the numbered flows: ← → (or Space) to move, Esc to leave")
+                    .clicked()
+            {
+                if app.presentation.is_some() {
+                    app.stop_presentation();
+                } else if let Err(e) = app.start_presentation() {
+                    app.status = e;
+                }
+            }
             let own = app.active_layout().is_some();
             ui.label(
                 RichText::new(if own { "own layout" } else { "shared layout" })
@@ -489,6 +504,24 @@ fn filter_menu(app: &mut TtgApp, ui: &mut Ui) {
                 app.set_filter(f);
             }
             r.on_hover_text("Show only resources whose display name matches this pattern; `*` is any run of characters, `?` one. Case-insensitive.");
+        });
+
+        ui.separator();
+        ui.label(RichText::new("Classification").small().color(Color32::from_gray(110)))
+            .on_hover_text("Show only resources classified as one of the ticked kinds. Nothing ticked: everything, classified or not.");
+        ui.horizontal_wrapped(|ui| {
+            for c in Classification::ALL {
+                let mut on = app.filter.classifications.contains(&c);
+                if ui.checkbox(&mut on, c.display_name()).changed() {
+                    let mut f = app.filter.clone();
+                    if on {
+                        f.classifications.insert(c);
+                    } else {
+                        f.classifications.remove(&c);
+                    }
+                    app.set_filter(f);
+                }
+            }
         });
 
         ui.separator();

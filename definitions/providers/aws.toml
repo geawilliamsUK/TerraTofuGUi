@@ -44,3 +44,6 @@ prefix = "random_"
 [default_tags]
 block = "default_tags"
 arg = "tags"
+# An entity's Owner and Description tags go on each of its resources; a resource's own
+# tags win over the provider's default_tags, so the more specific value is the one kept.
+entity_arg = "tags"

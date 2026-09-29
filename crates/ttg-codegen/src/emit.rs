@@ -500,6 +500,28 @@ pub fn generate(p: &Project, cat: &Catalog, provider: &str, tool: Tool) -> Resul
     } else {
         Vec::new()
     };
+    // An entity's owner and description as tags on each of its resources that takes
+    // them. Merged before the project's tags, and never over a key the block already
+    // has, so the precedence is: the mapping's own tags and `extra` > the entity's
+    // Owner / Description > the project-wide tags (see `entity_tags`).
+    if let Some(t) = pdef.default_tags.as_ref() {
+        if let Some(arg) = t.entity_arg.as_deref() {
+            let idx = ttg_schema::index();
+            for b in emitted.iter_mut().filter(|b| b.kind == "resource") {
+                let tags = p
+                    .entity(&b.entity)
+                    .map(|e| entity_tags(&e, t.sanitize_labels))
+                    .unwrap_or_default();
+                let settable = !tags.is_empty()
+                    && idx
+                        .resource(provider, &b.resource_type)
+                        .is_some_and(|s| s.attributes.get(arg).is_some_and(|a| !a.read_only()));
+                if settable {
+                    b.block = merge_tags(&b.block, arg, &tags);
+                }
+            }
+        }
+    }
 
     // Providers that write their default tags per resource (Azure has no provider-level
     // equivalent of AWS `default_tags`), applied once to everything that was emitted.
@@ -547,8 +569,11 @@ pub fn generate(p: &Project, cat: &Catalog, provider: &str, tool: Tool) -> Resul
         }
         let file = mine[0].file.clone();
         let comment = format!(
-            "{} \"{}\" ({})",
-            def.resource.display_name, e.name, e.resource_type
+            "{} \"{}\" ({}){}",
+            def.resource.display_name,
+            e.name,
+            e.resource_type,
+            entity_comment(&e)
         );
         let blocks: Vec<Block> = mine.iter().map(|b| b.block.clone()).collect();
         entity_blocks.insert(
@@ -829,6 +854,73 @@ fn tag_pairs(tags: &std::collections::BTreeMap<String, String>, pdef: &ProviderD
 /// Google Cloud labels accept lowercase letters, digits, `-` and `_` only.
 fn label_safe(s: &str) -> String {
     ttg_core::slugify(s).replace('_', "-")
+}
+
+/// Longest tag value AWS and Azure accept; a Google Cloud label value is shorter.
+const TAG_VALUE_MAX: usize = 256;
+const LABEL_VALUE_MAX: usize = 63;
+
+/// A tag value AWS and Azure both accept: one line, letters, digits, spaces and
+/// `+ - = . _ : / @` (AWS's set; Azure is laxer), at most 256 characters, cut at a
+/// character boundary with `...` when it had to be shortened.
+fn tag_value(s: &str) -> String {
+    let kept: String = s
+        .chars()
+        .map(|c| {
+            if c.is_alphanumeric() || " +-=._:/@".contains(c) {
+                c
+            } else {
+                ' '
+            }
+        })
+        .collect();
+    let one_line = kept.split_whitespace().collect::<Vec<_>>().join(" ");
+    if one_line.chars().count() <= TAG_VALUE_MAX {
+        return one_line;
+    }
+    let cut: String = one_line.chars().take(TAG_VALUE_MAX - 3).collect();
+    format!("{}...", cut.trim_end())
+}
+
+/// An entity's own tags: `Owner` and `Description` where tags hold prose, or a single
+/// label-safe `owner` label (at most 63 characters) where they are labels — a
+/// description does not survive being lower-cased and cut to 63 characters, so on a
+/// label provider it is only the comment above the entity's blocks.
+fn entity_tags(e: &ttg_core::EntityRef<'_>, labels: bool) -> Vec<(String, String)> {
+    let mut out = Vec::new();
+    if !e.owner.trim().is_empty() {
+        out.push(if labels {
+            let v: String = label_safe(e.owner).chars().take(LABEL_VALUE_MAX).collect();
+            ("owner".to_string(), v.trim_end_matches('-').to_string())
+        } else {
+            ("Owner".to_string(), tag_value(e.owner))
+        });
+    }
+    if !labels && !e.description.trim().is_empty() {
+        out.push(("Description".to_string(), tag_value(e.description)));
+    }
+    out
+}
+
+/// Lines appended to the `# --- …` comment above an entity's blocks: its description
+/// (in full, one comment line per line), owner and classification.
+fn entity_comment(e: &ttg_core::EntityRef<'_>) -> String {
+    let mut s = String::new();
+    for line in e
+        .description
+        .lines()
+        .map(str::trim_end)
+        .filter(|l| !l.trim().is_empty())
+    {
+        s.push_str(&format!("\n# {line}"));
+    }
+    if !e.owner.trim().is_empty() {
+        s.push_str(&format!("\n# Owner: {}", e.owner.trim()));
+    }
+    if let Some(c) = e.classification {
+        s.push_str(&format!("\n# Classification: {}", c.key()));
+    }
+    s
 }
 
 fn tag_entries(tags: &[(String, String)]) -> Object<ObjectKey, Expression> {

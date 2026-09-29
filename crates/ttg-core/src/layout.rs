@@ -382,6 +382,9 @@ mod tests {
             manual: false,
             providers: Vec::new(),
             extra: Default::default(),
+            classification: None,
+            description: String::new(),
+            owner: String::new(),
         }
     }
     fn sz(_: &Project, _: &str) -> Size {
@@ -405,6 +408,9 @@ mod tests {
                 manual: false,
                 providers: Vec::new(),
                 extra: Default::default(),
+                classification: None,
+                description: String::new(),
+                owner: String::new(),
             },
         );
         for (id, par) in [("a", None), ("b", Some("c")), ("d", Some("c"))] {

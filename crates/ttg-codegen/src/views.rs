@@ -88,6 +88,13 @@ pub fn visible_set(p: &Project, cat: &Catalog, filter: &ViewFilter) -> Option<BT
                 .is_some_and(|e| glob_match(&filter.name_glob, e.name))
         });
     }
+    if !filter.classifications.is_empty() {
+        vis.retain(|id| {
+            p.entity(id)
+                .and_then(|e| e.classification)
+                .is_some_and(|c| filter.classifications.contains(&c))
+        });
+    }
     for h in &filter.hidden {
         vis.remove(h);
     }
@@ -187,6 +194,9 @@ pub fn hidden_because(p: &Project, cat: &Catalog, filter: &ViewFilter, id: &str)
 }
 
 /// What it takes to make one entity visible under a filter.
+// A filter is a few hundred bytes since it gained `classifications`; a `Reveal` is a
+// one-off answer, never collected, so boxing it would only add noise at the call sites.
+#[allow(clippy::large_enum_variant)]
 #[derive(Debug, Clone, PartialEq)]
 pub enum Reveal {
     /// Already shown; nothing to change.
@@ -290,6 +300,7 @@ pub fn markdown(p: &Project, cat: &Catalog, v: &View) -> String {
         s.push_str(&v.description);
         s.push_str("\n\n");
     }
+    resources_table(p, cat, &visible, &mut s);
     let groups = group_docs(p, v, &visible);
     if !groups.is_empty() {
         s.push_str("## Groups\n\n| Group | Inside | Members |\n|---|---|---|\n");
@@ -336,8 +347,13 @@ pub fn markdown(p: &Project, cat: &Catalog, v: &View) -> String {
                 f.label.as_str()
             };
             let kind = if f.dashed { " *(optional / async)*" } else { "" };
+            let data = f
+                .data
+                .as_deref()
+                .map(|d| format!(" — carries *{d}*"))
+                .unwrap_or_default();
             s.push_str(&format!(
-                "{n}. **{} → {}** — {label}{kind}\n",
+                "{n}. **{} → {}** — {label}{data}{kind}\n",
                 view::end_name(p, v, &f.from),
                 view::end_name(p, v, &f.to)
             ));
@@ -361,6 +377,176 @@ pub fn markdown(p: &Project, cat: &Catalog, v: &View) -> String {
         }
     }
     s
+}
+
+/// Markdown table cells cannot hold a raw `|` or a line break.
+fn cell(s: &str) -> String {
+    s.split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ")
+        .replace('|', "\\|")
+}
+
+/// The resources a view shows, one row each, with their type and — as columns that
+/// appear only when some row has one — classification, description and owner.
+fn resources_table(p: &Project, cat: &Catalog, visible: &dyn Fn(&str) -> bool, s: &mut String) {
+    let shown: Vec<ttg_core::EntityRef<'_>> = p
+        .entities()
+        .into_iter()
+        .filter(|e| visible(e.id) && !e.is_container)
+        .collect();
+    if shown.is_empty() {
+        return;
+    }
+    let class = shown.iter().any(|e| e.classification.is_some());
+    let desc = shown.iter().any(|e| !e.description.is_empty());
+    let owner = shown.iter().any(|e| !e.owner.is_empty());
+    let mut head = vec!["Resource", "Type"];
+    if class {
+        head.push("Classification");
+    }
+    if desc {
+        head.push("Description");
+    }
+    if owner {
+        head.push("Owner");
+    }
+    s.push_str("## Resources\n\n");
+    s.push_str(&format!(
+        "| {} |\n|{}\n",
+        head.join(" | "),
+        "---|".repeat(head.len())
+    ));
+    let dash = |t: &str| if t.is_empty() { "—".to_string() } else { cell(t) };
+    for e in shown {
+        let ty = cat
+            .resource(e.resource_type)
+            .map(|d| d.resource.display_name.clone())
+            .unwrap_or_else(|| e.resource_type.to_string());
+        let mut row = vec![cell(e.name), cell(&ty)];
+        if class {
+            row.push(dash(e.classification.map(|c| c.display_name()).unwrap_or("")));
+        }
+        if desc {
+            row.push(dash(e.description));
+        }
+        if owner {
+            row.push(dash(e.owner));
+        }
+        s.push_str(&format!("| {} |\n", row.join(" | ")));
+    }
+    s.push('\n');
+}
+
+/// The view's numbered flows as a Mermaid `sequenceDiagram`: participants in the order
+/// they first take part, messages in step order, flows sharing a step number side by
+/// side in a `par` block, dashed flows as `-->>`. Logical nodes and grouping boxes that
+/// a flow starts or ends at are participants like any resource. When no flow is
+/// numbered, every flow is used in the order it was drawn; otherwise the unnumbered ones
+/// are listed in a comment, since a sequence needs an order they do not have.
+pub fn sequence(p: &Project, v: &View) -> String {
+    let numbered: Vec<&ttg_core::Flow> = v
+        .flows_in_step_order()
+        .into_iter()
+        .filter(|f| f.step.is_some())
+        .collect();
+    let flows: Vec<&ttg_core::Flow> = if numbered.is_empty() {
+        v.flows.iter().collect()
+    } else {
+        numbered
+    };
+    let mut s = String::from("sequenceDiagram\n");
+    if !v.description.is_empty() {
+        s.push_str(&format!(
+            "    %% {}\n",
+            v.description.lines().next().unwrap_or("")
+        ));
+    }
+    let mut seen: Vec<String> = Vec::new();
+    for f in &flows {
+        for e in [&f.from, &f.to] {
+            let id = mermaid_id(e.id());
+            if !seen.contains(&id) {
+                s.push_str(&format!(
+                    "    participant {id} as {}\n",
+                    sequence_text(&view::end_name(p, v, e))
+                ));
+                seen.push(id);
+            }
+        }
+    }
+    let message = |f: &ttg_core::Flow| -> String {
+        let arrow = if f.dashed { "-->>" } else { "->>" };
+        let mut text = match (f.step, f.label.as_str()) {
+            (Some(n), "") => format!("{n}."),
+            (Some(n), l) => format!("{n}. {l}"),
+            (None, l) => l.to_string(),
+        };
+        if let Some(d) = &f.data {
+            text.push_str(&format!(" ({d})"));
+        }
+        format!(
+            "{}{arrow}{}: {}",
+            mermaid_id(f.from.id()),
+            mermaid_id(f.to.id()),
+            sequence_text(&text)
+        )
+    };
+    let mut i = 0;
+    while i < flows.len() {
+        let step = flows[i].step;
+        let mut j = i + 1;
+        while step.is_some() && j < flows.len() && flows[j].step == step {
+            j += 1;
+        }
+        if j - i > 1 {
+            s.push_str(&format!("    par step {}\n", step.unwrap_or_default()));
+            for (k, f) in flows[i..j].iter().enumerate() {
+                if k > 0 {
+                    s.push_str("    and\n");
+                }
+                s.push_str(&format!("        {}\n", message(f)));
+            }
+            s.push_str("    end\n");
+        } else {
+            s.push_str(&format!("    {}\n", message(flows[i])));
+        }
+        i = j;
+    }
+    let left_out: Vec<String> = v
+        .flows
+        .iter()
+        .filter(|f| !flows.iter().any(|x| x.id == f.id))
+        .map(|f| {
+            format!(
+                "{} -> {}{}",
+                view::end_name(p, v, &f.from),
+                view::end_name(p, v, &f.to),
+                if f.label.is_empty() {
+                    String::new()
+                } else {
+                    format!(" ({})", f.label)
+                }
+            )
+        })
+        .collect();
+    if !left_out.is_empty() {
+        s.push_str(&format!(
+            "    %% {} unnumbered flow(s) left out: {}\n",
+            left_out.len(),
+            sequence_text(&left_out.join("; "))
+        ));
+    }
+    s
+}
+
+/// Text Mermaid's sequence parser takes as a participant alias or a message: one line,
+/// no `;` (a statement separator) and no `#` (an entity code).
+fn sequence_text(s: &str) -> String {
+    s.split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ")
+        .replace([';', '#'], ",")
 }
 
 fn anchor_name(p: &Project, v: &View, a: &ttg_core::NoteAnchor) -> String {
@@ -410,12 +596,15 @@ pub fn mermaid(p: &Project, cat: &Catalog, v: &View) -> String {
             continue;
         };
         let arrow = if f.dashed { "-.->" } else { "-->" };
-        let label = match (f.step, f.label.as_str()) {
+        let mut label = match (f.step, f.label.as_str()) {
             (Some(n), "") => format!("{n}"),
             (Some(n), l) => format!("{n}. {l}"),
             (None, "") => String::new(),
             (None, l) => l.to_string(),
         };
+        if let Some(d) = &f.data {
+            label = format!("{label} ({d})").trim().to_string();
+        }
         if label.is_empty() {
             s.push_str(&format!("    {a} {arrow} {b}\n"));
         } else {
@@ -557,6 +746,87 @@ mod tests {
         // graph, where Mermaid would read it as an arrow.
         assert!(!mm.contains("fn-gateway") && !mm.contains("grp-ingress"), "{mm}");
         assert!(mm.contains("n_fn_gateway"), "{mm}");
+    }
+
+    #[test]
+    fn the_sequence_follows_the_numbered_steps() {
+        let p = job_pipeline();
+        let mut v = data_flow_view(&p);
+        let seq = sequence(&p, &v);
+        assert!(seq.starts_with("sequenceDiagram\n"), "{seq}");
+        // Participants in the order they first take part: the browser (a logical node)
+        // starts step 1, then the gateway, the queue, the runner and the database.
+        let order: Vec<&str> = seq
+            .lines()
+            .filter_map(|l| l.trim().strip_prefix("participant "))
+            .map(|l| l.split(" as ").nth(1).unwrap())
+            .collect();
+        assert_eq!(order.len(), 5, "{seq}");
+        assert_eq!(
+            &order[1..],
+            ["JobGateway", "jobs queue", "JobRunner", "jobs db"],
+            "{seq}"
+        );
+        assert!(seq.contains("n_fn_gateway->>n_q_jobs: 2. job requests"), "{seq}");
+        // The two unnumbered flows have no place in a sequence; they are named instead.
+        assert!(seq.contains("%% 2 unnumbered flow(s) left out"), "{seq}");
+        // Flows sharing a step run side by side; dashed flows are replies.
+        for f in v.flows.iter_mut() {
+            if f.label == "results" {
+                f.step = Some(3);
+                f.dashed = true;
+                f.data = Some("job result".into());
+            }
+        }
+        let seq = sequence(&p, &v);
+        assert!(seq.contains("    par step 3\n"), "{seq}");
+        assert!(seq.contains("    and\n"), "{seq}");
+        assert!(
+            seq.contains("n_fn_runner-->>n_db_jobs: 3. results (job result)"),
+            "{seq}"
+        );
+        let par = seq.find("par step 3").unwrap();
+        let end = seq[par..].find("    end\n").unwrap();
+        assert!(seq[par..par + end].contains("triggers"), "{seq}");
+    }
+
+    #[test]
+    fn the_markdown_lists_what_resources_are_for() {
+        let mut p = job_pipeline();
+        let cat = Catalog::builtin();
+        let v = data_flow_view(&p);
+        let md = markdown(&p, &cat, &v);
+        assert!(md.contains("## Resources\n\n| Resource | Type |\n"), "{md}");
+        let db = p.nodes.get_mut("db-jobs").unwrap();
+        db.classification = Some(ttg_core::Classification::Personal);
+        db.description = "Job state | results, per customer".into();
+        db.owner = "Data team".into();
+        let md = markdown(&p, &cat, &v);
+        assert!(
+            md.contains("| Resource | Type | Classification | Description | Owner |"),
+            "{md}"
+        );
+        assert!(
+            md.contains("| jobs db | Relational Database | Personal data | Job state \\| results, per customer | Data team |"),
+            "{md}"
+        );
+        // Rows without a value show a dash rather than an empty cell.
+        assert!(md.contains("| JobRunner | Function | — | — | — |"), "{md}");
+    }
+
+    #[test]
+    fn the_classification_filter_shows_only_classified_entities() {
+        let mut p = job_pipeline();
+        let cat = Catalog::builtin();
+        p.nodes.get_mut("db-jobs").unwrap().classification = Some(ttg_core::Classification::Personal);
+        p.nodes.get_mut("q-jobs").unwrap().classification = Some(ttg_core::Classification::Internal);
+        let f = ViewFilter {
+            classifications: [ttg_core::Classification::Personal].into_iter().collect(),
+            containers: false,
+            ..Default::default()
+        };
+        let vis = visible_set(&p, &cat, &f).unwrap();
+        assert_eq!(vis.into_iter().collect::<Vec<_>>(), vec!["db-jobs".to_string()]);
     }
 
     #[test]

@@ -340,7 +340,7 @@ impl TtgApp {
     pub(super) fn bulk_update(&mut self, select: Selector, changes: EntityChanges) -> R {
         if changes.is_empty() {
             return Err(
-                "nothing to update: give config, provider_config, manual, providers or extra (a bulk update cannot rename)"
+                "nothing to update: give config, provider_config, manual, providers, extra, classification, description or owner (a bulk update cannot rename)"
                     .into(),
             );
         }
@@ -358,6 +358,7 @@ impl TtgApp {
                 extra: changes.extra.clone(),
                 extra_provider: changes.extra_provider.clone(),
                 extra_block: changes.extra_block.clone(),
+                meta: changes.meta.clone(),
             })?;
             let after = app.entity_json(id);
             Ok(json!({
@@ -642,6 +643,7 @@ impl TtgApp {
         dashed: bool,
         step: Option<u32>,
         color: Option<String>,
+        data: Option<String>,
         show_hidden: bool,
     ) -> R {
         if from == to {
@@ -662,7 +664,7 @@ impl TtgApp {
             let parked = std::mem::take(&mut self.history);
             self.mcp.quiet = true;
             let (shown, refused) = self.reveal_in_active_view(&hidden);
-            let added = self.add_flow(from, to, label, dashed, step, color);
+            let added = self.add_flow(from, to, label, dashed, step, color, data);
             self.mcp.quiet = false;
             self.history = parked;
             self.finish(before);
@@ -678,7 +680,7 @@ impl TtgApp {
                 })
                 .collect();
             let id = self
-                .add_flow(from, to, label, dashed, step, color)
+                .add_flow(from, to, label, dashed, step, color, data)
                 .ok_or("a flow needs two different ends")?;
             (id, Vec::new(), refused)
         };

@@ -52,7 +52,7 @@ pub fn show(app: &mut TtgApp, ui: &mut Ui) {
     if app.fit_requested {
         app.fit_requested = false;
         if let Some(b) = app.world_bounds() {
-            app.camera.fit(rect, b);
+            app.camera.fit(app.fit_area(rect), b);
         }
     }
 
@@ -163,6 +163,7 @@ pub fn show(app: &mut TtgApp, ui: &mut Ui) {
     crate::annotations::draw_flows(app, ui, origin);
     crate::annotations::draw_notes(app, ui, origin);
     crate::annotations::legend(app, ui);
+    crate::view_tools::presentation_caption(app, ui);
     if app.flow_from.is_some() {
         painter.text(
             rect.center_top() + Vec2::new(0.0, 14.0),
@@ -688,6 +689,35 @@ fn entity_widget(app: &mut TtgApp, ui: &mut Ui, origin: Pos2, id: &str, is_conta
         ));
     }
 
+    // ---- classification: a small pill on what holds sensitive data
+    if let Some(c) = app.project.entity(id).and_then(|e| e.classification) {
+        classification_pill(&painter, sr, c, zoom, is_container);
+    }
+
+    // ---- presentation: fade what the current step does not touch, ring what it does
+    match app.presents_end(id) {
+        Some(false) => {
+            painter.rect_filled(
+                if is_container {
+                    Rect::from_min_size(sr.min, Vec2::new(sr.width(), HEADER_H * zoom))
+                } else {
+                    sr
+                },
+                cr,
+                Color32::from_rgba_unmultiplied(246, 247, 249, 200),
+            );
+        }
+        Some(true) => {
+            painter.rect_stroke(
+                sr.expand(4.0),
+                CornerRadius::same(8),
+                Stroke::new(3.0_f32, Color32::from_rgb(30, 100, 220)),
+                StrokeKind::Outside,
+            );
+        }
+        None => {}
+    }
+
     // ---- agent flash: a fading ring on entities the MCP agent just touched
     #[cfg(feature = "mcp")]
     if let Some(f) = app.agent_flash(id) {
@@ -861,7 +891,7 @@ fn draw_bezier(painter: &egui::Painter, a: Pos2, b: Pos2, stroke: Stroke, arrow:
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Hash)]
-enum Side {
+pub(crate) enum Side {
     Left,
     Right,
     Top,
@@ -869,7 +899,7 @@ enum Side {
 }
 
 impl Side {
-    fn normal(self) -> Vec2 {
+    pub(crate) fn normal(self) -> Vec2 {
         match self {
             Side::Left => Vec2::new(-1.0, 0.0),
             Side::Right => Vec2::new(1.0, 0.0),
@@ -877,7 +907,7 @@ impl Side {
             Side::Bottom => Vec2::new(0.0, 1.0),
         }
     }
-    fn horizontal(self) -> bool {
+    pub(crate) fn horizontal(self) -> bool {
         matches!(self, Side::Left | Side::Right)
     }
 }
@@ -897,7 +927,7 @@ fn anchor_rect(app: &TtgApp, origin: Pos2, id: &str) -> Option<Rect> {
 
 /// Pick the pair of sides that face each other. Horizontal sides win unless the target is
 /// clearly above or below (more vertical than horizontal displacement by a margin).
-fn choose_sides(sr: Rect, tr: Rect) -> (Side, Side) {
+pub(crate) fn choose_sides(sr: Rect, tr: Rect) -> (Side, Side) {
     let d = tr.center() - sr.center();
     if d.y.abs() > d.x.abs() * 1.3 && (tr.min.y > sr.max.y || tr.max.y < sr.min.y) {
         if d.y >= 0.0 {
@@ -913,7 +943,7 @@ fn choose_sides(sr: Rect, tr: Rect) -> (Side, Side) {
 }
 
 /// Point on `side` of `r`, shifted along the side so several edges fan out.
-fn side_point(r: Rect, side: Side, index: usize, count: usize, zoom: f32) -> Pos2 {
+pub(crate) fn side_point(r: Rect, side: Side, index: usize, count: usize, zoom: f32) -> Pos2 {
     let along = if side.horizontal() { r.height() } else { r.width() };
     let spread = (16.0 * zoom).min(along / (count as f32 + 1.0));
     let offset = (index as f32 - (count as f32 - 1.0) / 2.0) * spread;
@@ -956,7 +986,7 @@ fn seg_crosses(p: Pos2, q: Pos2, r: Rect) -> bool {
 /// avoids `obstacles` where a detour exists. Candidate paths are the plain route plus
 /// Z- and U-shapes whose free segment runs just outside each nearby obstacle; the one
 /// with the fewest crossings, then bends, then length wins.
-fn routed_path(a: Pos2, sa: Side, b: Pos2, sb: Side, obstacles: &[Rect], zoom: f32) -> Vec<Pos2> {
+pub(crate) fn routed_path(a: Pos2, sa: Side, b: Pos2, sb: Side, obstacles: &[Rect], zoom: f32) -> Vec<Pos2> {
     let plain = orthogonal_path(a, sa, b, sb);
     if obstacles
         .iter()
@@ -1388,6 +1418,36 @@ fn draw_edges(app: &mut TtgApp, ui: &mut Ui, origin: Pos2) {
             e.relation.display_name()
         ));
     }
+}
+
+/// A small pill at the bottom-right corner of a node (or on a container's header) saying
+/// how sensitive its data is; personal and payment data stand out in red.
+fn classification_pill(
+    painter: &egui::Painter,
+    sr: Rect,
+    c: ttg_core::Classification,
+    zoom: f32,
+    is_container: bool,
+) {
+    use ttg_core::Classification as C;
+    let (text, fill) = match c {
+        C::Public => ("public", Color32::from_rgb(120, 150, 120)),
+        C::Internal => ("internal", Color32::from_rgb(110, 120, 150)),
+        C::Confidential => ("confidential", Color32::from_rgb(200, 130, 40)),
+        C::Personal => ("personal data", Color32::from_rgb(200, 60, 70)),
+        C::Payment => ("payment data", Color32::from_rgb(160, 40, 120)),
+    };
+    let font = FontId::proportional((9.5 * zoom).max(6.0));
+    let galley = painter.layout_no_wrap(text.to_string(), font, Color32::WHITE);
+    let size = galley.size() + Vec2::new(8.0, 3.0);
+    let pos = if is_container {
+        Pos2::new(sr.left() + 8.0 * zoom, sr.top() - size.y / 2.0)
+    } else {
+        Pos2::new(sr.right() - size.x - 4.0, sr.bottom() - size.y / 2.0)
+    };
+    let pill = Rect::from_min_size(pos, size);
+    painter.rect_filled(pill, CornerRadius::same(6), fill);
+    painter.galley(pill.min + Vec2::new(4.0, 1.5), galley, Color32::WHITE);
 }
 
 fn short_label(r: Relation) -> &'static str {

@@ -145,6 +145,8 @@ pub struct TtgApp {
     pub view_edit: Option<ViewEdit>,
     /// Selected group or flow annotation of the active view.
     pub selected_annotation: Option<crate::annotations::Annotation>,
+    /// Stepping through the active view's numbered flows (presentation mode).
+    pub presentation: Option<crate::view_tools::Presentation>,
     /// "Data flow from …" waiting for its target.
     pub flow_from: Option<ttg_core::FlowEnd>,
     /// Buffers and popups of the schema-driven argument editor.
@@ -229,6 +231,7 @@ impl TtgApp {
             view_edit: None,
             selected_annotation: None,
             flow_from: None,
+            presentation: None,
             schema_editor: Default::default(),
             display: crate::display::DisplayMode::Abstract,
             icons: crate::display::Icons::new(defs_dir.as_ref()),
@@ -302,7 +305,10 @@ impl TtgApp {
         }
         // Override for documentation screenshots / testing.
         match std::env::var("TTG_EDGE_STYLE").as_deref() {
-            Ok("orthogonal") => app.edge_style = EdgeStyle::Orthogonal,
+            Ok("orthogonal") => {
+                app.edge_style = EdgeStyle::Orthogonal;
+                app.avoid_obstacles = true;
+            }
             Ok("orthogonal-plain") => {
                 app.edge_style = EdgeStyle::Orthogonal;
                 app.avoid_obstacles = false;
@@ -598,6 +604,9 @@ impl TtgApp {
                         manual: false,
                         providers: Vec::new(),
                         extra: Default::default(),
+                        classification: None,
+                        description: String::new(),
+                        owner: String::new(),
                     },
                 );
             }
@@ -616,6 +625,9 @@ impl TtgApp {
                         manual: false,
                         providers: Vec::new(),
                         extra: Default::default(),
+                        classification: None,
+                        description: String::new(),
+                        owner: String::new(),
                     },
                 );
             }
@@ -1095,8 +1107,10 @@ impl TtgApp {
         })
     }
 
-    /// Re-lay out the whole diagram (or one container's contents) and zoom to fit.
-    pub fn tidy(&mut self, container: Option<&str>) {
+    /// Re-lay out the whole diagram (or one container's contents) and zoom to fit. In a
+    /// view, its anchored notes are put back beside their anchors in the same undo step
+    /// (they would otherwise hang at their old offsets); returns how many moved.
+    pub fn tidy(&mut self, container: Option<&str>) -> usize {
         let before = self.snapshot();
         let opts = ttg_core::layout::TidyOptions::default();
         let container = container.map(|s| s.to_string());
@@ -1104,9 +1118,11 @@ impl TtgApp {
             Some(c) => ttg_core::layout::tidy_container(p, c, &Self::size_of, &opts),
             None => ttg_core::layout::tidy(p, &Self::size_of, &opts),
         });
+        let notes = self.arrange_view_notes_now();
         self.finish(before);
         self.fit_requested = true;
         self.status = "Tidied layout (Ctrl+Z to undo)".into();
+        notes
     }
 
     pub fn align_selection(&mut self, how: ttg_core::layout::Align) {
@@ -1446,7 +1462,7 @@ impl TtgApp {
             if std::env::var("TTG_REACH").is_ok() {
                 self.reach_mode = true;
             }
-            if std::env::var("TTG_TIDY").is_ok() {
+            if std::env::var("TTG_TIDY").is_ok_and(|v| v != "flows") {
                 self.tidy(None);
                 // The layout change marks the project dirty; never block the exit on it.
                 self.allow_close = true;
@@ -1459,6 +1475,24 @@ impl TtgApp {
                     .position(|x| x.name.eq_ignore_ascii_case(&v))
                 {
                     self.activate_view(Some(i));
+                }
+            }
+            // TTG_TIDY=flows lays the view (TTG_VIEW) out by its flows first; TTG_PRESENT=N
+            // shows presentation mode at the N-th step.
+            if std::env::var("TTG_TIDY").is_ok_and(|v| v == "flows") {
+                if let Err(e) = self.tidy_view_by_flows() {
+                    eprintln!("TTG_TIDY=flows: {e}");
+                }
+                self.allow_close = true;
+            }
+            if let Some(n) = std::env::var("TTG_PRESENT")
+                .ok()
+                .and_then(|v| v.parse::<usize>().ok())
+            {
+                if self.start_presentation().is_ok() {
+                    if let Some(p) = &mut self.presentation {
+                        p.index = n.saturating_sub(1).min(p.steps.len().saturating_sub(1));
+                    }
                 }
             }
             // TTG_HIDE_PANELS=1 gives a canvas-only shot, as `screenshot`'s hide_panels does.
@@ -1494,6 +1528,7 @@ impl eframe::App for TtgApp {
         self.screenshot_mode(ctx);
         #[cfg(feature = "mcp")]
         self.drain_agent_commands(ctx);
+        self.presentation_keys(ctx);
         self.handle_shortcuts(ctx);
 
         // Window close button: intercept when there are unsaved changes.
