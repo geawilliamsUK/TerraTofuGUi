@@ -152,6 +152,8 @@ pub struct TtgApp {
     /// Abstract or concrete (provider-specific) labelling of the canvas.
     pub display: crate::display::DisplayMode,
     pub icons: crate::display::Icons,
+    /// The Cost window (`cost_panel.rs`).
+    pub cost: crate::cost_panel::CostUi,
     /// Built-in MCP server (off until enabled).
     #[cfg(feature = "mcp")]
     pub mcp: crate::mcp::McpState,
@@ -230,6 +232,7 @@ impl TtgApp {
             schema_editor: Default::default(),
             display: crate::display::DisplayMode::Abstract,
             icons: crate::display::Icons::new(defs_dir.as_ref()),
+            cost: Default::default(),
             #[cfg(feature = "mcp")]
             mcp: crate::mcp::McpState::default(),
         };
@@ -1374,6 +1377,7 @@ impl TtgApp {
                 .show(ctx, |ui| crate::menu::mcp_window(self, ui));
             self.mcp.show_window = open;
         }
+        crate::cost_panel::window(self, ctx);
         if self.show_about {
             let mut open = true;
             egui::Window::new("About TerraTofu GUI")

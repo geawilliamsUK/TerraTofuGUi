@@ -133,6 +133,10 @@ pub fn show(app: &mut TtgApp, ui: &mut Ui) {
                 ui.close();
             }
             ui.checkbox(&mut app.show_diagnostics, "Diagnostics panel");
+            if ui.button("Cost estimate…").clicked() {
+                app.cost.open = true;
+                ui.close();
+            }
             ui.checkbox(&mut app.reach_mode, "Reachability overlay   R");
             ui.separator();
             ui.label("Show as");

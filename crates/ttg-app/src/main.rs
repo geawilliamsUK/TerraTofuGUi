@@ -15,6 +15,7 @@ mod app;
 mod camera;
 mod canvas;
 mod clipboard;
+mod cost_panel;
 mod display;
 mod history;
 mod inspector;

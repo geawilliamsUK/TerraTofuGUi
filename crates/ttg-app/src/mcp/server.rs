@@ -963,6 +963,30 @@ pub struct EntityPreviewArgs {
     pub provider: Option<String>,
 }
 
+#[derive(Debug, Default, serde::Deserialize, schemars::JsonSchema)]
+pub struct CostArgs {
+    #[schemars(description = "Provider to price (`aws` / `azure` / `gcp`); defaults to the target provider")]
+    pub provider: Option<String>,
+    #[schemars(
+        description = "Named environment to price. Accepted for forward compatibility; a project without named environments is priced as drawn, and the reply says so"
+    )]
+    pub environment: Option<String>,
+    #[schemars(
+        description = "Only the entities this saved view shows (name, case-insensitive); its groups get totals"
+    )]
+    pub view: Option<String>,
+    #[schemars(
+        description = "`entity` (default: one line per priced entity, largest first), `type` (totals per abstract type) or `group` (totals per labelled box of `view`, or of every view)"
+    )]
+    pub group_by: Option<String>,
+    #[schemars(
+        description = "Assumption values for this call only, e.g. { \"pool_node_hours_per_day\": 4 }. Nothing is saved; the reply lists every assumption with its value and source"
+    )]
+    pub assumptions: Option<serde_json::Map<String, serde_json::Value>>,
+    #[schemars(description = "Price for this region instead of the project's, e.g. `us-east-1`")]
+    pub region: Option<String>,
+}
+
 #[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
 pub struct DiffArgs {
     #[schemars(description = "Directory a previous export wrote to")]
@@ -1089,6 +1113,21 @@ impl TtgServer {
         self.run(AgentCommand::EntityPreview {
             entity: a.entity,
             provider: a.provider,
+        })
+        .await
+    }
+
+    #[tool(
+        description = "Estimated monthly cost of the provider's layer, from bundled list prices (USD, dated; on-demand, no free tier or discounts) and editable usage assumptions (GB stored, node-hours a day of a pool that scales to zero, requests...). Per entity: the charges (quantity x unit price), the assumptions used and why anything is free or not estimated; totals per type, per saved view and per view group; the price date and a caveat to repeat to the user. Never writes anything."
+    )]
+    async fn cost_estimate(&self, Parameters(a): Parameters<CostArgs>) -> CallToolResult {
+        self.run(AgentCommand::CostEstimate {
+            provider: a.provider,
+            environment: a.environment,
+            view: a.view,
+            group_by: a.group_by,
+            assumptions: a.assumptions,
+            region: a.region,
         })
         .await
     }

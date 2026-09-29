@@ -424,6 +424,15 @@ pub enum AgentCommand {
         relation: String,
         providers: Option<Vec<String>>,
     },
+    /// The monthly cost estimate (`exec/cost.rs`). Read-only.
+    CostEstimate {
+        provider: Option<String>,
+        environment: Option<String>,
+        view: Option<String>,
+        group_by: Option<String>,
+        assumptions: Option<serde_json::Map<String, serde_json::Value>>,
+        region: Option<String>,
+    },
 }
 
 impl AgentCommand {
@@ -497,6 +506,7 @@ impl AgentCommand {
                 | AgentCommand::DiagnosticsFiltered { .. }
                 | AgentCommand::CatalogRelations { .. }
                 | AgentCommand::EntityPreview { .. }
+                | AgentCommand::CostEstimate { .. }
         )
     }
 }

@@ -2103,3 +2103,117 @@ fn headless_settings_state_and_versions() {
     let (_, p) = c.call("project_get", json!({}));
     assert_eq!(p["settings"]["state_encryption_key"], json!("key-main"));
 }
+
+/// R3.12: `cost_estimate` prices the layer, groups by entity / type / view group, takes
+/// one-call assumptions, refuses what it does not know, and writes nothing.
+#[test]
+fn headless_cost_estimate() {
+    let server = start("job-pipeline.ttg.json");
+    let mut c = Client::new(&server);
+    c.initialize();
+    assert!(tool_names(&mut c).iter().any(|t| t == "cost_estimate"));
+    let (_, ch) = c.call("project_changes", json!({}));
+    let rev0 = ch["revision"].as_u64().unwrap();
+
+    let (err, e) = c.call("cost_estimate", json!({}));
+    assert!(!err, "{e}");
+    assert_eq!(e["provider"], json!("aws"), "{e}");
+    assert_eq!(e["currency"], json!("USD"));
+    assert!(e["prices_retrieved"].as_str().unwrap().starts_with("20"), "{e}");
+    assert!(e["caveat"].as_str().unwrap().contains("Not a quote"), "{e}");
+    let total = e["monthly"].as_f64().unwrap();
+    assert!(total > 10.0, "{e}");
+    let lines = e["lines"].as_array().unwrap();
+    // Largest first, each with its charges.
+    let first = lines[0]["monthly"].as_f64().unwrap();
+    assert!(lines.iter().all(|l| l["monthly"].as_f64().unwrap() <= first));
+    let nat = lines
+        .iter()
+        .find(|l| l["type"] == json!("nat_gateway"))
+        .expect("NAT line");
+    assert!(
+        nat["charges"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|c| c["unit"] == json!("hour")),
+        "{nat}"
+    );
+    // Free things are summarised per type rather than listed one by one.
+    assert!(
+        e["free"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|f| f["type"] == json!("subnet")),
+        "{e}"
+    );
+    assert!(e["assumptions"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|a| a["key"] == json!("nat_data_gb")));
+
+    // Per type, and per group of the one view.
+    let (err, t) = c.call("cost_estimate", json!({"group_by": "type"}));
+    assert!(!err, "{t}");
+    assert!(
+        t["types"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|x| x["type"] == json!("relational_database")),
+        "{t}"
+    );
+    let (err, g) = c.call("cost_estimate", json!({"group_by": "group", "view": "data FLOW"}));
+    assert!(!err, "{g}");
+    assert_eq!(g["view"], json!("Data flow"));
+    assert_eq!(g["groups"].as_array().unwrap().len(), 4, "{g}");
+    assert!(g["monthly"].as_f64().unwrap() <= total);
+
+    // One-call assumptions move the figure and are reported as such; nothing is saved.
+    let (err, more) = c.call("cost_estimate", json!({"assumptions": {"nat_data_gb": 10000}}));
+    assert!(!err, "{more}");
+    assert!(more["monthly"].as_f64().unwrap() > total + 100.0, "{more}");
+    let a = more["assumptions"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|a| a["key"] == json!("nat_data_gb"))
+        .unwrap()
+        .clone();
+    assert_eq!(a["source"], json!("call"), "{a}");
+
+    // An environment is accepted and said to be ignored; a region is priced as asked.
+    let (err, env) = c.call(
+        "cost_estimate",
+        json!({"environment": "prod", "region": "us-east-1"}),
+    );
+    assert!(!err, "{env}");
+    assert!(
+        env["notes"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|n| n.as_str().unwrap().contains("prod")),
+        "{env}"
+    );
+    assert_eq!(env["price_region"], json!("us-east-1"));
+
+    // Refusals name what would have worked.
+    let (err, bad) = c.call("cost_estimate", json!({"assumptions": {"gpu_hours": 4}}));
+    assert!(
+        err && bad.as_str().unwrap().contains("pool_node_hours_per_day"),
+        "{bad}"
+    );
+    let (err, bad) = c.call("cost_estimate", json!({"view": "nope"}));
+    assert!(err && bad.as_str().unwrap().contains("Data flow"), "{bad}");
+    let (err, bad) = c.call("cost_estimate", json!({"group_by": "colour"}));
+    assert!(err, "{bad}");
+    let (err, bad) = c.call("cost_estimate", json!({"provider": "oracle"}));
+    assert!(err, "{bad}");
+
+    // A read: the project did not move.
+    let (_, ch) = c.call("project_changes", json!({}));
+    assert_eq!(ch["revision"].as_u64().unwrap(), rev0);
+}

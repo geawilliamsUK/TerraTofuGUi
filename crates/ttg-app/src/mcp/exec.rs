@@ -17,6 +17,8 @@ type R = Result<J, String>;
 // file's private helpers.
 mod scoped;
 use scoped::{gen_error_text, note_geometry};
+// `cost_estimate`.
+mod cost;
 
 /// What `entity_move` / `entity_resize` were pointed at. Resources live in the project;
 /// notes, logical nodes and grouping boxes live in one view, so they are only movable
@@ -1358,6 +1360,21 @@ impl TtgApp {
                 relation,
                 providers,
             } => self.bulk_link(select, target, relation, providers),
+            AgentCommand::CostEstimate {
+                provider,
+                environment,
+                view,
+                group_by,
+                assumptions,
+                region,
+            } => self.cost_estimate_json(cost::CostQuery {
+                provider,
+                environment,
+                view,
+                group_by,
+                assumptions,
+                region,
+            }),
             AgentCommand::ExportDiff { dir, provider, k8s } => {
                 let provider = provider.unwrap_or(self.project.settings.target_provider.clone());
                 let g = ttg_codegen::generate(
