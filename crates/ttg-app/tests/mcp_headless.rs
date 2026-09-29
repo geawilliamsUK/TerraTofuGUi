@@ -944,9 +944,11 @@ fn headless_every_export_tool_reports_a_blocked_project_the_same_way() {
     let mut c = Client::new(&server);
     c.initialize();
 
+    // Overlapping subnets pass the write (each CIDR is valid on its own) and block
+    // every provider's export.
     let (err, upd) = c.call(
         "entity_update",
-        json!({"entity": "platform", "config": {"addons": ["bogus_addon"]}}),
+        json!({"entity": "nodes b", "config": {"cidr_block": "10.0.10.0/24"}}),
     );
     assert!(!err, "{upd}");
 
@@ -960,7 +962,7 @@ fn headless_every_export_tool_reports_a_blocked_project_the_same_way() {
 
     let text = preview.as_str().unwrap_or_default().to_string();
     assert!(
-        text.contains("block export") && text.contains("unknown add-on 'bogus_addon'"),
+        text.contains("block export") && text.contains("overlaps with subnet"),
         "{text}"
     );
     for (tool, other) in [
