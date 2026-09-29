@@ -747,6 +747,16 @@ pub fn run_all(full: &Project, cat: &Catalog, provider: &str) -> Vec<Diagnostic>
 
 /// The other-provider half of [`run_all`], on its own, for callers that keep the two
 /// lists apart (the app's panel, the MCP `other_providers` key).
+///
+/// Two kinds of entry, both tagged with the provider they are about and prefixed
+/// `[<Provider>] `: each of that provider's *errors*, as a warning ("would block the
+/// export"), and, as **info**, each entity a `severity = "omit"` check leaves out of
+/// that provider's export. The second kind used to be invisible while the target was
+/// another provider — an alarm with no metric on Azure vanished from the Azure layer
+/// and only `left_out` in the project summary said so. It is only information, since
+/// nothing blocks; but a design that quietly loses a resource on the provider you
+/// switch to next should say so before you switch. The target provider is skipped
+/// here, so its own omit warning (from [`run`]) is never listed twice.
 pub fn other_providers(full: &Project, cat: &Catalog, provider: &str) -> Vec<Diagnostic> {
     let mut out = Vec::new();
     for pid in cat.provider_ids() {
@@ -768,6 +778,15 @@ pub fn other_providers(full: &Project, cat: &Catalog, provider: &str) -> Vec<Dia
                 severity: Severity::Warning,
                 code: d.code,
                 message: format!("[{name}] {} (would block the {name} export)", d.message),
+                provider: Some(pid.clone()),
+            });
+        }
+        for (id, why) in crate::layers::omitted(full, cat, &pid) {
+            out.push(Diagnostic {
+                entity: Some(id),
+                severity: Severity::Info,
+                code: Code::Check,
+                message: format!("[{name}] {why}; left out of the {name} export"),
                 provider: Some(pid.clone()),
             });
         }

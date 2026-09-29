@@ -56,6 +56,115 @@ pub struct Generated {
     pub files: IndexMap<String, String>,
     pub manual_steps: Vec<ManualEntry>,
     pub diagnostics: Vec<Diagnostic>,
+    /// What each entity produced, in dependency order, for callers that want to show
+    /// one entity's HCL without slicing it out of a file (see [`Generated::entity_preview`]).
+    pub entity_blocks: IndexMap<Id, EntityBlocks>,
+}
+
+/// The blocks one entity produced, kept next to the rendered files.
+#[derive(Debug, Clone)]
+pub struct EntityBlocks {
+    /// The `.tf` file they land in, e.g. `compute.tf`.
+    pub file: String,
+    /// `aws_s3_bucket.logs`, or `data.aws_iam_policy_document.role_trust` for a data source.
+    pub addresses: Vec<String>,
+    comment: String,
+    blocks: Vec<Block>,
+}
+
+impl EntityBlocks {
+    /// The blocks rendered exactly as they appear in [`Generated::files`] — the same
+    /// formatter, the same `# ---` introduction — without the file header.
+    pub fn hcl(&self) -> String {
+        files::render_resource_file("", &[(self.comment.clone(), self.blocks.clone())])
+            .trim_start_matches('\n')
+            .to_string()
+    }
+}
+
+/// One entity's share of an export: its blocks, its manual steps and everything the
+/// diagnostics said about it.
+#[derive(Debug, Clone)]
+pub struct EntityPreview {
+    pub entity: Id,
+    pub provider: String,
+    /// The `.tf` file the blocks land in; `None` when it produces none.
+    pub file: Option<String>,
+    pub addresses: Vec<String>,
+    /// The HCL of just this entity's blocks; empty when it produces none.
+    pub hcl: String,
+    pub manual_steps: Vec<ManualEntry>,
+    pub diagnostics: Vec<Diagnostic>,
+    /// Why there is no HCL, when there is none: tagged for other providers, left out by
+    /// an `omit` check, external, logical on this provider, ...
+    pub no_blocks: Option<String>,
+}
+
+impl Generated {
+    /// Slice one entity's share out of this export. `p` and `cat` must be what it was
+    /// generated from. The blocks are the ones the emitter recorded for the entity, so
+    /// a repeated block (one per rule, one per add-on) comes back as every instance.
+    pub fn entity_preview(&self, p: &Project, cat: &Catalog, id: &str) -> EntityPreview {
+        let blocks = self.entity_blocks.get(id);
+        let no_blocks = blocks.is_none().then(|| self.why_no_blocks(p, cat, id));
+        EntityPreview {
+            entity: id.to_string(),
+            provider: self.provider.clone(),
+            file: blocks.map(|b| b.file.clone()),
+            addresses: blocks.map(|b| b.addresses.clone()).unwrap_or_default(),
+            hcl: blocks.map(|b| b.hcl()).unwrap_or_default(),
+            manual_steps: self
+                .manual_steps
+                .iter()
+                .filter(|m| m.entity.as_deref() == Some(id))
+                .cloned()
+                .collect(),
+            diagnostics: self
+                .diagnostics
+                .iter()
+                .filter(|d| d.entity.as_deref() == Some(id))
+                .cloned()
+                .collect(),
+            no_blocks,
+        }
+    }
+
+    fn why_no_blocks(&self, p: &Project, cat: &Catalog, id: &str) -> String {
+        use crate::layers::{off_layer, OffReason};
+        let provider = self.provider_display.as_str();
+        if let Some((_, why)) = off_layer(p, cat, &self.provider)
+            .into_iter()
+            .find(|(x, _)| x == id)
+        {
+            return match why {
+                OffReason::Tagged(tags) => format!(
+                    "tagged for {} only, so the {provider} export leaves it out",
+                    tags.join(" / ")
+                ),
+                OffReason::NoCounterpart(scope) => format!(
+                    "its type exists only on {}; {provider} has no counterpart",
+                    scope.join(" / ")
+                ),
+                OffReason::Check(msg) => format!("{msg}; left out of the {provider} export"),
+                OffReason::InsideOffLayerContainer => "inside a container that is off this layer".into(),
+            };
+        }
+        let Some(e) = p.entity(id) else {
+            return "no such entity".into();
+        };
+        if e.manual {
+            return "flagged as external / managed by hand: nothing is generated for it".into();
+        }
+        match cat.mapping(e.resource_type, &self.provider) {
+            None => format!("no {provider} mapping exists for {}", e.resource_type),
+            Some(m) if m.status == MappingStatus::Logical => {
+                format!("logical on {provider}: it is grouping only and generates nothing")
+            }
+            Some(_) => {
+                "every block of its mapping is conditional and none applies with the current settings".into()
+            }
+        }
+    }
 }
 
 /// One concrete block (resource or data) produced for an entity.
@@ -395,6 +504,7 @@ pub fn generate(p: &Project, cat: &Catalog, provider: &str, tool: Tool) -> Resul
     let mut files: IndexMap<String, String> = IndexMap::new();
 
     let mut by_file: IndexMap<String, Vec<(String, Vec<Block>)>> = IndexMap::new();
+    let mut entity_blocks: IndexMap<Id, EntityBlocks> = IndexMap::new();
     for id in &order {
         let e = p.entity(id).unwrap();
         let def = cat.resource(e.resource_type).unwrap();
@@ -408,6 +518,21 @@ pub fn generate(p: &Project, cat: &Catalog, provider: &str, tool: Tool) -> Resul
             def.resource.display_name, e.name, e.resource_type
         );
         let blocks: Vec<Block> = mine.iter().map(|b| b.block.clone()).collect();
+        entity_blocks.insert(
+            id.clone(),
+            EntityBlocks {
+                file: format!("{file}.tf"),
+                addresses: mine
+                    .iter()
+                    .map(|b| match b.kind {
+                        "data" => format!("data.{}.{}", b.resource_type, b.local),
+                        _ => format!("{}.{}", b.resource_type, b.local),
+                    })
+                    .collect(),
+                comment: comment.clone(),
+                blocks: blocks.clone(),
+            },
+        );
         by_file.entry(file).or_default().push((comment, blocks));
     }
     let mut file_names: Vec<String> = by_file.keys().cloned().collect();
@@ -462,6 +587,7 @@ pub fn generate(p: &Project, cat: &Catalog, provider: &str, tool: Tool) -> Resul
         files,
         manual_steps: em.manual,
         diagnostics: diags,
+        entity_blocks,
     })
 }
 

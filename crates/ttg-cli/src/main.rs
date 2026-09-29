@@ -511,11 +511,15 @@ fn main() -> Result<()> {
             }
             let errors = diags.iter().filter(|d| d.severity == Severity::Error).count();
             println!("{} diagnostics, {errors} error(s)", diags.len());
-            if !others.is_empty() {
-                println!(
-                    "{} other-provider warning(s) (would block an export for another provider)",
-                    others.len()
-                );
+            // Errors of another provider arrive as warnings; what a provider leaves out
+            // arrives as info. Only the first kind means "switching would be blocked".
+            let blocking = others.iter().filter(|d| d.severity == Severity::Warning).count();
+            let left_out = others.len() - blocking;
+            if blocking > 0 {
+                println!("{blocking} other-provider warning(s) (would block an export for another provider)");
+            }
+            if left_out > 0 {
+                println!("{left_out} resource(s) left out of another provider's export");
             }
             if errors > 0 {
                 std::process::exit(1);

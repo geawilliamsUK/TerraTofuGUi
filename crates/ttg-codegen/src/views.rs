@@ -110,6 +110,132 @@ pub fn visible_set(p: &Project, cat: &Catalog, filter: &ViewFilter) -> Option<BT
     Some(vis)
 }
 
+/// Every part of `filter` that, taken on its own, keeps `id` off the canvas — the reasons
+/// to quote when something the agent asked to draw is not drawn. Empty when the entity is
+/// shown. Each reason is one clause of [`visible_set`], so the two cannot drift far
+/// apart: `hidden`, `only`, `categories`, `types`, `origin`, `providers`, `name_glob`,
+/// `focus` / `depth`, and `containers` being off for a container.
+pub fn hidden_because(p: &Project, cat: &Catalog, filter: &ViewFilter, id: &str) -> Vec<String> {
+    let Some(e) = p.entity(id) else {
+        return vec![format!("there is no entity \"{id}\"")];
+    };
+    let mut why = Vec::new();
+    if filter.hidden.contains(id) {
+        why.push("it is in the filter's `hidden` list".to_string());
+    }
+    if !filter.only.is_empty() && !filter.only.contains(id) {
+        why.push("the filter's `only` list does not include it".to_string());
+    }
+    if filter.only.is_empty() && filter.focus.is_some() {
+        // The neighbourhood on its own, with everything else about the filter off.
+        let around = ViewFilter {
+            focus: filter.focus.clone(),
+            depth: filter.depth,
+            relations: filter.relations.clone(),
+            ..ViewFilter::default()
+        };
+        if visible_set(p, cat, &around).is_some_and(|v| !v.contains(id)) {
+            why.push(format!(
+                "it is not within {} link(s) of the filter's `focus`",
+                filter.depth
+            ));
+        }
+    }
+    if !filter.categories.is_empty() {
+        let category = cat.resource(e.resource_type).map(|d| d.resource.category.clone());
+        if category.as_ref().is_some_and(|c| !filter.categories.contains(c)) {
+            why.push(format!(
+                "its category \"{}\" is not among the filter's `categories`",
+                category.unwrap_or_default()
+            ));
+        }
+    }
+    if !filter.types.is_empty() && !filter.types.contains(e.resource_type) {
+        why.push(format!(
+            "its type \"{}\" is not among the filter's `types`",
+            e.resource_type
+        ));
+    }
+    let native = Catalog::is_native(e.resource_type);
+    match filter.origin {
+        Origin::Curated if native => {
+            why.push("the filter's `origin` is \"curated\" and this is a native type".into())
+        }
+        Origin::Native if !native => {
+            why.push("the filter's `origin` is \"native\" and this is a curated type".into())
+        }
+        _ => {}
+    }
+    if !filter.providers.is_empty()
+        && !filter
+            .providers
+            .iter()
+            .any(|prov| crate::layers::members(p, cat, prov).contains(id))
+    {
+        why.push("it is not on any of the provider layers in the filter's `providers`".to_string());
+    }
+    if !filter.name_glob.is_empty() && !glob_match(&filter.name_glob, e.name) {
+        why.push(format!(
+            "its name does not match the filter's `name_glob` \"{}\"",
+            filter.name_glob
+        ));
+    }
+    if !filter.containers && e.is_container {
+        why.push("the filter draws no containers (`containers: false`) and this is one".to_string());
+    }
+    why
+}
+
+/// What it takes to make one entity visible under a filter.
+#[derive(Debug, Clone, PartialEq)]
+pub enum Reveal {
+    /// Already shown; nothing to change.
+    Visible,
+    /// Shown under this filter instead. The change is the smallest one that works: the
+    /// entity is dropped from `hidden`, and added to `only` when that list is not empty
+    /// (an `only` filter shows just what it names). `changes` says which of the two
+    /// happened.
+    Changed {
+        filter: ViewFilter,
+        changes: Vec<String>,
+    },
+    /// Something the filter is *for* — categories, types, origin, providers, a name
+    /// glob, a focus, containers off — hides it. Those are the view's purpose, not an
+    /// accident, so they are left alone; the reasons say which ones to look at.
+    Blocked(Vec<String>),
+}
+
+/// Work out how to show `id` under `filter` with the least disturbance. See [`Reveal`].
+pub fn reveal(p: &Project, cat: &Catalog, filter: &ViewFilter, id: &str) -> Reveal {
+    if p.entity(id).is_none() {
+        return Reveal::Blocked(hidden_because(p, cat, filter, id));
+    }
+    let shown = |f: &ViewFilter| visible_set(p, cat, f).is_none_or(|s| s.contains(id));
+    if shown(filter) {
+        return Reveal::Visible;
+    }
+    let mut next = filter.clone();
+    let mut changes = Vec::new();
+    if next.hidden.remove(id) {
+        changes.push("removed it from `hidden`".to_string());
+    }
+    if !next.only.is_empty() && next.only.insert(id.to_string()) {
+        changes.push("added it to `only`".to_string());
+    }
+    if shown(&next) {
+        return Reveal::Changed {
+            filter: next,
+            changes,
+        };
+    }
+    let mut why = hidden_because(p, cat, &next, id);
+    if why.is_empty() {
+        // Only a container can land here: it is drawn for what it holds, and holds nothing shown.
+        why.push("the filter as a whole leaves it out (a container is drawn only for what it holds)".into());
+    }
+    Reveal::Blocked(why)
+}
+
 /// The view's visibility as a predicate, for the geometry helpers.
 fn visible_fn(p: &Project, cat: &Catalog, v: &View) -> impl Fn(&str) -> bool {
     let set = visible_set(p, cat, &v.filter);

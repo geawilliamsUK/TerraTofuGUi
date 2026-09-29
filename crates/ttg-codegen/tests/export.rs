@@ -2860,6 +2860,323 @@ fn an_omit_check_leaves_the_entity_out_of_that_provider() {
     assert!(vis.contains("alm-dlq"), "{vis:?}");
 }
 
+/// R3.19: an entity an `omit` check leaves out of *another* provider's export is
+/// reported as an info line tagged with that provider, so a design that quietly loses a
+/// resource on the provider you switch to next says so while the target is AWS. The
+/// target's own omit warning is still reported once, and never repeated in the list.
+#[test]
+fn an_entity_omitted_elsewhere_is_reported_as_info_while_targeting_another_provider() {
+    let cat = Catalog::builtin();
+    let mut p = example("operations.ttg.json");
+    p.nodes.get_mut("alm-dlq").unwrap().config.insert(
+        "metric".into(),
+        ttg_core::Value::Str("queue_oldest_message_age".into()),
+    );
+
+    // Targeting AWS: nothing of its own to say, but Azure loses the alarm.
+    let aws = ttg_codegen::diagnostics::run(&p, &cat, "aws");
+    assert!(
+        aws.iter().all(|d| d.entity.as_deref() != Some("alm-dlq")),
+        "AWS keeps the alarm and says nothing: {aws:?}"
+    );
+    let others = ttg_codegen::diagnostics::other_providers(&p, &cat, "aws");
+    let left_out: Vec<_> = others
+        .iter()
+        .filter(|d| d.entity.as_deref() == Some("alm-dlq"))
+        .collect();
+    assert_eq!(
+        left_out.len(),
+        1,
+        "one line for the one provider that omits it: {others:?}"
+    );
+    let d = left_out[0];
+    assert_eq!(d.severity, Severity::Info, "{d:?}");
+    assert_eq!(d.provider.as_deref(), Some("azure"), "{d:?}");
+    assert_eq!(d.code, ttg_codegen::Code::Check, "{d:?}");
+    assert!(
+        d.message.starts_with("[Microsoft Azure] ")
+            && d.message.contains("Azure Monitor has no platform metric")
+            && d.message.ends_with("; left out of the Microsoft Azure export"),
+        "{d:?}"
+    );
+    // Nothing blocks: the omission is not an error, and `run_all` carries it too.
+    assert!(others.iter().all(|d| d.severity != Severity::Error), "{others:?}");
+    let all = ttg_codegen::diagnostics::run_all(&p, &cat, "aws");
+    assert_eq!(all.len(), aws.len() + others.len());
+    generate(&p, &cat, "aws", Tool::OpenTofu).expect("the AWS export is not blocked");
+
+    // Targeting Azure: its own warning, exactly once, and the other-provider list does
+    // not repeat it (or list Azure at all).
+    let az = ttg_codegen::diagnostics::run_all(&p, &cat, "azure");
+    let mine: Vec<_> = az
+        .iter()
+        .filter(|d| d.entity.as_deref() == Some("alm-dlq"))
+        .collect();
+    assert_eq!(mine.len(), 1, "{az:?}");
+    assert_eq!(mine[0].severity, Severity::Warning);
+    assert!(mine[0].provider.is_none(), "{:?}", mine[0]);
+    assert!(
+        !mine[0].message.starts_with('['),
+        "the target's own line carries no provider prefix: {:?}",
+        mine[0]
+    );
+    let others = ttg_codegen::diagnostics::other_providers(&p, &cat, "azure");
+    assert!(
+        others.iter().all(|d| d.provider.as_deref() != Some("azure")),
+        "{others:?}"
+    );
+    // AWS and Google Cloud have the metric, so neither lists the alarm as left out.
+    assert!(
+        others.iter().all(|d| d.entity.as_deref() != Some("alm-dlq")),
+        "{others:?}"
+    );
+
+    // An entity merely tagged for another provider is a choice, not an omission.
+    p.nodes.get_mut("alm-dlq").unwrap().providers = vec!["aws".into()];
+    let others = ttg_codegen::diagnostics::other_providers(&p, &cat, "aws");
+    assert!(
+        others.iter().all(|d| d.entity.as_deref() != Some("alm-dlq")),
+        "{others:?}"
+    );
+}
+
+/// R3.21: `Generated::entity_preview` slices one entity's blocks out of an export: the
+/// same text the file holds for it, the addresses the emitter gave those blocks, its
+/// manual steps and its diagnostics — and, for an entity that produces nothing, why.
+#[test]
+fn one_entitys_hcl_is_sliced_out_of_the_export() {
+    let cat = Catalog::builtin();
+    let p = example("hardened.ttg.json");
+    let g = generate(&p, &cat, "aws", Tool::OpenTofu).expect("exports");
+
+    let store = g.entity_preview(&p, &cat, "obj-data");
+    assert_eq!(store.provider, "aws");
+    assert_eq!(store.file.as_deref(), Some("storage.tf"));
+    assert!(store.no_blocks.is_none(), "{store:?}");
+    assert!(
+        store.addresses.iter().any(|a| a == "aws_s3_bucket.records_store"),
+        "{:?}",
+        store.addresses
+    );
+    // Only its blocks: none of the other bucket's, and every block of its own.
+    assert!(store.hcl.starts_with("# --- "), "{}", store.hcl);
+    assert!(
+        store.hcl.contains("resource \"aws_s3_bucket\" \"records_store\""),
+        "{}",
+        store.hcl
+    );
+    assert!(
+        !store
+            .hcl
+            .contains("resource \"aws_s3_bucket\" \"access_log_store\""),
+        "{}",
+        store.hcl
+    );
+    for a in &store.addresses {
+        let (ty, local) = a.rsplit_once('.').unwrap();
+        assert!(
+            store
+                .hcl
+                .contains(&format!("\"{}\" \"{local}\"", ty.trim_start_matches("data."))),
+            "{a} missing from {}",
+            store.hcl
+        );
+    }
+    // Rendered as the export renders it: the file holds this text verbatim.
+    assert!(
+        g.files["storage.tf"].contains(&store.hcl),
+        "the preview must be a slice of the real file:\n{}",
+        store.hcl
+    );
+
+    // Diagnostics and manual steps are the entity's own.
+    let k = example("kubernetes.ttg.json");
+    let gk = generate(&k, &cat, "aws", Tool::OpenTofu).expect("exports");
+    let cluster = gk.entity_preview(&k, &cat, "k8s-platform");
+    assert!(
+        cluster.hcl.contains("resource \"aws_eks_cluster\""),
+        "{}",
+        cluster.hcl
+    );
+    assert!(!cluster.manual_steps.is_empty(), "{cluster:?}");
+    assert!(
+        cluster
+            .manual_steps
+            .iter()
+            .all(|m| m.entity.as_deref() == Some("k8s-platform")),
+        "{cluster:?}"
+    );
+    assert!(
+        cluster
+            .diagnostics
+            .iter()
+            .all(|d| d.entity.as_deref() == Some("k8s-platform")),
+        "{cluster:?}"
+    );
+    assert!(
+        !cluster.diagnostics.is_empty(),
+        "the partial-mapping warning: {cluster:?}"
+    );
+
+    // Nothing to show: a grouping container on AWS, and the alarm Azure leaves out.
+    let rg = gk.entity_preview(&k, &cat, "rg-k8s");
+    assert!(
+        rg.hcl.is_empty() && rg.file.is_none() && rg.addresses.is_empty(),
+        "{rg:?}"
+    );
+    assert!(
+        rg.no_blocks.as_deref().is_some_and(|w| w.contains("logical")),
+        "{rg:?}"
+    );
+
+    let mut ops = example("operations.ttg.json");
+    ops.nodes.get_mut("alm-dlq").unwrap().config.insert(
+        "metric".into(),
+        ttg_core::Value::Str("queue_oldest_message_age".into()),
+    );
+    let az = generate(&ops, &cat, "azure", Tool::OpenTofu).expect("exports");
+    let alarm = az.entity_preview(&ops, &cat, "alm-dlq");
+    assert!(alarm.hcl.is_empty(), "{alarm:?}");
+    assert!(
+        alarm
+            .no_blocks
+            .as_deref()
+            .is_some_and(|w| w.contains("Azure Monitor has no platform metric") && w.contains("left out")),
+        "{alarm:?}"
+    );
+    // ...and its diagnostic is the omit warning, so the two agree.
+    assert_eq!(alarm.diagnostics.len(), 1, "{alarm:?}");
+
+    // An entity tagged for another provider says so.
+    let mut tagged = example("hardened.ttg.json");
+    tagged.nodes.get_mut("obj-audit").unwrap().providers = vec!["azure".into()];
+    let g = generate(&tagged, &cat, "aws", Tool::OpenTofu).expect("exports");
+    let t = g.entity_preview(&tagged, &cat, "obj-audit");
+    assert!(
+        t.no_blocks.as_deref().is_some_and(|w| w.contains("tagged")),
+        "{t:?}"
+    );
+}
+
+/// R3.17: `views::reveal` makes one entity visible with the least change to a filter, and
+/// leaves alone the parts of a filter that are the view's purpose.
+#[test]
+fn reveal_shows_an_entity_with_the_least_change_to_the_filter() {
+    use ttg_codegen::views::{hidden_because, reveal, visible_set, Reveal};
+    let cat = Catalog::builtin();
+    let p = example("job-pipeline.ttg.json");
+
+    // Nothing to do when it is already drawn.
+    let none = ttg_core::ViewFilter::default();
+    assert_eq!(reveal(&p, &cat, &none, "db-jobs"), Reveal::Visible);
+    assert!(hidden_because(&p, &cat, &none, "db-jobs").is_empty());
+
+    // `hidden`: dropped from the list, nothing else touched.
+    let hidden = ttg_core::ViewFilter {
+        hidden: ["db-jobs".to_string(), "q-jobs".to_string()].into(),
+        containers: false,
+        ..Default::default()
+    };
+    assert_eq!(
+        hidden_because(&p, &cat, &hidden, "db-jobs"),
+        vec!["it is in the filter's `hidden` list".to_string()]
+    );
+    let Reveal::Changed { filter, changes } = reveal(&p, &cat, &hidden, "db-jobs") else {
+        panic!("a hidden entity can be shown");
+    };
+    assert_eq!(changes, vec!["removed it from `hidden`".to_string()]);
+    assert!(!filter.hidden.contains("db-jobs") && filter.hidden.contains("q-jobs"));
+    assert!(!filter.containers, "the rest of the filter is kept");
+    assert!(visible_set(&p, &cat, &filter).unwrap().contains("db-jobs"));
+
+    // `only`: the entity joins the list an `only` filter shows.
+    let only = ttg_core::ViewFilter {
+        only: ["fn-runner".to_string()].into(),
+        ..Default::default()
+    };
+    let Reveal::Changed { filter, changes } = reveal(&p, &cat, &only, "db-jobs") else {
+        panic!("an `only` list can grow");
+    };
+    assert_eq!(changes, vec!["added it to `only`".to_string()]);
+    assert!(filter.only.contains("db-jobs") && filter.only.contains("fn-runner"));
+
+    // Both at once.
+    let both = ttg_core::ViewFilter {
+        only: ["fn-runner".to_string()].into(),
+        hidden: ["db-jobs".to_string()].into(),
+        ..Default::default()
+    };
+    let Reveal::Changed { filter, changes } = reveal(&p, &cat, &both, "db-jobs") else {
+        panic!("both fixable");
+    };
+    assert_eq!(changes.len(), 2, "{changes:?}");
+    assert!(filter.hidden.is_empty() && filter.only.contains("db-jobs"));
+
+    // What the view is *for* is not rewritten: the reasons are handed back instead.
+    let by_type = ttg_core::ViewFilter {
+        types: ["function".to_string()].into(),
+        hidden: ["db-jobs".to_string()].into(),
+        ..Default::default()
+    };
+    let Reveal::Blocked(why) = reveal(&p, &cat, &by_type, "db-jobs") else {
+        panic!("a `types` filter is not rewritten");
+    };
+    assert_eq!(
+        why.len(),
+        1,
+        "the `hidden` entry is not a blocker once dropped: {why:?}"
+    );
+    assert!(
+        why[0].contains("`types`") && why[0].contains("relational_database"),
+        "{why:?}"
+    );
+    let by_glob = ttg_core::ViewFilter {
+        name_glob: "run*".into(),
+        ..Default::default()
+    };
+    let Reveal::Blocked(why) = reveal(&p, &cat, &by_glob, "db-jobs") else {
+        panic!("a name glob is not rewritten");
+    };
+    assert!(
+        why[0].contains("`name_glob`") && why[0].contains("run*"),
+        "{why:?}"
+    );
+    // A focus hides what lies beyond its depth.
+    let focus = ttg_core::ViewFilter {
+        focus: Some("fn-gateway".into()),
+        depth: 1,
+        ..Default::default()
+    };
+    let around = visible_set(&p, &cat, &focus).expect("focused");
+    let far = p
+        .entities()
+        .iter()
+        .map(|e| e.id.to_string())
+        .find(|id| !around.contains(id))
+        .expect("something lies beyond one link of the gateway");
+    assert!(
+        hidden_because(&p, &cat, &focus, &far)
+            .iter()
+            .any(|w| w.contains("`focus`")),
+        "{far}: {:?}",
+        hidden_because(&p, &cat, &focus, &far)
+    );
+    assert!(matches!(reveal(&p, &cat, &focus, &far), Reveal::Blocked(_)));
+    // A container is hidden by `containers: false`.
+    let no_containers = ttg_core::ViewFilter {
+        containers: false,
+        ..Default::default()
+    };
+    assert!(matches!(
+        reveal(&p, &cat, &no_containers, "vnet-22222222"),
+        Reveal::Blocked(_)
+    ));
+    assert!(matches!(
+        reveal(&p, &cat, &none, "no such thing"),
+        Reveal::Blocked(w) if w[0].contains("no entity")
+    ));
+}
+
 /// R2.17: while the target is AWS, the errors the other providers would raise are
 /// reported as warnings, so "this will block the Azure export" is visible before anyone
 /// switches the target.

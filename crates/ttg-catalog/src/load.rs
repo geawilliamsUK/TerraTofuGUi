@@ -197,6 +197,29 @@ pub struct Catalog {
     pub providers: IndexMap<String, ProviderDef>,
     /// Where each resource definition came from (for error messages).
     pub sources: IndexMap<String, String>,
+    /// Short hex fingerprint of the definition texts this catalog was loaded from
+    /// (see [`fingerprint_of`]). Native types registered later do not change it: it
+    /// says which *definitions* a client is talking to, so an agent that cached tool
+    /// schemas can tell when the catalog behind them has moved.
+    pub fingerprint: String,
+}
+
+/// FNV-1a over the definition texts, order-independent (sorted first) so that the
+/// same set of files hashes the same whether it came from the embedded list or from
+/// a directory. Twelve hex digits: enough to notice a change, short enough to quote.
+/// Written out rather than using `DefaultHasher`, whose algorithm is not promised
+/// to stay the same between Rust releases.
+pub fn fingerprint_of<'a>(texts: impl IntoIterator<Item = &'a str>) -> String {
+    let mut texts: Vec<&str> = texts.into_iter().collect();
+    texts.sort_unstable();
+    let mut h: u64 = 0xcbf2_9ce4_8422_2325;
+    for t in texts {
+        for b in t.bytes().chain(std::iter::once(0u8)) {
+            h ^= u64::from(b);
+            h = h.wrapping_mul(0x0100_0000_01b3);
+        }
+    }
+    format!("{h:016x}")[..12].to_string()
 }
 
 impl Catalog {
@@ -247,7 +270,9 @@ impl Catalog {
         providers: impl Iterator<Item = (&'a str, &'a str)>,
     ) -> Result<Catalog, CatalogError> {
         let mut cat = Catalog::default();
+        let mut texts: Vec<&'a str> = Vec::new();
         for (path, text) in providers {
+            texts.push(text);
             let def: ProviderDef = toml::from_str(text).map_err(|e| CatalogError::Parse {
                 path: path.to_string(),
                 message: e.to_string(),
@@ -255,6 +280,7 @@ impl Catalog {
             cat.providers.insert(def.provider.id.clone(), def);
         }
         for (path, text) in resources {
+            texts.push(text);
             let def: ResourceDef = toml::from_str(text).map_err(|e| CatalogError::Parse {
                 path: path.to_string(),
                 message: e.to_string(),
@@ -270,6 +296,7 @@ impl Catalog {
             cat.resources.insert(id, def);
         }
         cat.resources.sort_keys();
+        cat.fingerprint = fingerprint_of(texts);
         let problems = crate::validate::catalog(&cat);
         if !problems.is_empty() {
             return Err(CatalogError::Invalid(problems.join("\n")));
@@ -467,5 +494,30 @@ mod tests {
         assert!(c.providers.contains_key("aws") && c.providers.contains_key("azure"));
         assert!(c.is_container("virtual_network"));
         assert!(!c.is_container("subnet"));
+    }
+
+    /// R3.20: the fingerprint follows the definitions, not the order they were read in
+    /// or the types registered after loading.
+    #[test]
+    fn the_fingerprint_follows_the_definitions_only() {
+        let mut c = Catalog::builtin();
+        assert_eq!(c.fingerprint.len(), 12);
+        assert!(c.fingerprint.bytes().all(|b| b.is_ascii_hexdigit()));
+        assert_eq!(
+            c.fingerprint,
+            Catalog::builtin().fingerprint,
+            "stable between loads"
+        );
+        c.ensure_native("native:aws:aws_vpc_endpoint");
+        assert_eq!(
+            c.fingerprint,
+            Catalog::builtin().fingerprint,
+            "a native type registered later is not a definition"
+        );
+
+        assert_eq!(fingerprint_of(["a", "b"]), fingerprint_of(["b", "a"]));
+        assert_ne!(fingerprint_of(["a", "b"]), fingerprint_of(["a", "c"]));
+        // A definition edit changes it; so does splitting one text in two.
+        assert_ne!(fingerprint_of(["ab"]), fingerprint_of(["a", "b"]));
     }
 }

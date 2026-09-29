@@ -22,7 +22,7 @@ pub mod validate;
 pub mod views;
 
 pub use diagnostics::{Code, Diagnostic, Severity};
-pub use emit::{generate, Generated, ManualEntry};
+pub use emit::{generate, EntityBlocks, EntityPreview, Generated, ManualEntry};
 pub use tool::Profile;
 
 use std::path::Path;
