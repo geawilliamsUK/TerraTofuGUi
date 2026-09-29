@@ -1,4 +1,5 @@
-//! Round 3 of the MCP friction list (WP16): calls that used to be all-or-nothing.
+//! Calls scoped to part of the project, where the plain tool answers or writes
+//! everything: slices, filters, previews, dry runs and bulk writes.
 //!
 //! A child of `exec` so it can use that file's private helpers (`resolve`,
 //! `entity_json`, ...). Everything here runs on the UI thread like the rest of the

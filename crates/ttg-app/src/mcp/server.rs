@@ -1602,7 +1602,8 @@ fn server_identity(catalog_hash: &str) -> Implementation {
 }
 
 /// The instructions an agent reads once at connect: who it is talking to and when to
-/// refresh, then the standing advice, then what round 3 of the friction list added.
+/// refresh, then the standing advice, then the scoped calls (slices, previews, dry
+/// runs, bulk writes).
 fn with_identity(catalog_hash: &str, standing: &str) -> String {
     format!(
         "TerraTofu GUI {VERSION}, catalog {catalog_hash}: if your tool list lacks view_delete or \

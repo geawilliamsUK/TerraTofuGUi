@@ -373,7 +373,8 @@ pub enum AgentCommand {
     Undo,
     Redo,
 
-    // ---- Round 3 (WP16, MCP friction). Their bodies are in `exec/round3.rs`.
+    // ---- Scoped calls: slices, filters, previews, dry runs and bulk writes.
+    // Their bodies are in `exec/scoped.rs`.
     /// `project_get` with `fields` and/or `entities`: a slice of the project.
     ProjectSlice {
         fields: Option<Vec<String>>,

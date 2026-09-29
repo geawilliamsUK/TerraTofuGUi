@@ -12,10 +12,11 @@ use ttg_core::{Id, Relation, Tool, Value};
 
 type R = Result<J, String>;
 
-// Round 3 (WP16): dry runs, bulk writes, filtered reads, per-entity previews and the
-// hidden-flow warning. A child module so it can use this file's private helpers.
-mod round3;
-use round3::{gen_error_text, note_geometry};
+// Calls scoped to part of the project: dry runs, bulk writes, filtered reads,
+// per-entity previews and the hidden-flow warning. A child module so it can use this
+// file's private helpers.
+mod scoped;
+use scoped::{gen_error_text, note_geometry};
 
 /// What `entity_move` / `entity_resize` were pointed at. Resources live in the project;
 /// notes, logical nodes and grouping boxes live in one view, so they are only movable
@@ -1250,8 +1251,7 @@ impl TtgApp {
                 self.finish(before);
                 Ok(json!({ "status": "applied", "count": results.len(), "results": results }))
             }
-            // Round 3 (WP16): the calls that grew out of the friction report. Their
-            // bodies live in `round3.rs`.
+            // Scoped calls; their bodies live in `exec/scoped.rs`.
             AgentCommand::ProjectSlice { fields, entities } => self.project_slice(fields, entities),
             AgentCommand::DiagnosticsFiltered {
                 entity,
@@ -1722,7 +1722,7 @@ impl TtgApp {
     }
 
     fn diagnostics_json(&mut self) -> J {
-        let one = |p: &TtgApp, d: &ttg_codegen::Diagnostic| round3::diag_json(&p.project, d);
+        let one = |p: &TtgApp, d: &ttg_codegen::Diagnostic| scoped::diag_json(&p.project, d);
         let mine: Vec<J> = self.diagnostics.iter().map(|d| one(self, d)).collect();
         let others: Vec<J> = self
             .other_diagnostics()

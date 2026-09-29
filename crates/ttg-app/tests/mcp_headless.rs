@@ -866,7 +866,7 @@ fn headless_view_editing() {
 }
 
 // ---------------------------------------------------------------------------------
-// Round 3 (WP16): MCP friction. R3.15-R3.17, R3.19-R3.21.
+// Server identity, export error text, note offsets, hidden flow ends and the scoped calls.
 // ---------------------------------------------------------------------------------
 
 fn tool_names(c: &mut Client) -> Vec<String> {
