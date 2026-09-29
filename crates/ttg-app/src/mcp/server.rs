@@ -7,11 +7,11 @@ use super::{AgentCommand, AgentReply, Heartbeat, ServerEvent, Started};
 use rmcp::{
     handler::server::{router::tool::ToolRouter, wrapper::Parameters},
     model::{
-        CallToolResult, ContentBlock as Content, ErrorData as McpError, ListResourceTemplatesResult,
-        ListResourcesResult, PaginatedRequestParams, ReadResourceRequestParams, ReadResourceResponse,
-        ReadResourceResult, Resource, ResourceContents, ResourceTemplate, ResourceUpdatedNotification,
-        ResourceUpdatedNotificationParam, ServerCapabilities, ServerInfo, ServerNotification,
-        SubscribeRequestParams, UnsubscribeRequestParams,
+        CallToolResult, ContentBlock as Content, ErrorData as McpError, Implementation,
+        ListResourceTemplatesResult, ListResourcesResult, PaginatedRequestParams, ReadResourceRequestParams,
+        ReadResourceResponse, ReadResourceResult, Resource, ResourceContents, ResourceTemplate,
+        ResourceUpdatedNotification, ResourceUpdatedNotificationParam, ServerCapabilities, ServerInfo,
+        ServerNotification, SubscribeRequestParams, UnsubscribeRequestParams,
     },
     schemars,
     service::{Peer, RequestContext},
@@ -36,6 +36,8 @@ pub struct TtgServer {
     beat: Arc<Heartbeat>,
     /// One `TtgServer` per client session.
     session: u64,
+    /// Fingerprint of the loaded definitions, quoted in `serverInfo` (R3.20).
+    catalog_hash: String,
     /// Read by the `#[tool_handler]`-generated `call_tool` / `list_tools`.
     #[allow(dead_code)]
     tool_router: ToolRouter<Self>,
@@ -113,20 +115,7 @@ pub fn command_from_json(tool: &str, args: serde_json::Value) -> Result<AgentCom
                 providers: a.providers,
             }
         }
-        "entity_update" => {
-            let a: EntityUpdateArgs = parse(args)?;
-            AgentCommand::EntityUpdate {
-                entity: a.entity,
-                name: a.name,
-                config: a.config,
-                provider_config: a.provider_config,
-                manual: a.manual,
-                providers: a.providers,
-                extra: a.extra,
-                extra_provider: a.extra_provider,
-                extra_block: a.extra_block,
-            }
-        }
+        "entity_update" => parse::<EntityUpdateArgs>(args)?.into_command()?,
         "entity_move" => {
             let a: MoveArgs = parse(args)?;
             AgentCommand::EntityMove {
@@ -156,15 +145,7 @@ pub fn command_from_json(tool: &str, args: serde_json::Value) -> Result<AgentCom
             let a: EntitiesArgs = parse(args)?;
             AgentCommand::EntityDelete { entities: a.entities }
         }
-        "link_add" => {
-            let a: LinkAddArgs = parse(args)?;
-            AgentCommand::LinkAdd {
-                source: a.source,
-                target: a.target,
-                relation: a.relation,
-                providers: a.providers,
-            }
-        }
+        "link_add" => parse::<LinkAddArgs>(args)?.into_command()?,
         "link_remove" => {
             let a: LinkRemoveArgs = parse(args)?;
             AgentCommand::LinkRemove {
@@ -218,6 +199,7 @@ pub fn command_from_json(tool: &str, args: serde_json::Value) -> Result<AgentCom
                 dashed: a.dashed.unwrap_or(false),
                 step: a.step,
                 color: a.color,
+                show_hidden: a.show_hidden.unwrap_or(false),
             }
         }
         "view_note_add" => {
@@ -302,7 +284,15 @@ fn ok_json(v: serde_json::Value) -> CallToolResult {
 }
 
 fn fail(msg: impl Into<String>) -> CallToolResult {
-    CallToolResult::error(vec![Content::text(msg.into())])
+    let msg = msg.into();
+    // An error with no text tells the agent nothing (and some clients show a bare
+    // `isError`); there is always something to say.
+    let msg = if msg.trim().is_empty() {
+        "the app reported an error without a message; check project_summary and diagnostics".to_string()
+    } else {
+        msg
+    };
+    CallToolResult::error(vec![Content::text(msg)])
 }
 
 // ------------------------------------------------------------------ parameter types
@@ -346,8 +336,13 @@ pub struct EntityAddArgs {
 
 #[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
 pub struct EntityUpdateArgs {
-    pub entity: String,
-    #[schemars(description = "New display name")]
+    #[schemars(description = "Entity id or display name. Give this, or `select` to update many at once")]
+    pub entity: Option<String>,
+    #[schemars(
+        description = "Bulk update: apply the same config / provider_config / manual / providers / extra to every entity this matches, as ONE undo step. All-or-nothing: if any match refuses a value the whole call changes nothing and the reply lists every refusal. Cannot rename. An empty or non-matching selection is refused"
+    )]
+    pub select: Option<SelectArgs>,
+    #[schemars(description = "New display name (single entity only)")]
     pub name: Option<String>,
     #[schemars(
         description = "Abstract field values keyed by field name (see catalog_type). Types are checked against the definition"
@@ -367,6 +362,67 @@ pub struct EntityUpdateArgs {
     pub extra_provider: Option<String>,
     #[schemars(description = "Block key the extra arguments apply to; defaults to the primary block")]
     pub extra_block: Option<String>,
+}
+
+impl EntityUpdateArgs {
+    /// The single-entity or the bulk command these arguments ask for.
+    fn into_command(self) -> Result<AgentCommand, String> {
+        match (self.entity, self.select) {
+            (Some(entity), None) => Ok(AgentCommand::EntityUpdate {
+                entity,
+                name: self.name,
+                config: self.config,
+                provider_config: self.provider_config,
+                manual: self.manual,
+                providers: self.providers,
+                extra: self.extra,
+                extra_provider: self.extra_provider,
+                extra_block: self.extra_block,
+            }),
+            (None, Some(select)) => {
+                if self.name.is_some() {
+                    return Err("a bulk entity_update cannot rename: names must stay unique; rename one entity at a time".into());
+                }
+                Ok(AgentCommand::BulkUpdate {
+                    select: select.into(),
+                    changes: super::EntityChanges {
+                        config: self.config,
+                        provider_config: self.provider_config,
+                        manual: self.manual,
+                        providers: self.providers,
+                        extra: self.extra,
+                        extra_provider: self.extra_provider,
+                        extra_block: self.extra_block,
+                    },
+                })
+            }
+            (Some(_), Some(_)) => Err("give `entity` or `select`, not both".into()),
+            (None, None) => Err("give `entity` (one entity) or `select` (many)".into()),
+        }
+    }
+}
+
+/// Which entities a bulk `entity_update` / `link_add` applies to.
+#[derive(Debug, Default, serde::Deserialize, schemars::JsonSchema)]
+pub struct SelectArgs {
+    #[schemars(description = "Abstract type ids, e.g. [\"object_storage\", \"event_queue\"]")]
+    pub types: Option<Vec<String>>,
+    #[schemars(
+        description = "Case-insensitive glob on the display name (`*` any run, `?` one character): \"jobs*\""
+    )]
+    pub name_glob: Option<String>,
+    #[schemars(description = "Entity ids or display names")]
+    pub ids: Option<Vec<String>>,
+}
+
+impl From<SelectArgs> for super::Selector {
+    fn from(s: SelectArgs) -> Self {
+        super::Selector {
+            types: s.types.unwrap_or_default(),
+            name_glob: s.name_glob,
+            ids: s.ids.unwrap_or_default(),
+        }
+    }
 }
 
 #[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
@@ -431,14 +487,41 @@ pub struct EntitiesArgs {
 
 #[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
 pub struct LinkAddArgs {
-    pub source: String,
+    #[schemars(description = "Source entity (id or name). Give this, or `select` to link many at once")]
+    pub source: Option<String>,
+    #[schemars(
+        description = "Bulk link: link every entity this matches to `target`, as ONE undo step (\"put all 24 resources under one key\"). The target itself, and entities whose container already implies the link, are skipped and named; if any match's type may not have `relation` to the target's type the whole call changes nothing and every refusal is listed. An empty or non-matching selection is refused"
+    )]
+    pub select: Option<SelectArgs>,
     pub target: String,
     #[schemars(
-        description = "Relation key: network_membership, attribute_reference, iam_binding, attachment, sends_to, reads, logs_to, depends_on. Must be allowed by the source type's definition for the target type"
+        description = "Relation key: network_membership, attribute_reference, iam_binding, attachment, sends_to, reads, logs_to, encrypted_with, dead_letters_to, calls, depends_on. Must be allowed by the source type's definition for the target type (catalog_relations lists them)"
     )]
     pub relation: String,
     #[schemars(description = "Provider layers this link belongs to; omit for every provider")]
     pub providers: Option<Vec<String>>,
+}
+
+impl LinkAddArgs {
+    /// The single-link or the bulk command these arguments ask for.
+    fn into_command(self) -> Result<AgentCommand, String> {
+        match (self.source, self.select) {
+            (Some(source), None) => Ok(AgentCommand::LinkAdd {
+                source,
+                target: self.target,
+                relation: self.relation,
+                providers: self.providers,
+            }),
+            (None, Some(select)) => Ok(AgentCommand::BulkLink {
+                select: select.into(),
+                target: self.target,
+                relation: self.relation,
+                providers: self.providers,
+            }),
+            (Some(_), Some(_)) => Err("give `source` or `select`, not both".into()),
+            (None, None) => Err("give `source` (one entity) or `select` (many)".into()),
+        }
+    }
 }
 
 #[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
@@ -539,6 +622,10 @@ pub struct FlowAddArgs {
     pub color: Option<String>,
     #[schemars(description = "View to draw in; defaults to the active view")]
     pub view: Option<String>,
+    #[schemars(
+        description = "When an end is hidden by the view's filter the flow is still added, with a `warning` naming the hidden end(s). With true the hidden resource is first taken out of the filter's `hidden` list (and added to `only` when that is non-empty), in the same undo step. Parts of a filter that define the view (categories, types, origin, providers, name_glob, focus) are never rewritten; the warning says when one of them is the reason"
+    )]
+    pub show_hidden: Option<bool>,
 }
 
 #[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
@@ -672,6 +759,7 @@ impl TtgServer {
         ctx: egui::Context,
         subs: Subscribers,
         beat: Arc<Heartbeat>,
+        catalog_hash: String,
     ) -> Self {
         TtgServer {
             tx,
@@ -679,6 +767,7 @@ impl TtgServer {
             subs,
             beat,
             session: SESSIONS.fetch_add(1, Ordering::Relaxed),
+            catalog_hash,
             tool_router: Self::tool_router(),
         }
     }
@@ -752,6 +841,50 @@ pub struct ApplyItem {
 #[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
 pub struct ApplyArgs {
     pub commands: Vec<ApplyItem>,
+    #[schemars(
+        description = "Play the batch and report what it would do, then take it all back: per-command results plus the diagnostics that would appear and disappear (`diagnostics.added` / `removed`). Nothing is kept: not in the project, not in the undo history, not in the revision counter"
+    )]
+    pub dry_run: Option<bool>,
+}
+
+#[derive(Debug, Default, serde::Deserialize, schemars::JsonSchema)]
+pub struct ProjectGetArgs {
+    #[schemars(
+        description = "Top-level keys to return, e.g. [\"nodes\", \"edges\"]. One of schema_version, name, settings, containers, nodes, edges, views. Omit for everything (about 60 KB for a large project)"
+    )]
+    pub fields: Option<Vec<String>>,
+    #[schemars(
+        description = "Entity ids or names: return only these entities and the links between them (containers, nodes, edges unless `fields` says otherwise)"
+    )]
+    pub entities: Option<Vec<String>>,
+}
+
+#[derive(Debug, Default, serde::Deserialize, schemars::JsonSchema)]
+pub struct DiagnosticsArgs {
+    #[schemars(description = "Only diagnostics about this entity (id or name)")]
+    pub entity: Option<String>,
+    #[schemars(description = "Only this severity: `error`, `warning` or `info`")]
+    pub severity: Option<String>,
+    #[schemars(
+        description = "Provider whose run to report (`aws` / `azure` / `gcp`); defaults to the project's target provider. Nothing about the project changes"
+    )]
+    pub provider: Option<String>,
+}
+
+#[derive(Debug, Default, serde::Deserialize, schemars::JsonSchema)]
+pub struct CatalogRelationsArgs {
+    #[schemars(description = "Abstract type the relations start from, e.g. `object_storage`")]
+    pub source_type: Option<String>,
+    #[schemars(description = "Only relations whose targets include this type, e.g. `encryption_key`")]
+    pub target_type: Option<String>,
+}
+
+#[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
+pub struct EntityPreviewArgs {
+    #[schemars(description = "Entity id or display name")]
+    pub entity: String,
+    #[schemars(description = "Provider id; defaults to the project's target provider")]
+    pub provider: Option<String>,
 }
 
 #[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
@@ -770,10 +903,17 @@ pub struct ChangesArgs {
 #[tool_router]
 impl TtgServer {
     #[tool(
-        description = "The whole project as JSON (same shape as the .ttg.json file): settings, containers, nodes, edges, views."
+        description = "The whole project as JSON (same shape as the .ttg.json file): settings, containers, nodes, edges, views. That is large (about 60 KB for a real design): pass `fields` (e.g. [\"nodes\", \"edges\"]) and/or `entities` (ids or names: just those entities and the links between them) to get a slice. Anchored notes in `views` store their `position` as an offset from the anchor, as the file does; view_get reports the absolute position and the offset separately."
     )]
-    async fn project_get(&self) -> CallToolResult {
-        self.run(AgentCommand::ProjectGet).await
+    async fn project_get(&self, Parameters(a): Parameters<ProjectGetArgs>) -> CallToolResult {
+        if a.fields.is_none() && a.entities.is_none() {
+            return self.run(AgentCommand::ProjectGet).await;
+        }
+        self.run(AgentCommand::ProjectSlice {
+            fields: a.fields,
+            entities: a.entities,
+        })
+        .await
     }
 
     #[tool(
@@ -822,10 +962,18 @@ impl TtgServer {
     }
 
     #[tool(
-        description = "Current diagnostics (errors block export; warnings become manual steps) for the target provider, under `diagnostics`. `other_providers` carries the errors the *other* providers would raise, as warnings: they do not block this export, they say what switching the target would cost."
+        description = "Current diagnostics (errors block export; warnings become manual steps) for the target provider, under `diagnostics`. `other_providers` carries what the *other* providers would say: their errors as warnings (they do not block this export, they say what switching the target would cost) and, as info, each entity one of them leaves out of its export. Filter with `entity`, `severity` (error | warning | info) and `provider` (whose run to report; defaults to the target); the filters apply to both lists and the reply says how many matched of how many."
     )]
-    async fn diagnostics(&self) -> CallToolResult {
-        self.run(AgentCommand::Diagnostics).await
+    async fn diagnostics(&self, Parameters(a): Parameters<DiagnosticsArgs>) -> CallToolResult {
+        if a.entity.is_none() && a.severity.is_none() && a.provider.is_none() {
+            return self.run(AgentCommand::Diagnostics).await;
+        }
+        self.run(AgentCommand::DiagnosticsFiltered {
+            entity: a.entity,
+            severity: a.severity,
+            provider: a.provider,
+        })
+        .await
     }
 
     #[tool(
@@ -846,11 +994,33 @@ impl TtgServer {
     }
 
     #[tool(
-        description = "Generate the Terraform/OpenTofu files in memory and return them as text, without writing to disk. Fails with the blocking diagnostics if there are errors."
+        description = "Generate the Terraform/OpenTofu files in memory and return them as text, without writing to disk. Fails with the blocking diagnostics if there are errors (export_diff, export_run and entity_preview fail with the same list). For one entity's blocks only, use entity_preview."
     )]
     async fn export_preview(&self, Parameters(a): Parameters<ProviderArg>) -> CallToolResult {
         self.run(AgentCommand::ExportPreview { provider: a.provider })
             .await
+    }
+
+    #[tool(
+        description = "The HCL one entity produces for a provider: just its blocks, rendered exactly as the export renders them, with the resource addresses, the file they land in, the entity's manual steps and its diagnostics. An entity that produces nothing (external, logical on that provider, tagged for another, left out by a check) comes back with empty `hcl` and `no_blocks` saying why. Fails with the blocking diagnostics, like export_preview, while the project has errors."
+    )]
+    async fn entity_preview(&self, Parameters(a): Parameters<EntityPreviewArgs>) -> CallToolResult {
+        self.run(AgentCommand::EntityPreview {
+            entity: a.entity,
+            provider: a.provider,
+        })
+        .await
+    }
+
+    #[tool(
+        description = "Which relations the definitions let one type have to another: relation key (what link_add takes), label, target types, cardinality, whether containment satisfies it (`via_parent`), and the providers it applies to (empty = all). Give `source_type` and/or `target_type` to narrow it, e.g. source object_storage, target encryption_key. `depends_on` is always allowed between any two entities."
+    )]
+    async fn catalog_relations(&self, Parameters(a): Parameters<CatalogRelationsArgs>) -> CallToolResult {
+        self.run(AgentCommand::CatalogRelations {
+            source_type: a.source_type,
+            target_type: a.target_type,
+        })
+        .await
     }
 
     #[tool(
@@ -909,21 +1079,13 @@ impl TtgServer {
     }
 
     #[tool(
-        description = "Rename, set abstract/provider field values (checked against the definition) or the external flag."
+        description = "Rename, set abstract/provider field values (checked against the definition) or the external flag. Pass `entity` for one, or `select` ({ types, name_glob, ids }, every criterion given must match) to apply the same values to every match as ONE undo step; a bulk update is all-or-nothing, cannot rename, refuses an empty or non-matching selection, and lists what changed."
     )]
     async fn entity_update(&self, Parameters(a): Parameters<EntityUpdateArgs>) -> CallToolResult {
-        self.run(AgentCommand::EntityUpdate {
-            entity: a.entity,
-            name: a.name,
-            config: a.config,
-            provider_config: a.provider_config,
-            manual: a.manual,
-            providers: a.providers,
-            extra: a.extra,
-            extra_provider: a.extra_provider,
-            extra_block: a.extra_block,
-        })
-        .await
+        match a.into_command() {
+            Ok(cmd) => self.run(cmd).await,
+            Err(e) => fail(e),
+        }
     }
 
     #[tool(
@@ -972,16 +1134,13 @@ impl TtgServer {
     }
 
     #[tool(
-        description = "Link two entities. Direction: source depends on / uses target. Refused when the definition does not allow it or containment already implies it."
+        description = "Link two entities. Direction: source depends on / uses target. Refused when the definition does not allow it or containment already implies it. Pass `select` ({ types, name_glob, ids }) instead of `source` to link every match to `target` in one undo step (all-or-nothing; entities already inside an implying container are skipped and named)."
     )]
     async fn link_add(&self, Parameters(a): Parameters<LinkAddArgs>) -> CallToolResult {
-        self.run(AgentCommand::LinkAdd {
-            source: a.source,
-            target: a.target,
-            relation: a.relation,
-            providers: a.providers,
-        })
-        .await
+        match a.into_command() {
+            Ok(cmd) => self.run(cmd).await,
+            Err(e) => fail(e),
+        }
     }
 
     #[tool(description = "Remove a link.")]
@@ -1035,7 +1194,7 @@ impl TtgServer {
     }
 
     #[tool(
-        description = "Everything one view holds: description, filter, own layout, which resources it shows, and its groups (with their current members), flows, notes and logical nodes. Defaults to the active view."
+        description = "Everything one view holds: description, filter, own layout, which resources it shows, and its groups (with their current members), flows, notes and logical nodes. Defaults to the active view. A note's `position` is where it is drawn (the absolute position entity_move takes); an anchored note also reports the `offset` from its anchor that it stores, null when it is free."
     )]
     async fn view_get(&self, Parameters(a): Parameters<ViewGetArgs>) -> CallToolResult {
         self.run(AgentCommand::ViewGet { name: a.name }).await
@@ -1090,7 +1249,7 @@ impl TtgServer {
     }
 
     #[tool(
-        description = "Add a labelled data-flow arrow to a view between resources, groups and/or logical nodes, optionally numbered (`step`) and coloured. An annotation: not a dependency, never exported."
+        description = "Add a labelled data-flow arrow to a view between resources, groups and/or logical nodes, optionally numbered (`step`) and coloured. An annotation: not a dependency, never exported. If an end is hidden by the view's filter the flow is still added and the reply carries a `warning` naming it and how to show it (view_update { filter }); `show_hidden: true` shows it for you."
     )]
     async fn view_flow_add(&self, Parameters(a): Parameters<FlowAddArgs>) -> CallToolResult {
         self.run(AgentCommand::FlowAdd {
@@ -1101,6 +1260,7 @@ impl TtgServer {
             dashed: a.dashed.unwrap_or(false),
             step: a.step,
             color: a.color,
+            show_hidden: a.show_hidden.unwrap_or(false),
         })
         .await
     }
@@ -1241,7 +1401,7 @@ impl TtgServer {
     }
 
     #[tool(
-        description = "Apply several diagram writes (entity_*, link_*, view_*, layout_*, selection_set, settings_set) as ONE undo step. Stops at the first failure and rolls the whole batch back. Returns each command's result."
+        description = "Apply several diagram writes (entity_*, link_*, view_*, layout_*, selection_set, settings_set) as ONE undo step. Stops at the first failure and rolls the whole batch back. Returns each command's result. With `dry_run: true` the batch is played and then taken back: the reply has each command's result and the diagnostics it would add or remove, and nothing is kept (not in the project, the undo history or the revision counter)."
     )]
     async fn project_apply(&self, Parameters(a): Parameters<ApplyArgs>) -> CallToolResult {
         let mut cmds = Vec::with_capacity(a.commands.len());
@@ -1254,6 +1414,9 @@ impl TtgServer {
         }
         if cmds.is_empty() {
             return fail("no commands");
+        }
+        if a.dry_run.unwrap_or(false) {
+            return self.run(AgentCommand::DryRun(cmds)).await;
         }
         self.run(AgentCommand::Batch(cmds)).await
     }
@@ -1409,15 +1572,51 @@ impl ServerHandler for TtgServer {
                 .enable_resources_subscribe()
                 .build(),
         )
-        .with_instructions(
+        .with_server_info(server_identity(&self.catalog_hash))
+        .with_instructions(with_identity(
+            &self.catalog_hash,
             "TerraTofu GUI: a visual cloud-architecture editor that generates Terraform/OpenTofu. \
              You are editing the diagram the user has open right now; they see every change as \
              you make it and every write is one undo step. Start with project_summary and \
              catalog_types. Entities can be addressed by id or by display name. Never call \
              project_save without the user asking. Prefer entity_set_parent over explicit \
              network_membership links to containers: containment implies membership. One              diagram serves every provider: tag an entity or link with `providers` to keep it              out of the other provider's export (provider-only types are tagged automatically).              Curated types cover the portable concepts; for anything else use schema_search and add              a native resource (`native:<provider>:<type>`), setting its arguments via              entity_update.extra. Extra arguments on curated types add or override provider              arguments and are validated against the schema. Use project_apply to make several              writes as one undo step, project_changes (or a subscription to ttg://project) to notice              the user's own edits, and export_diff before export_run to show what would change. Some              writes (saving, opening, exporting, deleting) may wait for the user's approval; while a              prompt is open, reads keep answering (writes queue up behind it in arrival order).              A call that comes back \"the app is busy\" was never queued and a call that times out              is dropped rather than applied late, so either is safe to retry once; nothing is ever              applied twice.              Views: view_set while a saved view is active rewrites that view's filter (use              view_activate All first to filter without touching it), view_update takes a filter of              its own, view_save refuses a name already in use unless replace is true, and              view_delete removes one.              `terratofu-gui --serve --port N --token T [project]` runs the same server headless, with              no window and no approval prompts, for scripting and CI.",
-        )
+        ))
     }
+}
+
+// ------------------------------------------------------------------ identity
+
+/// TerraTofu's own version, from this crate's manifest — not rmcp's, which is what
+/// `serverInfo` used to report and which says nothing about the tools behind it.
+const VERSION: &str = env!("CARGO_PKG_VERSION");
+
+/// `serverInfo`: the app's name and version, with the fingerprint of the loaded
+/// definitions as semver build metadata (`0.1.0+catalog.3f9c1a7d20be`). A client that
+/// cached the tool list from an older build sees the version or the hash move, and
+/// knows to ask `tools/list` again.
+fn server_identity(catalog_hash: &str) -> Implementation {
+    Implementation::new("terratofu-gui", format!("{VERSION}+catalog.{catalog_hash}"))
+        .with_title(format!("TerraTofu GUI {VERSION}"))
+        .with_description(format!("TerraTofu GUI {VERSION}, catalog {catalog_hash}"))
+}
+
+/// The instructions an agent reads once at connect: who it is talking to and when to
+/// refresh, then the standing advice, then what round 3 of the friction list added.
+fn with_identity(catalog_hash: &str, standing: &str) -> String {
+    format!(
+        "TerraTofu GUI {VERSION}, catalog {catalog_hash}: if your tool list lacks view_delete or \
+         entity_preview, refresh it (tools/list) — schemas cached from an older build are missing \
+         parameters and tools. {standing} \
+         Bulk and preview: project_apply {{ dry_run: true }} plays a batch and reports the diagnostics \
+         it would add or remove, then takes it all back; entity_update and link_add take \
+         `select` ({{ types, name_glob, ids }}) to act on many entities as one undo step \
+         (all-or-nothing, an empty or non-matching selection is refused); entity_preview shows one \
+         entity's HCL; diagnostics takes entity / severity / provider, project_get takes fields / \
+         entities, catalog_relations answers which relations a type can have to another; \
+         view_flow_add warns when an end is hidden in the view (show_hidden: true shows it); \
+         view_get gives a note's absolute `position` and, when anchored, its `offset`."
+    )
 }
 
 // ------------------------------------------------------------------ runtime thread
@@ -1429,6 +1628,7 @@ pub fn run(
     tx: mpsc::Sender<(AgentCommand, AgentReply)>,
     ctx: egui::Context,
     beat: Arc<Heartbeat>,
+    catalog_hash: String,
     started: mpsc::Sender<Result<Started, String>>,
 ) {
     use rmcp::transport::streamable_http_server::{
@@ -1471,6 +1671,7 @@ pub fn run(
                     ctx.clone(),
                     subs_for_service.clone(),
                     beat.clone(),
+                    catalog_hash.clone(),
                 ))
             },
             std::sync::Arc::new(LocalSessionManager::default()),

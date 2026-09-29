@@ -260,6 +260,8 @@ impl TtgApp {
         }
         #[cfg(feature = "mcp")]
         {
+            // What `serverInfo` says about the definitions behind the tools (R3.20).
+            app.mcp.catalog_hash = app.catalog.fingerprint.clone();
             // `TTG_MCP=1` forces the server on for this run only (tests, screenshots); the
             // persisted "start with the app" setting is left alone. `TTG_MCP_AUTOSTART=off`
             // clears a stored autostart.

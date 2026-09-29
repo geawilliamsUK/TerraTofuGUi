@@ -35,13 +35,14 @@ Claude Code ──Streamable HTTP (MCP), localhost, bearer token──► terrat
 
 ## 2. Tools
 
-Read: `project_get`, `project_summary`, `catalog_types`, `catalog_type`, `diagnostics`,
-`reach_posture`, `reach_from`, `reach_to`, `export_preview`, `view_get`, `view_export`,
-`view_fit`, `screenshot`.
+Read: `project_get`, `project_summary`, `catalog_types`, `catalog_type`,
+`catalog_relations`, `diagnostics`, `reach_posture`, `reach_from`, `reach_to`,
+`export_preview`, `entity_preview`, `view_get`, `view_export`, `view_fit`, `screenshot`.
 
 `diagnostics` answers `{ provider, diagnostics, other_providers }`: the target provider's
-list, and separately the errors the *other* providers would raise, as warnings carrying
-their `provider` and a `[<Provider>] … (would block the <Provider> export)` message. The
+list, and separately what the *other* providers would say: their errors as warnings
+carrying their `provider` and a `[<Provider>] … (would block the <Provider> export)`
+message, and (round 3) an info line per entity one of them leaves out of its export. The
 two lists are kept apart so an agent cannot mistake "blocks the export I am making" for
 "would block an export nobody asked for". `ttg://diagnostics` returns the same object.
 
@@ -115,6 +116,80 @@ the call comes back "the app is busy: <what>; nothing was queued, retry in a mom
 `TtgApp::busy_while` publishes what the app is stuck on around the modal file dialogs
 and the exports. rmcp's `sse_keep_alive` default (15 s) is left as it is.
 
+Added 2026-09-29 (round 3, "MCP friction", 47 → 49 tools; the code is in
+`mcp/exec/round3.rs`, a child module of `exec.rs`, so it can use that file's private
+helpers and stays out of the way of the big `agent_exec` match):
+
+- **R3.15, one blocked-project message.** `export_preview`, `export_diff`, `export_run`
+  and the new `entity_preview` all render a `GenError` through `gen_error_text`, and
+  `server::fail` refuses to send an empty error text (it says the app reported an error
+  without a message). A blocked project gives the same "project has errors that block
+  export:" list from all four; a headless test pins that. The empty `export_diff` error
+  in the report could not be reproduced (the two tools shared the same path, and both
+  answered with the list on this build), so the change is to make that impossible rather
+  than to fix a known bug.
+- **R3.16, notes report where they are drawn.** `view_get` gives a note's `position` as
+  the absolute top-left it is drawn at (`ttg_core::view::note_rect`, so it is what
+  `entity_move` takes) and `offset`, the offset from the anchor that the file stores
+  (`null` for a free note, or an anchor that cannot be found). `entity_move` on a note
+  also answers with `offset`. `project_get` is the raw file shape and still holds the
+  stored offset in `position`; its description says so. `view_export` prints no
+  positions.
+- **R3.17, hidden flow ends.** `view_flow_add` still accepts a flow to an entity the
+  view hides (annotations are never exported and the view may be about to show it), but
+  answers with `hidden_ends` and a `warning` naming the entity, the part of the filter
+  that hides it (`ttg_codegen::views::hidden_because`, one reason per clause of
+  `visible_set`) and the fix. `show_hidden: true` applies `ttg_codegen::views::reveal`:
+  the entity leaves `hidden` and joins `only` when `only` is non-empty, nothing else
+  changes, the filter change and the flow are one undo step, and the reply lists
+  `shown`. `categories`, `types`, `origin`, `providers`, `name_glob`, `focus` and
+  `containers: false` are what a view is *for*, so they are never rewritten; the flow is
+  added anyway and the warning names them.
+- **R3.19, omissions elsewhere are visible.** `diagnostics::other_providers` adds, per
+  other provider, an **info** line for each entity an `omit` check leaves out of that
+  provider's export (`[Microsoft Azure] <check message>; left out of the Microsoft Azure
+  export`, `provider` set, `code` Check). The target provider is skipped there, so its
+  own warning from `run` still appears exactly once. `ttg check` counts the two kinds
+  separately.
+- **R3.20, identity.** `serverInfo` is `terratofu-gui`, version
+  `<ttg-app version>+catalog.<hash>` (semver build metadata), title `TerraTofu GUI <v>`,
+  and the instructions open with "TerraTofu GUI <v>, catalog <hash>: if your tool list
+  lacks view_delete or entity_preview, refresh it". The hash is
+  `ttg_catalog::Catalog::fingerprint`: FNV-1a over the definition texts (sorted, so
+  the same files hash the same from the embedded list or a directory), twelve hex
+  digits, computed in `Catalog::from_sources`; native types registered later do not
+  move it. `McpState::catalog_hash` carries it from `TtgApp::build` to `server::run`.
+- **R3.21, calls that stop being all-or-nothing.**
+  `entity_preview { entity, provider? }` slices one entity's share out of a full
+  generation (`Generated::entity_preview`, from the `entity_blocks` the emitter now
+  records: file, resource addresses, the blocks rendered as the export renders them) and
+  adds its manual steps and diagnostics; an entity with no blocks says why in
+  `no_blocks`. It needs an export-clean project, like `export_preview`.
+  `diagnostics { entity?, severity?, provider? }` filters both lists and reports
+  `matched` / `of`; `provider` answers that provider's run (and what the others would
+  say relative to it) without touching the target. `project_get { fields?, entities? }`
+  returns top-level keys and/or just those entities with the links among them (with
+  `entities` alone: `containers`, `nodes`, `edges`); no arguments is unchanged.
+  `catalog_relations { source_type?, target_type? }` lists the definitions'
+  `[[relations]]` with label, cardinality, `min_targets`, `via_parent` and provider
+  scope (`catalog_type` now reports the provider scope too).
+  `project_apply { dry_run: true }` (`AgentCommand::DryRun`) runs the batch against an
+  empty history of its own, computes the diagnostics before and after (`added` /
+  `removed` as a multiset, errors and warnings before and after), then puts everything
+  back: the project, the history *and* its redo stack, the dirty flag, selection, active
+  view, filter and status line. `McpState::quiet` silences `note_change` for the
+  duration, so the revision counter and subscribers never see a change that did not
+  land. A failing command fails with the same message as a real batch.
+  `entity_update { select }` and `link_add { select }` (`BulkUpdate` / `BulkLink`;
+  `select` is `{ types?, name_glob?, ids? }`, every given criterion must match, ids take
+  names) run the ordinary single-entity command on each match against a private history
+  and push one undo step at the end. They are all-or-nothing and report *every* refusal
+  at once; an empty selector and one that matches nothing are refused with a message
+  saying so; a bulk update cannot rename. A bulk link skips (and names) the target
+  itself and entities whose container already implies the link, and lists `linked`,
+  `already_linked` and `skipped`. Both work inside `project_apply`, including
+  `dry_run`.
+
 Added 2026-09-09: `project_apply` (a list of `{tool, args}` diagram writes executed as
 one undo step; `AgentCommand::Batch` snapshots first, runs each sub-command through the
 normal path, then truncates the history back and pushes one step; any failure restores
@@ -183,9 +258,19 @@ round trip, `view_update { filter }`, `view_set` writing into the active view, t
 drawn nested in one `project_apply` and reported as such by `view_get` and the Markdown
 "Inside" column, moving and resizing a note, a logical node and a box (and a box not
 dragging its members), an anchored note landing beside its anchor, the documented
-headless refusal for a sized `screenshot`, and `view_delete` with its undo. The unit
-tests beside `mcp/mod.rs` cover the dropped-caller rule (fresh and deferred), the
-heartbeat, and the screenshot size clamp. All run in CI on the same job as the rest of
+headless refusal for a sized `screenshot`, and `view_delete` with its undo. Round 3 adds
+one headless test per item: `serverInfo` and the instructions, the four export tools
+failing identically on a blocked project, absolute position and stored offset of an
+anchored note (the report's (−1850, −1850) case), hidden flow ends with `show_hidden`
+(each of `hidden`, `only` and a `categories` filter, and one undo for the flow plus the
+filter), omitted entities and the `diagnostics` filters, `project_get` slices with
+`catalog_relations` and `entity_preview`, `dry_run` (the delta, nothing left in the
+project, history, redo stack or revision) and the bulk writes (one undo step, one
+revision, every refusal listed, empty and non-matching selections). Codegen tests cover
+the other-provider info lines, `Generated::entity_preview` and `views::reveal`; the
+catalog crate tests the fingerprint. The unit tests beside `mcp/mod.rs` cover the
+dropped-caller rule (fresh and deferred), the heartbeat, the screenshot size clamp,
+selectors and the quiet flag. All run in CI on the same job as the rest of
 the workspace.
 
 ## 5. Open ideas

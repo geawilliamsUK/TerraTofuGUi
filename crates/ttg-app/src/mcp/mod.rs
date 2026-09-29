@@ -106,6 +106,49 @@ pub fn new_token() -> String {
     uuid::Uuid::new_v4().simple().to_string()
 }
 
+/// Which entities a bulk write applies to. Every criterion that is given must hold, so
+/// `types` with `name_glob` means "of these types, whose name matches". An empty
+/// selector is refused, and so is one that matches nothing.
+#[derive(Debug, Clone, Default)]
+pub struct Selector {
+    /// Abstract type ids (`object_storage`, `native:aws:aws_vpc_endpoint`).
+    pub types: Vec<String>,
+    /// Case-insensitive `*` / `?` glob on the display name.
+    pub name_glob: Option<String>,
+    /// Entity ids or display names.
+    pub ids: Vec<String>,
+}
+
+impl Selector {
+    /// No criterion at all: would mean "every entity", which no bulk edit intends.
+    pub fn is_empty(&self) -> bool {
+        self.types.is_empty() && self.name_glob.as_deref().is_none_or(str::is_empty) && self.ids.is_empty()
+    }
+}
+
+/// The part of `entity_update` a bulk update repeats on every selected entity (a bulk
+/// update cannot rename: names must stay unique).
+#[derive(Debug, Clone, Default)]
+pub struct EntityChanges {
+    pub config: Option<serde_json::Map<String, serde_json::Value>>,
+    pub provider_config: Option<serde_json::Map<String, serde_json::Value>>,
+    pub manual: Option<bool>,
+    pub providers: Option<Vec<String>>,
+    pub extra: Option<serde_json::Map<String, serde_json::Value>>,
+    pub extra_provider: Option<String>,
+    pub extra_block: Option<String>,
+}
+
+impl EntityChanges {
+    pub fn is_empty(&self) -> bool {
+        self.config.is_none()
+            && self.provider_config.is_none()
+            && self.manual.is_none()
+            && self.providers.is_none()
+            && self.extra.is_none()
+    }
+}
+
 /// A request from the agent, executed on the UI thread. Names may be entity ids or
 /// display names (case-insensitive); the executor resolves them.
 #[derive(Debug, Clone)]
@@ -259,6 +302,8 @@ pub enum AgentCommand {
         dashed: bool,
         step: Option<u32>,
         color: Option<String>,
+        /// Add a hidden end to the view's filter instead of only warning about it.
+        show_hidden: bool,
     },
     NoteAdd {
         view: Option<String>,
@@ -327,6 +372,44 @@ pub enum AgentCommand {
     Batch(Vec<AgentCommand>),
     Undo,
     Redo,
+
+    // ---- Round 3 (WP16, MCP friction). Their bodies are in `exec/round3.rs`.
+    /// `project_get` with `fields` and/or `entities`: a slice of the project.
+    ProjectSlice {
+        fields: Option<Vec<String>>,
+        entities: Option<Vec<String>>,
+    },
+    /// `diagnostics` with a filter (and, optionally, another provider's run).
+    DiagnosticsFiltered {
+        entity: Option<String>,
+        severity: Option<String>,
+        provider: Option<String>,
+    },
+    /// The relations the definitions allow, optionally between two types.
+    CatalogRelations {
+        source_type: Option<String>,
+        target_type: Option<String>,
+    },
+    /// One entity's share of an export.
+    EntityPreview {
+        entity: String,
+        provider: Option<String>,
+    },
+    /// Run a batch, report what it did and how the diagnostics moved, then take it all
+    /// back: nothing lands in the project or the undo history.
+    DryRun(Vec<AgentCommand>),
+    /// `entity_update` on every entity a selector matches, as one undo step.
+    BulkUpdate {
+        select: Selector,
+        changes: EntityChanges,
+    },
+    /// `link_add` from every entity a selector matches to one target, as one undo step.
+    BulkLink {
+        select: Selector,
+        target: String,
+        relation: String,
+        providers: Option<Vec<String>>,
+    },
 }
 
 impl AgentCommand {
@@ -396,6 +479,10 @@ impl AgentCommand {
                 | AgentCommand::SchemaShow { .. }
                 | AgentCommand::ExportDiff { .. }
                 | AgentCommand::Changes { .. }
+                | AgentCommand::ProjectSlice { .. }
+                | AgentCommand::DiagnosticsFiltered { .. }
+                | AgentCommand::CatalogRelations { .. }
+                | AgentCommand::EntityPreview { .. }
         )
     }
 }
@@ -477,6 +564,13 @@ pub struct McpState {
     pub in_agent: bool,
     /// `--serve` mode: no window, no screenshots, no confirmation prompts.
     pub headless: bool,
+    /// Fingerprint of the loaded definitions, for `serverInfo` (see
+    /// `ttg_catalog::load::fingerprint_of`). Set when the app is built.
+    pub catalog_hash: String,
+    /// Set while a dry run (or a bulk write that may still be rolled back) executes:
+    /// `note_change` then neither bumps the revision nor notifies subscribers, so a
+    /// change that never lands is invisible to `project_changes`.
+    pub quiet: bool,
 }
 
 impl Default for McpState {
@@ -503,6 +597,8 @@ impl Default for McpState {
             last_change: None,
             in_agent: false,
             headless: false,
+            catalog_hash: String::new(),
+            quiet: false,
         }
     }
 }
@@ -534,10 +630,11 @@ impl McpState {
         let token = self.settings.token.clone();
         let tx = self.tx.clone();
         let beat = self.heartbeat.clone();
+        let catalog_hash = self.catalog_hash.clone();
         let (started_tx, started_rx) = mpsc::channel::<Result<Started, String>>();
         std::thread::Builder::new()
             .name("ttg-mcp".into())
-            .spawn(move || server::run(port, token, tx, ctx, beat, started_tx))
+            .spawn(move || server::run(port, token, tx, ctx, beat, catalog_hash, started_tx))
             .map_err(|e| e.to_string())?;
         match started_rx.recv_timeout(std::time::Duration::from_secs(5)) {
             Ok(Ok((cancel, events))) => {
@@ -566,6 +663,9 @@ impl McpState {
 
     /// Record a committed change to the project and tell subscribed clients.
     pub fn note_change(&mut self) {
+        if self.quiet {
+            return;
+        }
         self.revision += 1;
         self.last_change = Some((Instant::now(), if self.in_agent { "agent" } else { "user" }));
         if let Some(r) = &self.running {
@@ -1143,6 +1243,68 @@ mod tests {
         assert_eq!(beat.since_drain().1, None);
         app.drain_agent_commands(&ctx);
         assert!(beat.stalled(Duration::from_secs(3)).is_none());
+    }
+
+    /// R3.21: a selector needs at least one real criterion (an empty glob is none), and
+    /// a bulk update needs something to change.
+    #[test]
+    fn empty_selectors_and_changes_are_recognised() {
+        assert!(Selector::default().is_empty());
+        assert!(Selector {
+            name_glob: Some(String::new()),
+            ..Default::default()
+        }
+        .is_empty());
+        for s in [
+            Selector {
+                types: vec!["subnet".into()],
+                ..Default::default()
+            },
+            Selector {
+                name_glob: Some("web*".into()),
+                ..Default::default()
+            },
+            Selector {
+                ids: vec!["a".into()],
+                ..Default::default()
+            },
+        ] {
+            assert!(!s.is_empty(), "{s:?}");
+        }
+        assert!(EntityChanges::default().is_empty());
+        assert!(!EntityChanges {
+            manual: Some(false),
+            ..Default::default()
+        }
+        .is_empty());
+    }
+
+    /// R3.21: while `quiet` is set (a dry run, or a bulk write that may still be rolled
+    /// back) a committed change neither moves the revision nor stamps the last change;
+    /// once it is cleared the next one does.
+    #[test]
+    fn a_quiet_change_is_invisible_to_project_changes() {
+        let ctx = egui::Context::default();
+        let mut app = TtgApp::build(&ctx, None, None, None);
+        let rev = app.mcp.revision;
+        app.mcp.quiet = true;
+        app.mcp.note_change();
+        assert_eq!(app.mcp.revision, rev);
+        assert!(app.mcp.last_change.is_none());
+        app.mcp.quiet = false;
+        app.mcp.note_change();
+        assert_eq!(app.mcp.revision, rev + 1);
+        assert!(app.mcp.last_change.is_some());
+    }
+
+    /// R3.20: the catalog fingerprint reaches the MCP state when the app is built, so
+    /// `serverInfo` can quote it.
+    #[test]
+    fn the_app_hands_the_catalog_fingerprint_to_the_server() {
+        let ctx = egui::Context::default();
+        let app = TtgApp::build(&ctx, None, None, None);
+        assert_eq!(app.mcp.catalog_hash.len(), 12);
+        assert_eq!(app.mcp.catalog_hash, app.catalog.fingerprint);
     }
 
     /// A screenshot with a size asks for that window size and remembers what to put

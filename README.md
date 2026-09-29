@@ -280,8 +280,9 @@ watch it happen. It is off until you switch it on:
    shows what the agent did. Saving to disk only happens when a tool is explicitly asked
    to, and opening another file goes through the same unsaved-changes prompt as the menu.
 
-The 47 tools cover reading (project, catalog, diagnostics, reachability, export preview,
-export diff, `view_get`, `view_export`, screenshot) and editing (add/update/move/resize/
+The 49 tools cover reading (project, catalog, catalog relations, diagnostics,
+reachability, export preview, one entity's HCL with `entity_preview`, export diff,
+`view_get`, `view_export`, screenshot) and editing (add/update/move/resize/
 reparent/delete entities, links, selection, views, tidy/align/distribute, settings,
 save/open/new, export with optional validate, undo/redo). An agent documents a view the
 way you would: `view_group_add`, `view_flow_add` (with `step` and `color`),
@@ -293,8 +294,13 @@ disturbing the drawing on it, `view_update { filter }` does the same by name, an
 `view_delete` removes one. `view_fit` plus `screenshot { view, fit, hide_panels, width,
 height }` let it look at what it drew — the window is resized for the capture and put
 back, so a big view is readable however small the window was.
-`project_apply` runs a list of diagram writes as **one**
-undo step and rolls all of them back if any fails; `project_changes` (or a subscription
+Reads can be narrowed (`diagnostics { entity, severity, provider }`, `project_get { fields,
+entities }`) and writes widened: `entity_update` and `link_add` take a `select` (`types`,
+`name_glob`, `ids`) to change or link many entities as one undo step. `serverInfo` and the
+instructions quote the TerraTofu version and a catalog hash, so a client knows when to
+refresh its cached tool list. `project_apply` runs a list of diagram writes as **one**
+undo step and rolls all of them back if any fails (with `dry_run: true` it plays the batch,
+reports which diagnostics it would add or clear, and keeps nothing); `project_changes` (or a subscription
 to the `ttg://project` resource) tells the agent when *you* changed something. The
 project, its summary, diagnostics, the catalog and the docs are also exposed as MCP
 resources (`ttg://project`, `ttg://catalog/<type>`, `ttg://docs/mapping-format`, …).

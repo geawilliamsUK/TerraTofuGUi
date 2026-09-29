@@ -12,6 +12,11 @@ use ttg_core::{Id, Relation, Tool, Value};
 
 type R = Result<J, String>;
 
+// Round 3 (WP16): dry runs, bulk writes, filtered reads, per-entity previews and the
+// hidden-flow warning. A child module so it can use this file's private helpers.
+mod round3;
+use round3::{gen_error_text, note_geometry};
+
 /// What `entity_move` / `entity_resize` were pointed at. Resources live in the project;
 /// notes, logical nodes and grouping boxes live in one view, so they are only movable
 /// while that view is the one being worked on.
@@ -347,10 +352,16 @@ impl TtgApp {
                 "from": ttg_core::view::end_name(&self.project, v, &f.from),
                 "to": ttg_core::view::end_name(&self.project, v, &f.to),
             })).collect::<Vec<_>>(),
-            "notes": v.notes.iter().map(|n| json!({
-                "id": n.id, "title": n.title, "body": n.body, "position": n.position, "size": n.size,
-                "anchor": n.anchor,
-            })).collect::<Vec<_>>(),
+            // `position` is where the note is drawn — what `entity_move` takes — whether
+            // or not it is anchored. An anchored note *stores* an offset from its anchor
+            // (so it follows it); that comes back as `offset`, null for a free note.
+            "notes": v.notes.iter().map(|n| {
+                let (position, offset) = note_geometry(&self.project, v, n, &visible);
+                json!({
+                    "id": n.id, "title": n.title, "body": n.body, "position": position, "offset": offset,
+                    "size": n.size, "anchor": n.anchor,
+                })
+            }).collect::<Vec<_>>(),
             "logicals": v.logicals.iter().map(|l| json!({
                 "id": l.id, "name": l.name, "icon": l.icon, "subtitle": l.subtitle,
                 "position": l.position, "size": l.size,
@@ -548,13 +559,23 @@ impl TtgApp {
                     }
                 }
                 app.finish(before);
-                Ok(json!({
+                let mut out = json!({
                     "status": "moved",
                     "id": target.id(),
                     "kind": target.kind(),
                     "position": {"x": x, "y": y},
                     "in_view": app.view_name(),
-                }))
+                });
+                // An anchored note stores an offset from its anchor: say which one.
+                if let Movable::Note(id) = &target {
+                    if let Some(v) = app.active_view() {
+                        let visible = |e: &str| app.is_visible(e);
+                        if let Some(n) = v.note(id) {
+                            out["offset"] = json!(note_geometry(&app.project, v, n, &visible).1);
+                        }
+                    }
+                }
+                Ok(out)
             }),
             AgentCommand::EntityResize { entity, w, h, view } => self.with_view(view, |app| {
                 let target = app.resolve_movable(&entity)?;
@@ -923,6 +944,7 @@ impl TtgApp {
                 dashed,
                 step,
                 color,
+                show_hidden,
             } => self.with_view(view, |app| {
                 app.require_view("flows")?;
                 let f = app
@@ -931,10 +953,7 @@ impl TtgApp {
                 let t = app
                     .resolve_end(&to)
                     .ok_or_else(|| format!("no resource, group or logical node \"{to}\""))?;
-                let id = app
-                    .add_flow(f, t, &label, dashed, step, color)
-                    .ok_or("a flow needs two different ends")?;
-                Ok(json!({"status": "flow added", "id": id, "in_view": app.view_name()}))
+                app.add_flow_checked(f, t, &label, dashed, step, color, show_hidden)
             }),
             AgentCommand::NoteAdd {
                 view,
@@ -1211,7 +1230,7 @@ impl TtgApp {
                     tool,
                     std::path::Path::new(&dir),
                 )
-                .map_err(|e| e.to_string())?;
+                .map_err(|e| gen_error_text(&e))?;
                 Ok(json!({
                     "status": "exported",
                     "tool": tool,
@@ -1225,44 +1244,33 @@ impl TtgApp {
             AgentCommand::Batch(cmds) => {
                 let before = self.snapshot();
                 let start = self.history.len();
-                let mut results = Vec::new();
-                for (i, c) in cmds.into_iter().enumerate() {
-                    if matches!(
-                        c,
-                        AgentCommand::Batch(_)
-                            | AgentCommand::Undo
-                            | AgentCommand::Redo
-                            | AgentCommand::ProjectOpen { .. }
-                            | AgentCommand::ProjectNew { .. }
-                            | AgentCommand::ProjectSave { .. }
-                            | AgentCommand::ExportRun { .. }
-                    ) {
-                        self.project = before;
-                        self.history.truncate(start);
-                        self.diag_dirty = true;
-                        return Err(format!(
-                            "command {i} ({}) is not allowed inside a batch; the batch was rolled back",
-                            c.label()
-                        ));
-                    }
-                    let label = c.label();
-                    match self.agent_exec(c) {
-                        Ok(v) => results.push(json!({ "tool": label, "result": v })),
-                        Err(e) => {
-                            self.project = before;
-                            self.history.truncate(start);
-                            self.diag_dirty = true;
-                            return Err(format!(
-                                "command {i} ({label}) failed: {e}; the batch was rolled back"
-                            ));
-                        }
-                    }
-                }
+                let results = self.run_batch(cmds, &before, start)?;
                 // Collapse the steps the sub-commands pushed into one.
                 self.history.truncate(start);
                 self.finish(before);
                 Ok(json!({ "status": "applied", "count": results.len(), "results": results }))
             }
+            // Round 3 (WP16): the calls that grew out of the friction report. Their
+            // bodies live in `round3.rs`.
+            AgentCommand::ProjectSlice { fields, entities } => self.project_slice(fields, entities),
+            AgentCommand::DiagnosticsFiltered {
+                entity,
+                severity,
+                provider,
+            } => self.diagnostics_filtered(entity, severity, provider),
+            AgentCommand::CatalogRelations {
+                source_type,
+                target_type,
+            } => self.catalog_relations_json(source_type, target_type),
+            AgentCommand::EntityPreview { entity, provider } => self.entity_preview_json(&entity, provider),
+            AgentCommand::DryRun(cmds) => self.dry_run(cmds),
+            AgentCommand::BulkUpdate { select, changes } => self.bulk_update(select, changes),
+            AgentCommand::BulkLink {
+                select,
+                target,
+                relation,
+                providers,
+            } => self.bulk_link(select, target, relation, providers),
             AgentCommand::ExportDiff { dir, provider } => {
                 let provider = provider.unwrap_or(self.project.settings.target_provider.clone());
                 let g = ttg_codegen::generate(
@@ -1271,7 +1279,7 @@ impl TtgApp {
                     &provider,
                     self.project.settings.tool,
                 )
-                .map_err(|e| e.to_string())?;
+                .map_err(|e| gen_error_text(&e))?;
                 let diffs = ttg_codegen::diff::against_dir(&g, std::path::Path::new(&dir));
                 Ok(json!({
                     "provider": provider,
@@ -1700,6 +1708,8 @@ impl TtgApp {
                 "kind": r.kind, "label": r.label, "targets": r.targets,
                 "cardinality": format!("{:?}", r.cardinality).to_lowercase(),
                 "via_parent": r.via_parent,
+                // Empty = every provider.
+                "providers": r.providers,
             })).collect::<Vec<_>>(),
             "providers": d.providers.iter().map(|(p, m)| (p.clone(), json!({
                 "status": format!("{:?}", m.status).to_lowercase(),
@@ -1712,16 +1722,7 @@ impl TtgApp {
     }
 
     fn diagnostics_json(&mut self) -> J {
-        let one = |p: &TtgApp, d: &ttg_codegen::Diagnostic| {
-            json!({
-                "entity": d.entity,
-                "name": d.entity.as_ref().and_then(|id| p.project.entity(id).map(|e| e.name.to_string())),
-                "severity": format!("{:?}", d.severity).to_lowercase(),
-                "code": format!("{:?}", d.code),
-                "provider": d.provider,
-                "message": d.message,
-            })
-        };
+        let one = |p: &TtgApp, d: &ttg_codegen::Diagnostic| round3::diag_json(&p.project, d);
         let mine: Vec<J> = self.diagnostics.iter().map(|d| one(self, d)).collect();
         let others: Vec<J> = self
             .other_diagnostics()
@@ -1813,7 +1814,7 @@ impl TtgApp {
             &provider,
             self.project.settings.tool,
         )
-        .map_err(|e| e.to_string())?;
+        .map_err(|e| gen_error_text(&e))?;
         Ok(json!({
             "provider": g.provider,
             "tool": g.tool,

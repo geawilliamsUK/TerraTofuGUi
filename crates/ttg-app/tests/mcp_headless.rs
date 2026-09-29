@@ -864,3 +864,994 @@ fn headless_view_editing() {
     let (_, back) = c.call("view_get", json!({"name": "Data flow"}));
     assert!(!back["flows"].as_array().unwrap().is_empty(), "{back}");
 }
+
+// ---------------------------------------------------------------------------------
+// Round 3 (WP16): MCP friction. R3.15-R3.17, R3.19-R3.21.
+// ---------------------------------------------------------------------------------
+
+fn tool_names(c: &mut Client) -> Vec<String> {
+    let tools = c.request("tools/list", json!({}));
+    tools["tools"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|t| t["name"].as_str().unwrap().to_string())
+        .collect()
+}
+
+/// The project as the agent reads it, in one piece.
+fn project_of(c: &mut Client) -> Value {
+    let (err, p) = c.call("project_get", json!({}));
+    assert!(!err, "{p}");
+    p
+}
+
+/// R3.20: `serverInfo` names TerraTofu and its version, and carries the catalog
+/// fingerprint, so a client that cached an older tool list knows to refresh it.
+#[test]
+fn headless_server_info_carries_the_version_and_catalog_hash() {
+    let server = start("three-tier.ttg.json");
+    let mut c = Client::new(&server);
+    let init = c.initialize();
+
+    let version = env!("CARGO_PKG_VERSION");
+    let hash = ttg_catalog::Catalog::builtin().fingerprint;
+    assert_eq!(hash.len(), 12, "{hash}");
+    let info = &init["serverInfo"];
+    assert_eq!(info["name"], json!("terratofu-gui"), "{init}");
+    assert_ne!(
+        info["name"].as_str().unwrap(),
+        "rmcp",
+        "serverInfo used to be rmcp's own"
+    );
+    assert_eq!(
+        info["version"],
+        json!(format!("{version}+catalog.{hash}")),
+        "{init}"
+    );
+    assert_eq!(info["title"], json!(format!("TerraTofu GUI {version}")), "{init}");
+    assert_eq!(
+        info["description"],
+        json!(format!("TerraTofu GUI {version}, catalog {hash}")),
+        "{init}"
+    );
+
+    let instructions = init["instructions"].as_str().unwrap();
+    assert!(
+        instructions.starts_with(&format!("TerraTofu GUI {version}, catalog {hash}: ")),
+        "{instructions}"
+    );
+    assert!(
+        instructions.contains("if your tool list lacks view_delete or entity_preview, refresh it"),
+        "{instructions}"
+    );
+    // The standing advice is still there after the identity line.
+    assert!(instructions.contains("Never call project_save"), "{instructions}");
+    assert!(instructions.contains("dry_run"), "{instructions}");
+
+    // The two tools the instructions name are listed.
+    let names = tool_names(&mut c);
+    for want in ["view_delete", "entity_preview", "catalog_relations"] {
+        assert!(names.iter().any(|n| n == want), "missing {want}: {names:?}");
+    }
+}
+
+/// R3.15: a project with an export-blocking error gives every export tool the same
+/// message, listing what blocks it; none of them answers with an empty error.
+#[test]
+fn headless_every_export_tool_reports_a_blocked_project_the_same_way() {
+    let server = start("kubernetes.ttg.json");
+    let mut c = Client::new(&server);
+    c.initialize();
+
+    let (err, upd) = c.call(
+        "entity_update",
+        json!({"entity": "platform", "config": {"addons": ["bogus_addon"]}}),
+    );
+    assert!(!err, "{upd}");
+
+    let dir = std::env::temp_dir().join(format!("ttg-blocked-{}", std::process::id()));
+    let dir = dir.to_string_lossy().to_string();
+    let (e1, preview) = c.call("export_preview", json!({}));
+    let (e2, diff) = c.call("export_diff", json!({"dir": dir}));
+    let (e3, run) = c.call("export_run", json!({"dir": dir}));
+    let (e4, one) = c.call("entity_preview", json!({"entity": "platform"}));
+    assert!(e1 && e2 && e3 && e4, "{preview} / {diff} / {run} / {one}");
+
+    let text = preview.as_str().unwrap_or_default().to_string();
+    assert!(
+        text.contains("block export") && text.contains("unknown add-on 'bogus_addon'"),
+        "{text}"
+    );
+    for (tool, other) in [
+        ("export_diff", &diff),
+        ("export_run", &run),
+        ("entity_preview", &one),
+    ] {
+        assert_eq!(
+            other.as_str().unwrap_or_default(),
+            text,
+            "{tool} must say what export_preview says"
+        );
+    }
+    assert!(
+        !std::path::Path::new(&dir).exists(),
+        "a blocked export writes nothing"
+    );
+}
+
+/// R3.16: an anchored note is reported at the position it is drawn — what `entity_move`
+/// takes — with the offset from its anchor that it actually stores beside it.
+#[test]
+fn headless_anchored_notes_report_position_and_offset() {
+    let server = start("job-pipeline.ttg.json");
+    let mut c = Client::new(&server);
+    c.initialize();
+
+    // The example's note is anchored to the jobs queue with a stored offset (30, -170).
+    let (err, v) = c.call("view_get", json!({"name": "Data flow"}));
+    assert!(!err, "{v}");
+    let note = v["notes"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|n| n["id"] == "note-queue")
+        .unwrap_or_else(|| panic!("{v}"));
+    assert_eq!(note["offset"], json!({"x": 30, "y": -170}), "{note}");
+    // The queue sits at (460, 200) in this view's layout; the note is drawn 170 above
+    // its top edge and 30 right of its right edge.
+    assert_eq!(note["position"]["y"], json!(30), "{note}");
+    let x0 = note["position"]["x"].as_i64().unwrap();
+    let queue_width = x0 - 30 - 460;
+    assert!(queue_width > 0, "{note}");
+
+    // The report's case: move it to (-1850, -1850) and read it back.
+    let (err, moved) = c.call(
+        "entity_move",
+        json!({"view": "Data flow", "entity": "note-queue", "x": -1850, "y": -1850}),
+    );
+    assert!(!err, "{moved}");
+    assert_eq!(moved["kind"], json!("note"), "{moved}");
+    assert_eq!(moved["position"], json!({"x": -1850, "y": -1850}), "{moved}");
+    assert_eq!(
+        moved["offset"],
+        json!({"x": -1850 - 460 - queue_width, "y": -1850 - 200}),
+        "the move reports the offset it stored: {moved}"
+    );
+    let (_, v) = c.call("view_get", json!({"name": "Data flow"}));
+    let note = v["notes"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|n| n["id"] == "note-queue")
+        .unwrap();
+    assert_eq!(
+        note["position"],
+        json!({"x": -1850, "y": -1850}),
+        "position is absolute, so it is what entity_move was given: {note}"
+    );
+    assert_eq!(
+        note["offset"],
+        json!({"x": -1850 - 460 - queue_width, "y": -2050}),
+        "{note}"
+    );
+
+    // A free note has no offset, and its position is its own.
+    let (err, free) = c.call(
+        "view_note_add",
+        json!({"view": "Data flow", "title": "Loose", "body": "Not anchored.", "x": 900, "y": -300}),
+    );
+    assert!(!err, "{free}");
+    let (_, v) = c.call("view_get", json!({"name": "Data flow"}));
+    let loose = v["notes"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|n| n["title"] == "Loose")
+        .unwrap();
+    assert_eq!(loose["position"], json!({"x": 900, "y": -300}), "{loose}");
+    assert_eq!(loose["offset"], json!(null), "{loose}");
+    let (err, moved) = c.call(
+        "entity_move",
+        json!({"view": "Data flow", "entity": "Loose", "x": 5, "y": 6}),
+    );
+    assert!(!err, "{moved}");
+    assert_eq!(moved["offset"], json!(null), "{moved}");
+
+    // The raw file shape is unchanged: project_get still holds the stored offset.
+    let p = project_of(&mut c);
+    let stored = p["views"][0]["notes"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|n| n["id"] == "note-queue")
+        .unwrap();
+    assert_eq!(
+        stored["position"],
+        json!({"x": -1850 - 460 - queue_width, "y": -2050}),
+        "{stored}"
+    );
+}
+
+/// R3.17: a flow to something the view hides is accepted with a warning; `show_hidden`
+/// shows it, in the same undo step, without rewriting what the view is for.
+#[test]
+fn headless_flows_to_hidden_entities_warn_and_can_show_them() {
+    let server = start("job-pipeline.ttg.json");
+    let mut c = Client::new(&server);
+    c.initialize();
+    let flows = |c: &mut Client| {
+        let (_, v) = c.call("view_get", json!({"name": "Data flow"}));
+        v["flows"].as_array().unwrap().len()
+    };
+    let filter_of = |c: &mut Client| {
+        let (_, v) = c.call("view_get", json!({"name": "Data flow"}));
+        v["filter"].clone()
+    };
+    let shown = |c: &mut Client, name: &str| {
+        let (_, v) = c.call("view_get", json!({"name": "Data flow"}));
+        v["shown"].as_array().unwrap().iter().any(|e| e["name"] == name)
+    };
+
+    // 1. Hidden by the filter's `hidden` list.
+    let (err, upd) = c.call(
+        "view_update",
+        json!({"view": "Data flow", "filter": {"hidden": ["JobRunner"], "hide_edges": true}}),
+    );
+    assert!(!err, "{upd}");
+    assert!(!shown(&mut c, "JobRunner"));
+    let n0 = flows(&mut c);
+    let (err, flow) = c.call(
+        "view_flow_add",
+        json!({"view": "Data flow", "from": "JobGateway", "to": "JobRunner", "label": "hands over", "step": 9}),
+    );
+    assert!(!err, "the flow is still accepted: {flow}");
+    assert_eq!(flow["status"], json!("flow added"), "{flow}");
+    assert_eq!(flow["hidden_ends"], json!(["JobRunner"]), "{flow}");
+    let warning = flow["warning"].as_str().unwrap_or_else(|| panic!("{flow}"));
+    for want in [
+        "\"JobRunner\"",
+        "hidden",
+        "Data flow",
+        "`hidden`",
+        "view_update",
+        "show_hidden",
+    ] {
+        assert!(warning.contains(want), "warning lacks {want}: {warning}");
+    }
+    assert_eq!(flows(&mut c), n0 + 1, "the flow is stored regardless");
+    assert!(!shown(&mut c, "JobRunner"), "a warning changes nothing else");
+    // A flow between things that are shown has no warning at all.
+    let (err, ok) = c.call(
+        "view_flow_add",
+        json!({"view": "Data flow", "from": "JobGateway", "to": "jobs queue", "label": "enqueue"}),
+    );
+    assert!(!err, "{ok}");
+    assert!(
+        ok.get("warning").is_none() && ok.get("hidden_ends").is_none(),
+        "{ok}"
+    );
+
+    // 2. `show_hidden` drops it from the list, and the flow and the filter are one step.
+    let n1 = flows(&mut c);
+    let (err, flow) = c.call(
+        "view_flow_add",
+        json!({"view": "Data flow", "from": "JobGateway", "to": "JobRunner", "label": "hands over", "show_hidden": true}),
+    );
+    assert!(!err, "{flow}");
+    assert!(flow.get("warning").is_none(), "{flow}");
+    assert_eq!(flow["shown"], json!(["JobRunner"]), "{flow}");
+    assert_eq!(flows(&mut c), n1 + 1);
+    assert_eq!(
+        filter_of(&mut c),
+        json!({"depth": 1, "hide_edges": true}),
+        "only `hidden` was touched"
+    );
+    assert!(shown(&mut c, "JobRunner"));
+    let (err, _) = c.call("undo", json!({}));
+    assert!(!err);
+    assert_eq!(flows(&mut c), n1, "one undo takes the flow and the filter change");
+    assert_eq!(
+        filter_of(&mut c)["hidden"],
+        json!(["fn-runner"]),
+        "and puts the hidden entry back"
+    );
+
+    // 3. An `only` filter shows what it names: the entity joins the list.
+    c.call(
+        "view_update",
+        json!({"view": "Data flow", "filter": {"only": ["JobGateway"]}}),
+    );
+    let (err, flow) = c.call(
+        "view_flow_add",
+        json!({"view": "Data flow", "from": "JobGateway", "to": "jobs db", "show_hidden": true}),
+    );
+    assert!(!err, "{flow}");
+    assert!(flow.get("warning").is_none(), "{flow}");
+    let f = filter_of(&mut c);
+    assert_eq!(f["only"], json!(["db-jobs", "fn-gateway"]), "{f}");
+
+    // 4. What the view is *for* is not rewritten: the flow is added, the warning says why.
+    c.call(
+        "view_update",
+        json!({"view": "Data flow", "filter": {"categories": ["serverless"]}}),
+    );
+    let (err, flow) = c.call(
+        "view_flow_add",
+        json!({"view": "Data flow", "from": "JobGateway", "to": "jobs db", "show_hidden": true}),
+    );
+    assert!(!err, "{flow}");
+    assert_eq!(flow["hidden_ends"], json!(["jobs db"]), "{flow}");
+    let warning = flow["warning"].as_str().unwrap_or_else(|| panic!("{flow}"));
+    assert!(
+        warning.contains("`categories`") && warning.contains("show_hidden only takes"),
+        "{warning}"
+    );
+    assert_eq!(
+        filter_of(&mut c),
+        json!({"categories": ["serverless"], "depth": 1}),
+        "categories are left alone"
+    );
+}
+
+/// R3.19 through the tool: an entity an `omit` check leaves out of Azure shows up as an
+/// info line while the target is AWS, and R3.21's filters find it.
+#[test]
+fn headless_diagnostics_filters_and_omitted_entities() {
+    let server = start("operations.ttg.json");
+    let mut c = Client::new(&server);
+    c.initialize();
+
+    // Azure Monitor has no platform metric for the oldest message age.
+    let (err, upd) = c.call(
+        "entity_update",
+        json!({"entity": "dead letters piling up", "config": {"metric": "queue_oldest_message_age"}}),
+    );
+    assert!(!err, "{upd}");
+
+    // AWS keeps the alarm and says nothing about it; Azure's loss is listed as info.
+    let (_, d) = c.call("diagnostics", json!({}));
+    assert!(
+        d["diagnostics"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|x| x["entity"] != json!("alm-dlq")),
+        "{d}"
+    );
+    let left_out = d["other_providers"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|x| x["entity"] == json!("alm-dlq"))
+        .unwrap_or_else(|| panic!("{d}"));
+    assert_eq!(left_out["severity"], json!("info"), "{left_out}");
+    assert_eq!(left_out["provider"], json!("azure"), "{left_out}");
+    let msg = left_out["message"].as_str().unwrap();
+    assert!(
+        msg.starts_with("[Microsoft Azure] ") && msg.ends_with("; left out of the Microsoft Azure export"),
+        "{msg}"
+    );
+
+    // `severity` and `entity` narrow both lists, and the reply counts what it kept.
+    let (err, info) = c.call("diagnostics", json!({"severity": "info"}));
+    assert!(!err, "{info}");
+    assert!(
+        info["diagnostics"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .chain(info["other_providers"].as_array().unwrap())
+            .all(|x| x["severity"] == "info"),
+        "{info}"
+    );
+    assert!(
+        info["other_providers"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|x| x["entity"] == "alm-dlq"),
+        "{info}"
+    );
+    assert_eq!(
+        info["matched"]["other_providers"],
+        json!(info["other_providers"].as_array().unwrap().len()),
+        "{info}"
+    );
+    assert!(
+        info["of"]["diagnostics"].as_u64().unwrap() >= info["matched"]["diagnostics"].as_u64().unwrap(),
+        "{info}"
+    );
+    let (err, one) = c.call("diagnostics", json!({"entity": "dead letters piling up"}));
+    assert!(!err, "{one}");
+    assert_eq!(one["diagnostics"], json!([]), "{one}");
+    assert_eq!(one["other_providers"].as_array().unwrap().len(), 1, "{one}");
+
+    // `provider` answers another provider's run: Azure's own warning, once.
+    let (err, az) = c.call(
+        "diagnostics",
+        json!({"provider": "azure", "entity": "alm-dlq", "severity": "warning"}),
+    );
+    assert!(!err, "{az}");
+    assert_eq!(az["provider"], json!("azure"), "{az}");
+    assert_eq!(az["target_provider"], json!("aws"), "{az}");
+    let mine = az["diagnostics"].as_array().unwrap();
+    assert_eq!(mine.len(), 1, "{az}");
+    assert!(
+        mine[0]["message"]
+            .as_str()
+            .unwrap()
+            .ends_with("; left out of the Microsoft Azure export"),
+        "{az}"
+    );
+    assert!(
+        mine[0]["provider"].is_null(),
+        "the provider's own line is untagged: {az}"
+    );
+    // From Azure's point of view the other providers have nothing to say about it.
+    assert!(
+        az["other_providers"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|x| x["entity"] != json!("alm-dlq")),
+        "{az}"
+    );
+    // Asking for another provider does not change the target.
+    let (_, s) = c.call("project_summary", json!({}));
+    assert_eq!(s["target_provider"], json!("aws"), "{s}");
+
+    // Bad filters are refused with the valid values.
+    let (err, msg) = c.call("diagnostics", json!({"severity": "loud"}));
+    assert!(
+        err && msg.as_str().unwrap().contains("error | warning | info"),
+        "{msg}"
+    );
+    let (err, msg) = c.call("diagnostics", json!({"provider": "oracle"}));
+    assert!(err && msg.as_str().unwrap().contains("known:"), "{msg}");
+    let (err, msg) = c.call("diagnostics", json!({"entity": "no such thing"}));
+    assert!(err, "{msg}");
+}
+
+/// R3.21: `project_get` slices, `catalog_relations` answers, `entity_preview` shows one
+/// entity's HCL.
+#[test]
+fn headless_slices_relations_and_entity_previews() {
+    let server = start("hardened.ttg.json");
+    let mut c = Client::new(&server);
+    c.initialize();
+
+    // --- project_get { fields }
+    let (err, p) = c.call("project_get", json!({"fields": ["nodes", "edges"]}));
+    assert!(!err, "{p}");
+    let mut keys: Vec<&str> = p.as_object().unwrap().keys().map(|k| k.as_str()).collect();
+    keys.sort();
+    assert_eq!(keys, ["edges", "nodes"], "{keys:?}");
+    assert!(p["nodes"].as_object().unwrap().len() > 5);
+    // The default is unchanged: everything.
+    let whole = project_of(&mut c);
+    for k in [
+        "schema_version",
+        "name",
+        "settings",
+        "containers",
+        "nodes",
+        "edges",
+    ] {
+        assert!(whole.get(k).is_some(), "missing {k}");
+    }
+
+    // --- project_get { entities }: those entities and the links among them.
+    let (err, s) = c.call(
+        "project_get",
+        json!({"entities": ["records store", "key-main", "access log store"]}),
+    );
+    assert!(!err, "{s}");
+    let mut ids: Vec<&str> = s["nodes"]
+        .as_object()
+        .unwrap()
+        .keys()
+        .map(|k| k.as_str())
+        .collect();
+    ids.sort();
+    assert_eq!(ids, ["key-main", "obj-audit", "obj-data"], "{s}");
+    assert!(
+        s.get("containers").is_some() && s["containers"].as_object().unwrap().is_empty(),
+        "{s}"
+    );
+    assert!(s.get("settings").is_none() && s.get("views").is_none(), "{s}");
+    let mut edges: Vec<String> = s["edges"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|e| {
+            format!(
+                "{} {} {}",
+                e["source"].as_str().unwrap(),
+                e["relation"].as_str().unwrap(),
+                e["target"].as_str().unwrap()
+            )
+        })
+        .collect();
+    edges.sort();
+    assert_eq!(
+        edges,
+        ["obj-data encrypted_with key-main", "obj-data logs_to obj-audit"],
+        "only the links between the named entities"
+    );
+    // Both at once.
+    let (_, s) = c.call(
+        "project_get",
+        json!({"entities": ["records store", "data key"], "fields": ["edges"]}),
+    );
+    assert_eq!(s.as_object().unwrap().len(), 1, "{s}");
+    assert_eq!(s["edges"].as_array().unwrap().len(), 1, "{s}");
+    // Refusals say what is valid.
+    let (err, msg) = c.call("project_get", json!({"fields": ["nodez"]}));
+    assert!(
+        err && msg.as_str().unwrap().contains("fields: schema_version"),
+        "{msg}"
+    );
+    let (err, msg) = c.call("project_get", json!({"entities": []}));
+    assert!(err, "{msg}");
+    let (err, msg) = c.call("project_get", json!({"entities": ["no such thing"]}));
+    assert!(err, "{msg}");
+
+    // --- catalog_relations
+    let (err, r) = c.call(
+        "catalog_relations",
+        json!({"source_type": "object_storage", "target_type": "encryption_key"}),
+    );
+    assert!(!err, "{r}");
+    let rows = r["relations"].as_array().unwrap();
+    assert_eq!(rows.len(), 1, "{r}");
+    assert_eq!(rows[0]["relation"], json!("encrypted_with"), "{r}");
+    assert_eq!(rows[0]["label"], json!("Encrypted with"), "{r}");
+    assert_eq!(rows[0]["cardinality"], json!("optional"), "{r}");
+    assert_eq!(rows[0]["providers"], json!(["aws", "gcp"]), "{r}");
+    assert!(rows[0]["targets"]
+        .as_array()
+        .unwrap()
+        .contains(&json!("encryption_key")));
+    assert_eq!(r["always_allowed"], json!(["depends_on"]), "{r}");
+    // Every relation a type has, and everything that can point at a type.
+    let (_, all) = c.call("catalog_relations", json!({"source_type": "object_storage"}));
+    assert!(all["relations"].as_array().unwrap().len() >= 2, "{all}");
+    assert!(all["relations"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .all(|x| x["source_type"] == "object_storage"));
+    let (_, into_key) = c.call("catalog_relations", json!({"target_type": "encryption_key"}));
+    let sources: std::collections::BTreeSet<&str> = into_key["relations"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|x| x["source_type"].as_str().unwrap())
+        .collect();
+    assert!(
+        sources.contains("object_storage") && sources.contains("relational_database"),
+        "{sources:?}"
+    );
+    let (err, msg) = c.call("catalog_relations", json!({"source_type": "no_such_type"}));
+    assert!(err && msg.as_str().unwrap().contains("unknown type"), "{msg}");
+
+    // --- entity_preview
+    let (err, pv) = c.call("entity_preview", json!({"entity": "records store"}));
+    assert!(!err, "{pv}");
+    assert_eq!(pv["provider"], json!("aws"), "{pv}");
+    assert_eq!(pv["file"], json!("storage.tf"), "{pv}");
+    let hcl = pv["hcl"].as_str().unwrap();
+    assert!(
+        hcl.contains("resource \"aws_s3_bucket\" \"records_store\"")
+            && !hcl.contains("resource \"aws_s3_bucket\" \"access_log_store\""),
+        "{hcl}"
+    );
+    assert!(
+        pv["addresses"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|a| a == "aws_s3_bucket.records_store"),
+        "{pv}"
+    );
+    // Exactly the text the full preview holds for it.
+    let (_, full) = c.call("export_preview", json!({}));
+    assert!(full["files"]["storage.tf"].as_str().unwrap().contains(hcl));
+    // Another provider's blocks, from the same project.
+    let (err, az) = c.call(
+        "entity_preview",
+        json!({"entity": "records store", "provider": "azure"}),
+    );
+    assert!(!err, "{az}");
+    assert!(az["hcl"].as_str().unwrap().contains("azurerm_"), "{az}");
+    // A grouping container on AWS produces nothing, and says why.
+    let (err, rg) = c.call("entity_preview", json!({"entity": "hardened"}));
+    assert!(!err, "{rg}");
+    assert_eq!(rg["hcl"], json!(""), "{rg}");
+    assert!(rg["no_blocks"].as_str().unwrap().contains("logical"), "{rg}");
+    assert_eq!(rg["addresses"], json!([]), "{rg}");
+    let (err, msg) = c.call(
+        "entity_preview",
+        json!({"entity": "records store", "provider": "oracle"}),
+    );
+    assert!(err && msg.as_str().unwrap().contains("unknown provider"), "{msg}");
+}
+
+/// R3.21: `project_apply { dry_run }` plays a batch and reports the diagnostics delta,
+/// then leaves nothing: not the project, not the undo or redo history, not the revision.
+#[test]
+fn headless_dry_run_reports_the_diagnostics_delta_and_leaves_nothing() {
+    let server = start("hardened.ttg.json");
+    let mut c = Client::new(&server);
+    c.initialize();
+
+    // A real edit first, so there is history to keep (and something to undo and redo).
+    let (err, added) = c.call(
+        "entity_add",
+        json!({"type_id": "event_queue", "name": "keeper", "x": 1500, "y": 900}),
+    );
+    assert!(!err, "{added}");
+    let revision = |c: &mut Client| {
+        c.call("project_changes", json!({})).1["revision"]
+            .as_u64()
+            .unwrap_or_default()
+    };
+    let (_, ch) = c.call("project_changes", json!({}));
+    let rev0 = ch["revision"].as_u64().unwrap();
+    let before = project_of(&mut c);
+    let (_, s0) = c.call("diagnostics", json!({}));
+
+    // The batch adds a second subnet on top of the first one's range: a new error.
+    let batch = json!([
+        {"tool": "entity_add", "args": {"type_id": "subnet", "name": "twin", "parent": "core"}},
+        {"tool": "entity_update", "args": {"entity": "twin", "config": {"cidr_block": "10.0.1.0/24"}}},
+        {"tool": "entity_update", "args": {"entity": "db a", "config": {"cidr_block": "10.0.1.0/24"}}}
+    ]);
+    let (err, dry) = c.call("project_apply", json!({"commands": batch, "dry_run": true}));
+    assert!(!err, "{dry}");
+    assert_eq!(dry["dry_run"], json!(true), "{dry}");
+    assert_eq!(dry["count"], json!(3), "{dry}");
+    assert_eq!(
+        dry["results"].as_array().unwrap().len(),
+        3,
+        "per-command results: {dry}"
+    );
+    assert_eq!(dry["results"][0]["tool"], json!("EntityAdd"), "{dry}");
+    let delta = &dry["diagnostics"];
+    assert_eq!(delta["provider"], json!("aws"), "{dry}");
+    let added_errors: Vec<&Value> = delta["added"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|d| d["severity"] == "error")
+        .collect();
+    assert!(
+        added_errors
+            .iter()
+            .any(|d| d["message"].as_str().unwrap().contains("overlaps")),
+        "the overlap the batch would create: {dry}"
+    );
+    assert!(
+        delta["errors"]["after"].as_u64().unwrap() > delta["errors"]["before"].as_u64().unwrap(),
+        "{dry}"
+    );
+    assert!(delta["removed"].is_array(), "{dry}");
+
+    // Nothing landed: the same project, diagnostics, revision, and no `twin`.
+    assert_eq!(project_of(&mut c), before, "the project must be untouched");
+    let (_, s1) = c.call("diagnostics", json!({}));
+    assert_eq!(s1, s0, "diagnostics are as they were");
+    assert_eq!(revision(&mut c), rev0, "a dry run is not a change");
+    let (_, ch) = c.call("project_changes", json!({}));
+    assert_eq!(ch["dirty"], json!(true)); // from the real edit above, as before
+    let (_, sum) = c.call("project_summary", json!({}));
+    assert!(
+        sum["entities"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|e| e["name"] != "twin"),
+        "{sum}"
+    );
+
+    // ...and not the history: one undo takes the real edit, not a phantom dry-run step,
+    // and one redo brings it back (the redo stack survives a dry run too).
+    let (err, _) = c.call("undo", json!({}));
+    assert!(!err);
+    let (_, sum) = c.call("project_summary", json!({}));
+    assert!(sum["entities"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .all(|e| e["name"] != "keeper"));
+    let (err, dry) = c.call("project_apply", json!({"commands": batch, "dry_run": true}));
+    assert!(!err, "{dry}");
+    let (err, _) = c.call("redo", json!({}));
+    assert!(!err, "the dry run must not clear the redo stack");
+    let (_, sum) = c.call("project_summary", json!({}));
+    assert!(sum["entities"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|e| e["name"] == "keeper"));
+
+    // A batch that would fail fails the same way as a real one, and still leaves nothing.
+    let rev = revision(&mut c);
+    let (err, msg) = c.call(
+        "project_apply",
+        json!({"commands": [
+            {"tool": "entity_add", "args": {"type_id": "subnet", "name": "half", "parent": "core"}},
+            {"tool": "entity_add", "args": {"type_id": "no_such_type"}}
+        ], "dry_run": true}),
+    );
+    assert!(err, "{msg}");
+    assert!(msg.as_str().unwrap().contains("rolled back"), "{msg}");
+    assert_eq!(revision(&mut c), rev);
+    let (_, sum) = c.call("project_summary", json!({}));
+    assert!(sum["entities"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .all(|e| e["name"] != "half"));
+
+    // A batch that would clear an error reports it as removed. Make one for real first:
+    // two subnets on the same range.
+    let (err, upd) = c.call(
+        "entity_update",
+        json!({"entity": "db b", "config": {"cidr_block": "10.40.10.0/24"}}),
+    );
+    assert!(!err, "{upd}");
+    let (_, broken) = c.call("diagnostics", json!({"severity": "error"}));
+    assert_eq!(
+        broken["diagnostics"].as_array().unwrap().len(),
+        2,
+        "both subnets overlap: {broken}"
+    );
+    let (err, dry) = c.call(
+        "project_apply",
+        json!({"commands": [
+            {"tool": "entity_update", "args": {"entity": "db b", "config": {"cidr_block": "10.40.11.0/24"}}}
+        ], "dry_run": true}),
+    );
+    assert!(!err, "{dry}");
+    let removed = dry["diagnostics"]["removed"].as_array().unwrap();
+    assert_eq!(removed.len(), 2, "both overlap errors would go: {dry}");
+    assert!(removed
+        .iter()
+        .all(|d| d["severity"] == "error" && d["message"].as_str().unwrap().contains("overlaps")));
+    assert!(
+        dry["diagnostics"]["added"].as_array().unwrap().is_empty(),
+        "{dry}"
+    );
+    assert_eq!(
+        dry["diagnostics"]["errors"],
+        json!({"before": 2, "after": 0}),
+        "{dry}"
+    );
+    // ...and the overlap is still there: the fix was never applied.
+    let (_, still) = c.call("diagnostics", json!({"severity": "error"}));
+    assert_eq!(still["diagnostics"].as_array().unwrap().len(), 2, "{still}");
+}
+
+/// R3.21: `entity_update { select }` and `link_add { select }` act on many entities as one
+/// undo step, refuse an empty or non-matching selection, and are all-or-nothing.
+#[test]
+fn headless_bulk_update_and_link_are_one_undo_step() {
+    let server = start("hardened.ttg.json");
+    let mut c = Client::new(&server);
+    c.initialize();
+    let node = |c: &mut Client, id: &str| {
+        let (_, s) = c.call("project_get", json!({"entities": [id]}));
+        s["nodes"][id].clone()
+    };
+    let edge_count = |c: &mut Client| {
+        let (_, s) = c.call("project_get", json!({"fields": ["edges"]}));
+        s["edges"].as_array().unwrap().len()
+    };
+    let revision = |c: &mut Client| {
+        c.call("project_changes", json!({})).1["revision"]
+            .as_u64()
+            .unwrap()
+    };
+
+    // --- entity_update { select }: the two buckets, one of which already has it on.
+    assert_eq!(node(&mut c, "obj-audit")["config"]["versioning"], json!(false));
+    let rev0 = revision(&mut c);
+    let (err, r) = c.call(
+        "entity_update",
+        json!({"select": {"types": ["object_storage"]}, "config": {"versioning": true}}),
+    );
+    assert!(!err, "{r}");
+    assert_eq!(r["selected"], json!(2), "{r}");
+    assert_eq!(r["changed"], json!(1), "only the bucket that was off: {r}");
+    assert_eq!(r["unchanged"], json!(1), "{r}");
+    let by_name = |name: &str| {
+        r["entities"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|e| e["name"] == name)
+            .unwrap_or_else(|| panic!("{r}"))
+            .clone()
+    };
+    assert_eq!(by_name("access log store")["changed"], json!(true), "{r}");
+    assert_eq!(by_name("records store")["changed"], json!(false), "{r}");
+    assert_eq!(node(&mut c, "obj-audit")["config"]["versioning"], json!(true));
+    assert_eq!(revision(&mut c), rev0 + 1, "one change, one revision");
+    // One undo reverts both.
+    let (err, _) = c.call("undo", json!({}));
+    assert!(!err);
+    assert_eq!(node(&mut c, "obj-audit")["config"]["versioning"], json!(false));
+    // A glob selects by name, case-insensitively.
+    let (err, r) = c.call(
+        "entity_update",
+        json!({"select": {"name_glob": "*STORE"}, "config": {"expire_days": 400}}),
+    );
+    assert!(!err, "{r}");
+    assert_eq!(r["selected"], json!(2), "{r}");
+    assert_eq!(node(&mut c, "obj-data")["config"]["expire_days"], json!(400));
+    assert_eq!(node(&mut c, "obj-audit")["config"]["expire_days"], json!(400));
+    let (err, _) = c.call("undo", json!({}));
+    assert!(!err);
+    assert_eq!(node(&mut c, "obj-audit")["config"]["expire_days"], json!(90));
+    // `ids` take ids or names, and combine with the other criteria (all must hold).
+    let (err, r) = c.call(
+        "entity_update",
+        json!({"select": {"ids": ["records store", "q-work"], "types": ["object_storage"]}, "config": {"versioning": true}}),
+    );
+    assert!(!err, "{r}");
+    assert_eq!(r["selected"], json!(1), "{r}");
+
+    // --- refusals: empty, matching nothing, one entity refusing, a rename.
+    let (err, msg) = c.call(
+        "entity_update",
+        json!({"select": {}, "config": {"versioning": true}}),
+    );
+    assert!(
+        err && msg.as_str().unwrap().contains("selection is empty"),
+        "{msg}"
+    );
+    let (err, msg) = c.call(
+        "entity_update",
+        json!({"select": {"name_glob": ""}, "config": {"versioning": true}}),
+    );
+    assert!(
+        err && msg.as_str().unwrap().contains("selection is empty"),
+        "{msg}"
+    );
+    let (err, msg) = c.call(
+        "entity_update",
+        json!({"select": {"types": ["cache"]}, "config": {"size": "small"}}),
+    );
+    assert!(
+        err && msg.as_str().unwrap().contains("matched no entity"),
+        "{msg}"
+    );
+    let (err, msg) = c.call(
+        "entity_update",
+        json!({"select": {"types": ["no_such_type"]}, "config": {"size": "small"}}),
+    );
+    assert!(err && msg.as_str().unwrap().contains("unknown type"), "{msg}");
+    let (err, msg) = c.call(
+        "entity_update",
+        json!({"select": {"types": ["object_storage"]}, "name": "same"}),
+    );
+    assert!(err && msg.as_str().unwrap().contains("cannot rename"), "{msg}");
+    let (err, msg) = c.call("entity_update", json!({"select": {"types": ["object_storage"]}}));
+    assert!(
+        err && msg.as_str().unwrap().contains("nothing to update"),
+        "{msg}"
+    );
+    let (err, msg) = c.call(
+        "entity_update",
+        json!({"entity": "records store", "select": {"types": ["object_storage"]}, "config": {}}),
+    );
+    assert!(err && msg.as_str().unwrap().contains("not both"), "{msg}");
+    let (err, msg) = c.call("entity_update", json!({"config": {"versioning": true}}));
+    assert!(err && msg.as_str().unwrap().contains("`entity`"), "{msg}");
+    // All-or-nothing: the queue has no `versioning`, so the bucket is not touched either.
+    let before = project_of(&mut c);
+    let rev = revision(&mut c);
+    let (err, msg) = c.call(
+        "entity_update",
+        json!({"select": {"ids": ["obj-audit", "q-work"]}, "config": {"versioning": true}}),
+    );
+    assert!(err, "{msg}");
+    let text = msg.as_str().unwrap();
+    assert!(
+        text.contains("changed nothing")
+            && text.contains("\"work queue\" (event_queue)")
+            && text.contains("no field \"versioning\""),
+        "{text}"
+    );
+    assert!(
+        !text.contains("access log store"),
+        "only the refusals are listed: {text}"
+    );
+    assert_eq!(project_of(&mut c), before, "nothing changed");
+    assert_eq!(revision(&mut c), rev, "and no revision was spent");
+
+    // --- link_add { select }: the pain point. Point every bucket at the key.
+    let (err, rel) = c.call(
+        "catalog_relations",
+        json!({"source_type": "object_storage", "target_type": "encryption_key"}),
+    );
+    assert!(
+        !err && rel["relations"][0]["relation"] == "encrypted_with",
+        "{rel}"
+    );
+    let edges0 = edge_count(&mut c);
+    let rev0 = revision(&mut c);
+    let (err, r) = c.call(
+        "link_add",
+        json!({"select": {"types": ["object_storage"]}, "relation": "encrypted_with", "target": "data key"}),
+    );
+    assert!(!err, "{r}");
+    assert_eq!(r["status"], json!("linked"), "{r}");
+    assert_eq!(r["linked"], json!(["access log store"]), "{r}");
+    assert_eq!(r["already_linked"], json!(["records store"]), "{r}");
+    assert_eq!(r["skipped"], json!([]), "{r}");
+    assert_eq!(edge_count(&mut c), edges0 + 1);
+    assert_eq!(revision(&mut c), rev0 + 1);
+    let (err, _) = c.call("undo", json!({}));
+    assert!(!err);
+    assert_eq!(edge_count(&mut c), edges0, "one undo removes every new link");
+    // The target is skipped when it matches its own selection.
+    let (err, r) = c.call(
+        "link_add",
+        json!({"select": {"name_glob": "*key"}, "relation": "depends_on", "target": "data key"}),
+    );
+    assert!(!err, "{r}");
+    assert_eq!(r["status"], json!("no new links"), "{r}");
+    assert_eq!(r["skipped"][0]["reason"], json!("it is the target itself"), "{r}");
+    // A relation a type may not have refuses the whole call and names each refusal.
+    let (err, msg) = c.call(
+        "link_add",
+        json!({"select": {"types": ["object_storage", "subnet"]}, "relation": "encrypted_with", "target": "data key"}),
+    );
+    assert!(err, "{msg}");
+    let text = msg.as_str().unwrap();
+    assert!(
+        text.contains("changed nothing")
+            && text.contains("\"db a\" (subnet)")
+            && text.contains("\"db b\" (subnet)")
+            && text.contains("does not allow 'encrypted_with'"),
+        "{text}"
+    );
+    assert_eq!(edge_count(&mut c), edges0, "the buckets were not linked either");
+    let (err, msg) = c.call(
+        "link_add",
+        json!({"select": {}, "relation": "encrypted_with", "target": "data key"}),
+    );
+    assert!(
+        err && msg.as_str().unwrap().contains("selection is empty"),
+        "{msg}"
+    );
+    let (err, msg) = c.call(
+        "link_add",
+        json!({"source": "records store", "select": {"types": ["object_storage"]}, "relation": "encrypted_with", "target": "data key"}),
+    );
+    assert!(err && msg.as_str().unwrap().contains("not both"), "{msg}");
+
+    // --- both are batchable, and a dry run of a bulk write keeps nothing.
+    let bulk = json!([
+        {"tool": "entity_update", "args": {"select": {"types": ["object_storage"]}, "config": {"versioning": true}}},
+        {"tool": "link_add", "args": {"select": {"types": ["object_storage"]}, "relation": "encrypted_with", "target": "data key"}}
+    ]);
+    let before = project_of(&mut c);
+    let (err, dry) = c.call("project_apply", json!({"commands": bulk, "dry_run": true}));
+    assert!(!err, "{dry}");
+    assert_eq!(dry["count"], json!(2), "{dry}");
+    assert_eq!(project_of(&mut c), before);
+    let (err, applied) = c.call("project_apply", json!({"commands": bulk}));
+    assert!(!err, "{applied}");
+    assert_eq!(edge_count(&mut c), edges0 + 1);
+    let (err, _) = c.call("undo", json!({}));
+    assert!(!err);
+    assert_eq!(
+        project_of(&mut c),
+        before,
+        "one undo for the whole batch, bulk writes included"
+    );
+}
