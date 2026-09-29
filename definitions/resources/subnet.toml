@@ -116,8 +116,9 @@ ip_cidr_range            = { field = "cidr_block" }
 region                   = { var = "region" }
 network                  = { relation = "network_membership", attr = "id" }
 private_ip_google_access = { value = true }
-enable_flow_logs         = { if = { relation = "network_membership", target_field = "flow_logs" }, then = { value = true } }
 
+# The `log_config` block on its own turns flow logs on. The `enable_flow_logs` argument
+# that used to sit beside it is redundant on google 6 and removed in google 7.
 [[providers.gcp.blocks.nested]]
 block = "log_config"
 when = { relation = "network_membership", target_field = "flow_logs" }

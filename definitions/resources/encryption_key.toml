@@ -48,10 +48,6 @@ file = "security"
 key = "account"
 resource = "aws_caller_identity"
 
-[[providers.aws.data]]
-key = "region"
-resource = "aws_region"
-
 [[providers.aws.blocks]]
 key = "main"
 resource = "aws_kms_key"
@@ -85,7 +81,7 @@ Resource  = { value = "*" }
 [providers.aws.blocks.args.policy.args.object.Statement.list.object]
 Sid       = { value = "CloudWatchLogs" }
 Effect    = { value = "Allow" }
-Principal = { object = { Service = { func = "format", args = [ { value = "logs.%s.amazonaws.com" }, { self_data = "region", attr = "name" } ] } } }
+Principal = { object = { Service = { func = "format", args = [ { value = "logs.%s.amazonaws.com" }, { var = "region" } ] } } }
 Action    = { value = ["kms:Encrypt*", "kms:Decrypt*", "kms:ReEncrypt*", "kms:GenerateDataKey*", "kms:Describe*"] }
 Resource  = { value = "*" }
 

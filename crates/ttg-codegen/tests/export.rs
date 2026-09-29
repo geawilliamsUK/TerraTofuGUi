@@ -1385,7 +1385,7 @@ fn hardened_example_carries_the_posture_on_every_provider() {
     // The key policy lets the account administer it and the log / event services use it.
     assert!(sec.contains("Sid = \"AccountAdministration\""), "{sec}");
     assert!(
-        sec.contains("format(\"logs.%s.amazonaws.com\", data.aws_region.data_key_region.name)"),
+        sec.contains("format(\"logs.%s.amazonaws.com\", var.region)"),
         "{sec}"
     );
     assert!(
@@ -1778,10 +1778,11 @@ fn kubernetes_example_node_pools_and_workload_identity() {
         aws.manual_steps.iter().map(|s| &s.title).collect::<Vec<_>>()
     );
     // A database with IAM authentication: rds-db:connect on the instance's resource id
-    // and this workload's database user, with the account and region read from data.
+    // and this workload's database user, with the account read from data and the region
+    // from the provider's variable (`data.aws_region`'s `name` is deprecated in AWS 6).
     assert!(c.contains("data \"aws_caller_identity\" \"api_account\""), "{c}");
     assert!(
-        c.contains("Sid = \"DatabaseConnect\", Effect = \"Allow\", Action = [\"rds-db:connect\"], Resource = formatlist(\"arn:aws:rds-db:%s:%s:dbuser:%s/%s\", data.aws_region.api_region.name, data.aws_caller_identity.api_account.account_id, [aws_db_instance.core_db.resource_id], \"api\")"),
+        c.contains("Sid = \"DatabaseConnect\", Effect = \"Allow\", Action = [\"rds-db:connect\"], Resource = formatlist(\"arn:aws:rds-db:%s:%s:dbuser:%s/%s\", var.region, data.aws_caller_identity.api_account.account_id, [aws_db_instance.core_db.resource_id], \"api\")"),
         "{c}"
     );
     assert!(
@@ -3023,9 +3024,11 @@ fn flow_logs_take_the_shape_each_provider_gives_them() {
         "{aws}"
     );
 
-    // Google Cloud logs flows per subnet, from the network's own setting.
+    // Google Cloud logs flows per subnet, from the network's own setting: a `log_config`
+    // block turns them on (`enable_flow_logs` is gone in google 7).
     let gcp = squash(&generate(&p, &cat, "gcp", Tool::OpenTofu).unwrap().files["network.tf"]);
-    assert_eq!(gcp.matches("enable_flow_logs = true").count(), 2, "{gcp}");
+    assert!(!gcp.contains("enable_flow_logs"), "{gcp}");
+    assert_eq!(gcp.matches("log_config {").count(), 2, "{gcp}");
     assert_eq!(
         gcp.matches("aggregation_interval = \"INTERVAL_5_SEC\"").count(),
         2

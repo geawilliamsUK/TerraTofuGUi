@@ -51,8 +51,8 @@ key = "main"
 resource = "azurerm_storage_queue"
 
 [providers.azure.blocks.args]
-name                 = { field = "name", transform = "kebab" }
-storage_account_name = { self_block = "sa", attr = "name" }
+name               = { field = "name", transform = "kebab" }
+storage_account_id = { self_block = "sa", attr = "id" }
 
 [providers.azure.outputs]
 id                = { attr = "id", description = "Queue id" }

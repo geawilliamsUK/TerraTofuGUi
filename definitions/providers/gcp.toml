@@ -9,10 +9,10 @@ schema_version = 1
 [provider]
 id = "gcp"
 display_name = "Google Cloud"
-description = "hashicorp/google provider, 6.x series."
+description = "hashicorp/google provider, 7.x series (the mappings also validate on 6.x)."
 source_namespace = "hashicorp"
 source_name = "google"
-version_constraint = "~> 6.0"
+version_constraint = "~> 7.0"
 
 [[variables]]
 name = "project"

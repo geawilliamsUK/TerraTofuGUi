@@ -10,10 +10,10 @@ schema_version = 1
 [provider]
 id = "aws"
 display_name = "Amazon Web Services"
-description = "hashicorp/aws provider, 5.x series."
+description = "hashicorp/aws provider, 6.x series (the mappings also validate on 5.x)."
 source_namespace = "hashicorp"
 source_name = "aws"
-version_constraint = "~> 5.0"
+version_constraint = "~> 6.0"
 
 # Provider-level variables. Values come from the project's settings.provider_settings.aws
 # map and are emitted into variables.tf with these defaults.

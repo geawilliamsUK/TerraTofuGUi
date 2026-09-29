@@ -247,16 +247,14 @@ when = { relation = "iam_binding", target_field = "trusted_service", not_equals 
 severity = "error"
 message = "\"{name}\" runs as a role that pods cannot assume; set the linked Role's 'Assumable by' to kubernetes so its trust policy names pods.eks.amazonaws.com"
 
-# The account and region only matter for the rds-db:connect ARN, which cannot be built
-# from a resource attribute: it names the database user, not the instance.
+# The account (and the provider's region variable) only matter for the rds-db:connect
+# ARN, which cannot be built from a resource attribute: it names the database user, not
+# the instance. The region comes from `var.region` rather than an `aws_region` data
+# source: the data source's `name` is deprecated in AWS provider 6 and its replacement,
+# `region`, does not exist in 5.
 [[providers.aws.data]]
 key = "account"
 resource = "aws_caller_identity"
-when = { relation = "attribute_reference", target_type = "relational_database", target_field = "iam_authentication" }
-
-[[providers.aws.data]]
-key = "region"
-resource = "aws_region"
 when = { relation = "attribute_reference", target_type = "relational_database", target_field = "iam_authentication" }
 
 [[providers.aws.blocks]]
@@ -334,7 +332,7 @@ then = { object = { Sid = { value = "FileSystem" }, Effect = { value = "Allow" }
 # the *database user*, not the instance, so the ARN is assembled rather than referenced.
 [[providers.aws.blocks.args.policy.args.object.Statement.list]]
 if = { relation = "attribute_reference", target_type = "relational_database", target_field = "iam_authentication" }
-then = { object = { Sid = { value = "DatabaseConnect" }, Effect = { value = "Allow" }, Action = { value = ["rds-db:connect"] }, Resource = { func = "formatlist", args = [ { value = "arn:aws:rds-db:%s:%s:dbuser:%s/%s" }, { self_data = "region", attr = "name" }, { self_data = "account", attr = "account_id" }, { relation = "attribute_reference", target_type = "relational_database", attr = "resource_id", wrap = "list" }, { field = "db_user", fallback = { field = "service_account", fallback = { field = "name", transform = "kebab" } } } ] } } }
+then = { object = { Sid = { value = "DatabaseConnect" }, Effect = { value = "Allow" }, Action = { value = ["rds-db:connect"] }, Resource = { func = "formatlist", args = [ { value = "arn:aws:rds-db:%s:%s:dbuser:%s/%s" }, { var = "region" }, { self_data = "account", attr = "account_id" }, { relation = "attribute_reference", target_type = "relational_database", attr = "resource_id", wrap = "list" }, { field = "db_user", fallback = { field = "service_account", fallback = { field = "name", transform = "kebab" } } } ] } } }
 
 [providers.aws.outputs]
 service_account = { attr = "service_account", description = "ServiceAccount the pods must run as" }
