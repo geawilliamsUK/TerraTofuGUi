@@ -50,6 +50,7 @@ options = ["a", "b"]          # enum: the only allowed values
 pattern = "^[a-z0-9-]+$"      # optional regex (string only); no look-around
 pattern_hint = "lowercase…"   # shown when the pattern fails
 manifests = true              # v2, optional: read by the Kubernetes manifests export (§2.7)
+state_secret = true           # optional, bool fields only: true puts a secret into the state
 ```
 
 `manifests = true` says that no provider mapping reads the field — the Kubernetes
@@ -58,6 +59,13 @@ counts as used by every provider: the inspector shows it in concrete mode and sa
 reads it, and `ttg catalog --strict` does not report it as unused. Only types the export
 reads may declare it (`ttg_catalog::MANIFEST_TYPES`: `kubernetes_workload`), and only on
 abstract fields.
+
+`state_secret` marks a switch whose `true` makes the configuration itself create a secret
+that Terraform keeps in its state — the Secret's *Generate the value* (`random_password`).
+The diagnostics then warn while the project's state is local or unencrypted ("the
+generated value is stored in plain text in local state; configure a remote backend and
+state encryption (Settings)"; see ARCHITECTURE.md §6.5). The loader refuses it on a field
+that is not a `bool`.
 
 ### 1.2 Relations
 
@@ -595,6 +603,17 @@ block = "features"
 
 The Terraform / OpenTofu difference (registry address prefix, `required_version`) is not
 part of the definition; it is applied by `ttg-codegen::tool::Profile`.
+
+`version_constraint` is the *tested default*: every example validates against the newest
+release it admits (the validate suite runs on exactly that), and the bundled schema index
+(`ttg-schema`) is built from it. A project can pin another constraint per provider
+(`Settings::provider_versions`, Settings ▸ Provider versions, `provider_versions` on the
+MCP `settings_set` tool); the diagnostics then say when the pin is outside the major
+version the schema describes, and otherwise check the curated mappings the project uses
+against it, naming any that would break (ARCHITECTURE.md §6.6). When you move a default to
+a new major, regenerate the index (`ttg schema refresh --out
+crates/ttg-schema/data/index.json.gz`) and run the `schema_check` and `validate_examples`
+tests.
 
 ### 4.1 Provider aliases
 

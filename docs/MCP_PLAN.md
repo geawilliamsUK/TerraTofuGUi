@@ -198,6 +198,21 @@ helpers and stays out of the way of the big `agent_exec` match):
   `already_linked` and `skipped`. Both work inside `project_apply`, including
   `dry_run`.
 
+`settings_set` (round 3, 2026-09-29): besides `tool`, `provider`, `provider_settings`,
+`tags` and `kubernetes_manifests` it now takes `backend` (`{"type": "s3", "bucket": …, "region": …}` flat, or the
+`{type, args}` shape `project_get` returns, so a read can be written back; `null` clears
+it), `state_encryption` (bool), `state_encryption_key` (an Encryption Key's id or name;
+`null` clears it) and `provider_versions` (`{"aws": "~> 6.0"}`, merged into the pins; `null`
+or `""` removes one). Everything is checked before anything changes, with the same rules as
+the settings panel and the export gate (`ttg_codegen::state::check_backend`,
+`ttg_codegen::versions::check_constraint`): an unknown backend type, a missing required
+key, a key that is not an Encryption Key or a malformed constraint is refused with what
+would be right. A key the tool does not know — `backnd`, or the `state_encrypt` of an
+older client — is refused too, listing the valid keys, instead of being dropped with
+"settings updated": `SettingsArgs` collects unknown keys through a flattened map that
+`SettingsArgs::into_command` rejects, for direct calls and inside `project_apply` alike.
+The reply echoes the state and version settings.
+
 Added 2026-09-09: `project_apply` (a list of `{tool, args}` diagram writes executed as
 one undo step; `AgentCommand::Batch` snapshots first, runs each sub-command through the
 normal path, then truncates the history back and pushes one step; any failure restores

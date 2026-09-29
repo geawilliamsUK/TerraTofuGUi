@@ -657,6 +657,73 @@ secrets and mounts.
   needed), run both render scripts against a stand-in for `tofu output`, and check that two
   exports are byte-identical.
 
+## Round 3: state and versions (gap report R3.2, R3.4, R3.14, done 2026-09-29)
+
+A production design exported with local state: the database password and a session key
+that `secret.generate_value` creates went into a `terraform.tfstate` on the laptop, and
+neither the backend nor state encryption could be set through the MCP — `settings_set`
+accepted both keys and dropped them with "settings updated". The AWS provider was pinned
+to 5.x a year after 6 shipped. The IR, the emitter and the settings panel already knew a
+backend type and an encryption flag; this round builds on them (ARCHITECTURE.md §6.5–6.7).
+
+- **Backends** — `s3` (with `use_lockfile`, so no DynamoDB table), `azurerm` and `gcs`, plus
+  `local`. The keys each type takes are one table (`state::BACKENDS`) and one check
+  (`state::check_backend`) shared by the settings panel, `settings_set` and the export
+  gate. The state object is `<key_prefix>/terraform.tfstate`, `key_prefix` defaulting to the
+  project name, and `state::state_key` already takes an environment that goes between the
+  two, for when named environments arrive. The block moves from `backend.tf` into the one
+  `terraform {}` block of `versions.tf`; `required_version` rises to OpenTofu 1.10 /
+  Terraform 1.11 for S3 lock files.
+- **State encryption** — the placeholder `pbkdf2` block becomes a real design: an
+  `encryption {}` block with `state` and `plan` both `enforced`, keyed by `aws_kms` on AWS
+  and `gcp_kms` on Google Cloud when an Encryption Key is chosen
+  (`state_encryption_key`), a `state_passphrase` otherwise. Azure keeps the passphrase:
+  OpenTofu 1.10 had no Azure key provider; 1.12 has `azure_vault`, but using it means moving
+  a Key Vault out of the main root, which is a larger change (an info diagnostic says so).
+  Terraform gets no block and a warning.
+- **The bootstrap root** — the key must exist before the state it encrypts, and the bucket
+  before `init` can use it, so `bootstrap/` is generated beside the main root: a small
+  project of its own (the state bucket as an Object Storage node — versioning, public access
+  blocked, TLS only — plus the chosen key) run through the ordinary emitter, so both get
+  their curated mappings and the key keeps the policy the other resources rely on. The main
+  root treats the key as external; its ARN / id arrive as variables the bootstrap root
+  outputs. It validates like everything else: the validate suite exports `hardened` with
+  each backend and encryption on, and runs `validate` on every root it finds. `bootstrap/`
+  and the manifests' `k8s/` are one mechanism, `ttg-codegen::owned`: a table of what the
+  export owns, which `export` cleans up and `diff` reports, never touching state,
+  `.terraform/` or `k8s/rendered/`.
+- **Secrets in state** — a new field attribute, `state_secret = true` (the Secret's
+  *Generate the value*; the only field whose description says it lands in state), warns
+  while such a value meets local or unencrypted state.
+- **Provider versions** — `settings.provider_versions` pins a provider per project
+  (Settings ▸ Provider versions, `settings_set`). The diagnostics say when a pin is outside
+  the major the bundled schema describes, and otherwise run the curated-mapping schema
+  check (moved from the `schema_check` test into `versions::mapping_findings`) over the
+  types the project uses, naming any mapping that breaks. `ttg schema refresh
+  --provider-version aws="~> 7.0"` builds an index for another major.
+- **Probing the new majors** — every example exported with the new constraint and run
+  through `tofu init && tofu validate`:
+  - *AWS 6* (6.66.0): everything validated; the only finding was a deprecation —
+    `data.aws_region.name` — in the Encryption Key's key policy and a workload's
+    `rds-db:connect` ARN. Both now use the provider's `region` variable, which is valid on
+    5 and 6 (6's replacement attribute, `region`, does not exist on 5). The default moves
+    to `~> 6.0`; the examples also still validate on 5.100.
+  - *google 7* (7.46.1): `enable_flow_logs` is gone from `google_compute_subnetwork`. The
+    subnet mapping already wrote a `log_config` block, which alone turns flow logs on, so
+    the argument is dropped. Every example validates on 6.50 and 7.46; the default moves to
+    `~> 7.0`.
+  - *azurerm 5* (5.7.0): `azurerm_storage_queue` takes `storage_account_id` instead of
+    `storage_account_name` — `storage_account_id` exists on 4.81 too, so the mapping
+    switched. Two breaks have no form valid on both: the private DNS zone virtual network
+    link takes `private_dns_zone_id` instead of the zone name and resource group (7
+    examples), and `azurerm_kubernetes_cluster` requires a `node_provisioning_profile`
+    block (2 examples). The default stays `~> 4.0`.
+  - The bundled schema index is rebuilt for aws 6.66.0, azurerm 4.81.0 and google 7.46.1:
+    870,611 → 1,109,197 bytes (AWS 6 adds a `region` argument to every resource and 200
+    resource types; google 7 adds 250).
+- **`settings_set` refuses unknown keys** (R3.14), listing the valid ones, directly and
+  inside `project_apply`; a refused call changes nothing.
+
 ## Explicitly still out of scope
 
 Running `plan`/`apply`, live-account access, multi-user collaboration, cost estimation,

@@ -53,7 +53,18 @@ Azure and a KMS key ring on Google Cloud. Project-wide **default tags** (Setting
 Default tags) reach every resource as AWS `default_tags`, Google `default_labels` or an
 Azure `tags` argument. See `examples/hardened.ttg.json`.
 
-Google Cloud (added 2026-09-09, `hashicorp/google` 6.x): networks and subnets, Cloud NAT,
+Where the state lives is a project setting too (Settings ▸ State backend, or
+`settings_set { backend }` over MCP): an S3 bucket with S3 lock files, an Azure storage
+container or a GCS bucket. The export then carries the `backend` block in `versions.tf`
+and a small `bootstrap/` configuration that creates the versioned, private,
+TLS-only bucket first. With OpenTofu, **state encryption** adds an `encryption {}` block —
+AWS KMS or Cloud KMS with the Encryption Key you choose (the bootstrap root creates it, since
+the key must exist before the state it encrypts), a passphrase on Azure — and Terraform,
+which cannot encrypt state, gets a warning instead. A generated secret in local or
+unencrypted state is flagged. Provider versions can be pinned per project (Settings ▸
+Provider versions); the defaults are `aws ~> 6.0`, `azurerm ~> 4.0` and `google ~> 7.0`.
+
+Google Cloud (added 2026-09-09, `hashicorp/google` 7.x since round 3): networks and subnets, Cloud NAT,
 firewall rules driven by network tags, Compute Engine, service accounts, Cloud Storage,
 Cloud SQL with private services access, Cloud Functions (2nd gen) with Pub/Sub triggers
 and a Serverless VPC Access connector, Pub/Sub queues and topics, Secret Manager, Cloud
