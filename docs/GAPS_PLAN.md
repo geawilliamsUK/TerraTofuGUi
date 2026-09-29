@@ -100,3 +100,41 @@ each `layers` entry point rather than cached (cheap today, worth a cache if cata
 GCP's `billing_account` provider variable is emitted for every GCP export like Azure's
 `subscription_id`; `screenshot` sizes are bounded by the display because egui has no
 off-screen renderer.
+
+## Round 3 (report of 2026-09-29)
+
+The third report (`terratofu-round3.md` beside the gaps file) tested `1f333a0` against the
+CallScope design and found two things that would deploy broken or unsafe (the cluster's
+nodes are in no security group; destructive defaults in the HCL), plus 30 items of
+reachability, Kubernetes, environment, MCP and view work. Its own order is kept: the
+P0 items first, reachability once the security groups it depends on exist, the bigger
+ideas last. Three waves; packages in a wave touch disjoint parts of the tree.
+
+### Wave A
+
+| Package | Scope | Report items |
+|---|---|---|
+| **WP12 Cluster networking and safe defaults** | "Uses security group" on `kubernetes_cluster` and `kubernetes_node_pool`; the cluster itself as a rule source (its own security group, node ranges / network tags on Azure and GCP); workloads inherit their cluster's and pool's groups in reachability; orphan-source warning and a private-DNS endpoint that admits nothing as an error; `force_delete` false on registries, gp3 storage on databases, a public-API warning, launch templates with IMDSv2 and a key-encrypted root volume on node groups; `options` on cluster add-ons | R3.1, R3.3, R3.18 |
+| **WP13 State and provider versions** | backend and state encryption through `settings_set` (and unknown keys refused); an OpenTofu `encryption {}` block whose `aws_kms` key provider names an `encryption_key` entity; a bootstrap root for the state bucket; a diagnostic when generated secrets meet local, unencrypted state; per-project provider version constraints with a tested default and the catalog checked against the chosen major | R3.2, R3.4, R3.14 |
+| **WP15 Kubernetes manifests** | an optional `k8s/` directory per export: Namespace, ServiceAccount, Deployment skeleton with env from links, EFS / Azure Files / Filestore volumes, node selection from a new "Schedules on" pool link, KEDA scaling on a queue, Service and TargetGroupBinding; the workload fields that feeds; the outputs it needs | R3.10, R3.31 (Kubernetes half) |
+| **WP16 MCP friction** | `export_diff` error text; absolute `position` plus `offset` for anchored notes; flows to hidden entities; an info diagnostic per entity omitted from another provider; version and catalog hash in `serverInfo`; `entity_preview`, filtered `diagnostics`, `project_get { fields }`, `catalog_relations`, `project_apply { dry_run }`, bulk `entity_update { select }` | R3.15–R3.17, R3.19–R3.21 |
+| **WP17 Views and metadata** | `view_generate { kind: "data_flow" }`; left-to-right flow layout with label collision avoidance; Mermaid `sequenceDiagram` export and a presentation mode; notes re-flowed after layout and fit around the legend; `classification` on entities and a data label on flows; `description` and `owner` on every entity, emitted as tags and comments | R3.22–R3.27 |
+
+### Wave B
+
+| Package | Scope | Report items |
+|---|---|---|
+| **WP14 Reachability complete, and an audit** | file systems (mount targets, 2049, `mounts` as intent); interface endpoints covering their whole service, NAT egress where an endpoint exists; load balancer to cluster to workload, the internet as a source; `reach_audit` and `status` / `only_intended` filters; posture rules as a diagnostics category with ids and toggles, keyed on classification | R3.5–R3.9 |
+| **WP18 Environments and plan** | named environments with per-entity overrides and a `.tfvars` each; `plan_run` with creates / updates / destroys per entity and validate errors mapped to entities | R3.11, R3.13 |
+| **WP19 Cost estimate** | `cost_estimate { provider, environment }` from a bundled, dated price table with editable usage assumptions; totals per group and view; a diagnostic above the budget | R3.12 |
+
+### Wave C
+
+| Package | Scope | Report items |
+|---|---|---|
+| **WP20 Diff, patterns, adoption** | `project_diff` in architecture terms and named checkpoints; `pattern_apply` and saved patterns; `import {}` blocks for adopted resources | R3.28–R3.30 |
+| **WP21 Outputs and modules** | outputs only for what is marked (plus what other parts of the export need); containers or groups exported as modules behind a thin root | R3.31, R3.32 |
+
+Acceptance is the report's own: the CallScope design, with its cluster given a security
+group, audits clean, exports with no Deployment manual steps, plans by entity, estimates
+inside its budget, and plans for both a pilot and a prod environment.
