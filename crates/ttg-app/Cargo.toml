@@ -28,10 +28,26 @@ schemars = { version = "1.2.2", optional = true }
 base64 = { version = "0.23.1", optional = true }
 uuid = { workspace = true, optional = true }
 tokio-util = { version = "0.7", optional = true }
+# OAuth sign-in for remote clients: token hashes, PKCE and random secrets.
+sha2 = { version = "0.10", optional = true }
+rand = { version = "0.10", optional = true }
+serde_urlencoded = { version = "0.7", optional = true }
 
 [dev-dependencies]
 ureq = "2"
 
 [features]
 default = ["mcp"]
-mcp = ["dep:rmcp", "dep:tokio", "dep:tokio-util", "dep:axum", "dep:schemars", "dep:base64", "dep:uuid"]
+mcp = [
+    "dep:rmcp",
+    "dep:tokio",
+    "dep:tokio-util",
+    "dep:axum",
+    "dep:schemars",
+    "dep:base64",
+    "dep:uuid",
+    "dep:sha2",
+    "dep:rand",
+    "dep:serde_urlencoded",
+    "ttg-core/schema",
+]

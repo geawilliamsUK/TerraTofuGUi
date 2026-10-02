@@ -13,11 +13,14 @@
 //! through the same snapshot/finish path as a mouse edit (so it is undoable, marks the
 //! project dirty, and is drawn immediately).
 
+pub mod approvals;
 pub mod exec;
+pub mod oauth;
 pub mod server;
 
 use crate::app::TtgApp;
 use std::collections::VecDeque;
+use std::sync::atomic::{AtomicU8, Ordering};
 use std::sync::{mpsc, Arc, Mutex};
 use std::time::{Duration, Instant};
 use ttg_core::Id;
@@ -88,6 +91,18 @@ pub struct McpSettings {
     pub confirm_disk: bool,
     /// Ask before the agent deletes resources, links or annotations.
     pub confirm_delete: bool,
+    /// Address to listen on. `127.0.0.1` (the default) keeps the server on this machine;
+    /// a tunnel (cloudflared, Tailscale Funnel) connects to it there.
+    pub bind: String,
+    /// The HTTPS URL a tunnel publishes the server under (`https://ttg.example.com`), or
+    /// empty. Its host name is added to the Host headers the server accepts, and OAuth
+    /// metadata names it as the issuer for requests that arrive through it.
+    pub public_url: String,
+    /// Serve the OAuth endpoints, so clients that can only sign in with OAuth (claude.ai
+    /// custom connectors) can connect. The bearer token keeps working either way.
+    pub oauth: bool,
+    /// How long an approval prompt waits before its ticket expires unapplied.
+    pub approval_ttl_secs: u64,
 }
 
 impl Default for McpSettings {
@@ -98,7 +113,124 @@ impl Default for McpSettings {
             token: new_token(),
             confirm_disk: true,
             confirm_delete: false,
+            bind: "127.0.0.1".into(),
+            public_url: String::new(),
+            oauth: false,
+            approval_ttl_secs: approvals::DEFAULT_TTL_SECS,
         }
+    }
+}
+
+impl McpSettings {
+    /// The listen address, or why the setting is not one.
+    pub fn bind_addr(&self) -> Result<std::net::IpAddr, String> {
+        let b = self.bind.trim();
+        let b = if b.is_empty() { "127.0.0.1" } else { b };
+        b.parse().map_err(|_| {
+            format!(
+                "bind address \"{b}\" is not an IP address (use 127.0.0.1, or 0.0.0.0 for every interface)"
+            )
+        })
+    }
+
+    /// The public URL without a trailing slash, when one is set and well-formed.
+    pub fn public_url(&self) -> Result<Option<String>, String> {
+        let u = self.public_url.trim().trim_end_matches('/');
+        if u.is_empty() {
+            return Ok(None);
+        }
+        let parsed: axum::http::Uri = u
+            .parse()
+            .map_err(|_| format!("public URL \"{u}\" is not a URL"))?;
+        if parsed.scheme_str() != Some("https") && parsed.scheme_str() != Some("http") {
+            return Err(format!("public URL \"{u}\" must start with https://"));
+        }
+        if parsed.host().is_none() {
+            return Err(format!("public URL \"{u}\" has no host name"));
+        }
+        if parsed.path() != "/" && !parsed.path().is_empty() {
+            return Err(format!(
+                "public URL \"{u}\" must be the bare origin (no path); the MCP endpoint is <url>/mcp"
+            ));
+        }
+        Ok(Some(u.to_string()))
+    }
+}
+
+/// How a queued command and its caller agree on whether it runs: the UI thread claims
+/// it just before running it, the server withdraws it when the call times out, and
+/// whichever happens first wins. So a call that timed out can say for certain that
+/// nothing was applied, and a command that had already started is waited for.
+const REPLY_OPEN: u8 = 0;
+const REPLY_CLAIMED: u8 = 1;
+const REPLY_WITHDRAWN: u8 = 2;
+
+/// The UI thread's end of one tool call: where the answer goes.
+#[derive(Debug)]
+pub struct AgentReply {
+    tx: tokio::sync::oneshot::Sender<Result<serde_json::Value, String>>,
+    claim: Arc<AtomicU8>,
+}
+
+/// The server thread's end of one tool call.
+#[derive(Debug)]
+pub struct ReplyWait {
+    pub rx: tokio::sync::oneshot::Receiver<Result<serde_json::Value, String>>,
+    claim: Arc<AtomicU8>,
+}
+
+impl AgentReply {
+    pub fn channel() -> (AgentReply, ReplyWait) {
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        let claim = Arc::new(AtomicU8::new(REPLY_OPEN));
+        (
+            AgentReply {
+                tx,
+                claim: claim.clone(),
+            },
+            ReplyWait { rx, claim },
+        )
+    }
+
+    /// Nobody is waiting any more: the caller went away or withdrew the call.
+    pub fn is_closed(&self) -> bool {
+        self.tx.is_closed() || self.claim.load(Ordering::SeqCst) == REPLY_WITHDRAWN
+    }
+
+    /// Take the command for running. `false`: the caller has withdrawn it (or gone), so
+    /// it must not run.
+    pub fn claim(&self) -> bool {
+        if self.tx.is_closed() {
+            return false;
+        }
+        match self
+            .claim
+            .compare_exchange(REPLY_OPEN, REPLY_CLAIMED, Ordering::SeqCst, Ordering::SeqCst)
+        {
+            Ok(_) => true,
+            Err(now) => now == REPLY_CLAIMED,
+        }
+    }
+
+    pub fn send(self, r: Result<serde_json::Value, String>) -> Result<(), Result<serde_json::Value, String>> {
+        self.tx.send(r)
+    }
+}
+
+impl ReplyWait {
+    /// Take the call back before the UI has started it. `false` means the UI already
+    /// claimed it: it is running (or has run), and its answer is on the way.
+    pub fn withdraw(&self) -> bool {
+        self.claim
+            .compare_exchange(REPLY_OPEN, REPLY_WITHDRAWN, Ordering::SeqCst, Ordering::SeqCst)
+            .is_ok()
+    }
+
+    #[cfg(test)]
+    pub fn try_recv(
+        &mut self,
+    ) -> Result<Result<serde_json::Value, String>, tokio::sync::oneshot::error::TryRecvError> {
+        self.rx.try_recv()
     }
 }
 
@@ -473,6 +605,14 @@ pub enum AgentCommand {
         assumptions: Option<serde_json::Map<String, serde_json::Value>>,
         region: Option<String>,
     },
+
+    // ---- File interchange (`exec/import.rs`).
+    /// Replace the open project with one given as `.ttg.json` text, as one undo step.
+    /// Without `replace` it is refused while the open project has any entities.
+    ProjectImport {
+        json: String,
+        replace: bool,
+    },
 }
 
 impl AgentCommand {
@@ -558,15 +698,14 @@ pub enum ServerEvent {
     ProjectChanged,
 }
 
-/// A write the agent asked for that waits for the user's Allow / Deny.
+/// A write the agent asked for that waits for the user's Allow / Deny. Its caller already
+/// has `ticket`; the outcome is recorded in [`approvals::Approvals`].
 pub struct PendingConfirm {
     pub cmd: AgentCommand,
-    pub reply: AgentReply,
+    pub ticket: String,
     pub reason: String,
     pub at: Instant,
 }
-
-pub type AgentReply = tokio::sync::oneshot::Sender<Result<serde_json::Value, String>>;
 
 /// A running server.
 pub struct Running {
@@ -613,14 +752,17 @@ pub struct McpState {
     pub flash: Vec<(Id, Instant)>,
     pub last_error: Option<String>,
     pub show_window: bool,
-    /// A write waiting for the user's approval; reads keep running meanwhile, and any
-    /// further writes queue up in `deferred` instead of jumping ahead of it.
+    /// The write whose Allow / Deny prompt is on screen. Its caller was answered at once
+    /// with a ticket; every other call keeps running meanwhile.
     pub pending_confirm: Option<PendingConfirm>,
-    /// Write commands that arrived while another write was already waiting for
-    /// approval, in arrival order. Started one at a time as `pending_confirm` is
-    /// resolved (Allow or Deny); one of these may itself need approval and become the
-    /// new `pending_confirm`, still ahead of the rest of this queue.
-    pub deferred: VecDeque<(AgentCommand, AgentReply)>,
+    /// Further writes that need approval and arrived while a prompt was already open,
+    /// with their tickets, in arrival order. Prompted one at a time as `pending_confirm`
+    /// is resolved.
+    pub deferred: VecDeque<(AgentCommand, String)>,
+    /// Approval tickets, shared with the server thread for `approval_status`.
+    pub approvals: Arc<approvals::Approvals>,
+    /// OAuth clients, grants and sign-in requests, shared with the server thread.
+    pub oauth: Arc<oauth::OAuth>,
     /// Bumped on every committed change (user or agent); `project_changes` reports it.
     pub revision: u64,
     pub last_change: Option<(Instant, &'static str)>,
@@ -657,6 +799,8 @@ impl Default for McpState {
             show_window: false,
             pending_confirm: None,
             deferred: VecDeque::new(),
+            approvals: Arc::new(approvals::Approvals::default()),
+            oauth: Arc::new(oauth::OAuth::default()),
             revision: 0,
             last_change: None,
             in_agent: false,
@@ -673,7 +817,15 @@ impl McpState {
     }
 
     pub fn url(&self) -> String {
-        format!("http://127.0.0.1:{}/mcp", self.settings.port)
+        // A server bound to one outside address is not on 127.0.0.1.
+        let host = match self.settings.bind_addr() {
+            Ok(ip) if !ip.is_loopback() && !ip.is_unspecified() => match ip {
+                std::net::IpAddr::V6(v6) => format!("[{v6}]"),
+                v4 => v4.to_string(),
+            },
+            _ => "127.0.0.1".to_string(),
+        };
+        format!("http://{host}:{}/mcp", self.settings.port)
     }
 
     /// The command that registers this server with Claude Code.
@@ -685,20 +837,49 @@ impl McpState {
         )
     }
 
+    /// The URL a remote client (a claude.ai custom connector) is given: the public URL's
+    /// `/mcp`, when one is configured.
+    pub fn connector_url(&self) -> Option<String> {
+        self.settings
+            .public_url()
+            .ok()
+            .flatten()
+            .map(|u| format!("{u}/mcp"))
+    }
+
     /// Start the server thread. Returns quickly; bind errors are reported.
     pub fn start(&mut self, ctx: egui::Context) -> Result<(), String> {
         if self.running.is_some() {
             return Ok(());
         }
-        let port = self.settings.port;
-        let token = self.settings.token.clone();
+        let checked = self
+            .settings
+            .bind_addr()
+            .and_then(|b| self.settings.public_url().map(|u| (b, u)));
+        let (bind, public_url) = match checked {
+            Ok(v) => v,
+            Err(e) => {
+                self.last_error = Some(e.clone());
+                return Err(e);
+            }
+        };
+        self.oauth.set_waker(ctx.clone());
+        self.oauth.set_headless(self.headless);
+        let opts = server::ServeOptions {
+            port: self.settings.port,
+            bind,
+            token: self.settings.token.clone(),
+            public_url,
+            oauth: self.settings.oauth.then(|| self.oauth.clone()),
+            approvals: self.approvals.clone(),
+        };
         let tx = self.tx.clone();
         let beat = self.heartbeat.clone();
         let catalog_hash = self.catalog_hash.clone();
         let (started_tx, started_rx) = mpsc::channel::<Result<Started, String>>();
         std::thread::Builder::new()
             .name("ttg-mcp".into())
-            .spawn(move || server::run(port, token, tx, ctx, beat, catalog_hash, started_tx))
+            .spawn(move || server::run(opts, tx, ctx, beat, catalog_hash, started_tx))
             .map_err(|e| e.to_string())?;
         match started_rx.recv_timeout(std::time::Duration::from_secs(5)) {
             Ok(Ok((cancel, events))) => {
@@ -779,12 +960,12 @@ fn summarize(v: &serde_json::Value) -> String {
 }
 
 impl TtgApp {
-    /// Apply queued agent commands on the UI thread (called once per frame). A pending
-    /// approval prompt no longer parks the whole queue: reads keep answering while it is
-    /// open, and further writes queue up behind it in `mcp.deferred` instead of jumping
-    /// ahead.
+    /// Apply queued agent commands on the UI thread (called once per frame). A write that
+    /// needs the user's approval answers its caller at once with a ticket and waits for
+    /// the prompt on its own; everything else keeps running meanwhile.
     pub fn drain_agent_commands(&mut self, ctx: &egui::Context) {
         self.mcp.heartbeat.beat();
+        self.expire_approvals();
         loop {
             let next = self.mcp.rx.try_recv();
             let Ok((cmd, reply)) = next else { break };
@@ -840,13 +1021,7 @@ impl TtgApp {
                 continue;
             }
             if !cmd.is_write() {
-                // Reads must not wait behind an approval prompt.
                 self.run_agent(cmd, reply);
-                continue;
-            }
-            if self.mcp.pending_confirm.is_some() {
-                // Another write is already waiting for the user; keep this one in order.
-                self.mcp.deferred.push_back((cmd, reply));
                 continue;
             }
             self.offer_or_run(cmd, reply);
@@ -911,62 +1086,169 @@ impl TtgApp {
         }
     }
 
-    /// Run a write now, or park it as `pending_confirm` if the settings require
-    /// approval (skipped entirely in headless `--serve` mode).
+    /// Why `cmd` needs the user's approval right now, if it does. Never in headless
+    /// `--serve` mode, which has nobody to ask.
+    pub fn approval_reason(&self, cmd: &AgentCommand) -> Option<String> {
+        if self.mcp.headless {
+            return None;
+        }
+        // Like opening a file: only discarding unsaved work needs a yes. Without
+        // `replace` a non-empty project refuses the import anyway.
+        if let AgentCommand::ProjectImport { replace, .. } = cmd {
+            let empty = self.project.nodes.is_empty() && self.project.containers.is_empty();
+            if self.dirty && (*replace || empty) {
+                return Some(
+                    "replace the open project, which has unsaved changes, with an imported one".into(),
+                );
+            }
+        }
+        cmd.confirm_reason(&self.mcp.settings)
+    }
+
+    /// Run a write now, or, when it needs approval, give its caller a ticket at once and
+    /// park the command: on screen as `pending_confirm`, or behind the prompt already
+    /// there in `deferred`.
     fn offer_or_run(&mut self, cmd: AgentCommand, reply: AgentReply) {
-        if !self.mcp.headless {
-            if let Some(reason) = cmd.confirm_reason(&self.mcp.settings) {
-                self.status = "Agent: waiting for your approval".into();
-                self.mcp.pending_confirm = Some(PendingConfirm {
-                    cmd,
-                    reply,
-                    reason,
-                    at: Instant::now(),
-                });
+        let Some(reason) = self.approval_reason(&cmd) else {
+            self.run_agent(cmd, reply);
+            return;
+        };
+        let label = cmd.label();
+        if !reply.claim() {
+            self.mcp.push_log(label, &Err("dropped: caller gone".into()));
+            return;
+        }
+        // An import that could never load is refused now, not after the user said yes.
+        if let AgentCommand::ProjectImport { json, .. } = &cmd {
+            if let Err(e) = exec::import_check(json) {
+                self.mcp.push_log(label, &Err(e.clone()));
+                let _ = reply.send(Err(e));
                 return;
             }
         }
-        self.run_agent(cmd, reply);
+        let ttl = Duration::from_secs(self.mcp.settings.approval_ttl_secs.max(1));
+        let ticket = self.mcp.approvals.open(&label, &reason, ttl);
+        if self.mcp.pending_confirm.is_none() {
+            self.status = "Agent: waiting for your approval".into();
+            self.mcp.pending_confirm = Some(PendingConfirm {
+                cmd,
+                ticket: ticket.clone(),
+                reason,
+                at: Instant::now(),
+            });
+        } else {
+            self.mcp.deferred.push_back((cmd, ticket.clone()));
+        }
+        let status = self.mcp.approvals.status_json(&ticket).unwrap_or_else(
+            || serde_json::json!({"ticket": ticket, "status": "pending_approval", "applied": false}),
+        );
+        self.mcp.push_log(label, &Ok(status.clone()));
+        let _ = reply.send(Ok(status));
     }
 
     /// Resolve the pending approval prompt (Allow when `allow` is true, else Deny), the
-    /// same decision `confirm_window` makes from the Allow/Deny buttons but callable
-    /// without egui (used by the headless test). Then start the next deferred write in
-    /// arrival order - it may itself need approval and become the new `pending_confirm`,
-    /// still ahead of anything queued after it.
+    /// same decision `confirm_window` makes from its buttons but callable without egui.
+    /// The outcome goes to the command's ticket; then the next deferred write, if any,
+    /// gets the prompt.
     pub fn resolve_confirm(&mut self, allow: bool) {
         let Some(p) = self.mcp.pending_confirm.take() else {
             return;
         };
-        if p.reply.is_closed() {
-            // The prompt outlived the call. Applying it now would land a second copy
-            // beside whatever the agent retried, so it is dropped either way.
-            self.status = format!("Agent: {} dropped (the caller had gone)", p.cmd.label());
-            self.mcp
-                .push_log(p.cmd.label(), &Err("dropped: caller gone".into()));
+        if self.mcp.approvals.is_expired(&p.ticket, Instant::now()) {
+            self.expire_ticket(&p.cmd, &p.ticket);
         } else if allow {
-            self.run_agent(p.cmd, p.reply);
+            self.run_ticket(p.cmd, &p.ticket);
         } else {
             let result = Err("denied by the user".to_string());
             self.status = format!("Agent: {} denied", p.cmd.label());
             self.mcp.push_log(p.cmd.label(), &result);
-            let _ = p.reply.send(result);
+            self.mcp.approvals.resolve(&p.ticket, approvals::Outcome::Denied);
         }
-        // Skip any deferred write whose caller has since given up: it waited behind the
-        // prompt long enough to time out, and the agent will have retried it.
-        while let Some((cmd, reply)) = self.mcp.deferred.pop_front() {
-            if reply.is_closed() {
-                self.mcp
-                    .push_log(cmd.label(), &Err("dropped: caller gone".into()));
+        self.next_prompt();
+    }
+
+    /// Put the next deferred write on screen, skipping any whose ticket has run out. One
+    /// that no longer needs approval (the settings changed meanwhile) simply runs.
+    fn next_prompt(&mut self) {
+        while self.mcp.pending_confirm.is_none() {
+            let Some((cmd, ticket)) = self.mcp.deferred.pop_front() else {
+                return;
+            };
+            if self.mcp.approvals.is_expired(&ticket, Instant::now()) {
+                self.expire_ticket(&cmd, &ticket);
                 continue;
             }
-            self.offer_or_run(cmd, reply);
-            break;
+            match self.approval_reason(&cmd) {
+                Some(reason) => {
+                    self.status = "Agent: waiting for your approval".into();
+                    self.mcp.pending_confirm = Some(PendingConfirm {
+                        cmd,
+                        ticket,
+                        reason,
+                        at: Instant::now(),
+                    });
+                }
+                None => self.run_ticket(cmd, &ticket),
+            }
         }
     }
 
-    /// Execute one agent command now, log it and answer the server.
+    /// Expire every parked write whose ticket has run out, the one on screen included.
+    fn expire_approvals(&mut self) {
+        let now = Instant::now();
+        let on_screen_expired = self
+            .mcp
+            .pending_confirm
+            .as_ref()
+            .is_some_and(|p| self.mcp.approvals.is_expired(&p.ticket, now));
+        if on_screen_expired {
+            if let Some(p) = self.mcp.pending_confirm.take() {
+                self.expire_ticket(&p.cmd, &p.ticket);
+            }
+        }
+        let parked = std::mem::take(&mut self.mcp.deferred);
+        for (cmd, ticket) in parked {
+            if self.mcp.approvals.is_expired(&ticket, now) {
+                self.expire_ticket(&cmd, &ticket);
+            } else {
+                self.mcp.deferred.push_back((cmd, ticket));
+            }
+        }
+        if on_screen_expired {
+            self.next_prompt();
+        }
+    }
+
+    fn expire_ticket(&mut self, cmd: &AgentCommand, ticket: &str) {
+        self.status = format!("Agent: {} expired unanswered", cmd.label());
+        self.mcp
+            .push_log(cmd.label(), &Err("expired: nobody answered the prompt".into()));
+        self.mcp.approvals.resolve(ticket, approvals::Outcome::Expired);
+    }
+
+    /// Run an approved write and record its outcome on its ticket.
+    fn run_ticket(&mut self, cmd: AgentCommand, ticket: &str) {
+        let outcome = match self.exec_logged(cmd) {
+            Ok(v) => approvals::Outcome::Applied(v),
+            Err(e) => approvals::Outcome::Failed(e),
+        };
+        self.mcp.approvals.resolve(ticket, outcome);
+    }
+
+    /// Execute one agent command now, log it and answer the server. A command its caller
+    /// has already withdrawn (the call timed out) is dropped, never run.
     fn run_agent(&mut self, cmd: AgentCommand, reply: AgentReply) {
+        if !reply.claim() {
+            self.mcp
+                .push_log(cmd.label(), &Err("dropped: caller gone".into()));
+            return;
+        }
+        let result = self.exec_logged(cmd);
+        let _ = reply.send(result);
+    }
+
+    /// Execute one agent command, put a write's outcome in the status line, and log it.
+    fn exec_logged(&mut self, cmd: AgentCommand) -> Result<serde_json::Value, String> {
         let label = cmd.label();
         let is_write = cmd.is_write();
         self.mcp.in_agent = true;
@@ -979,17 +1261,27 @@ impl TtgApp {
             };
         }
         self.mcp.push_log(label, &result);
-        let _ = reply.send(result);
+        result
     }
 
-    /// The Allow / Deny prompt for a write that the settings say must be confirmed.
+    /// The Allow / Deny prompt for a write that the settings say must be confirmed, and
+    /// any OAuth sign-in waiting for the user.
     pub fn confirm_window(&mut self, ctx: &egui::Context) {
+        self.oauth_consent_window(ctx);
         let Some(p) = self.mcp.pending_confirm.as_ref() else {
             return;
         };
         let reason = p.reason.clone();
         let label = p.cmd.label();
         let waited = p.at.elapsed().as_secs();
+        let ticket = p.ticket.clone();
+        let left = self
+            .mcp
+            .approvals
+            .get(&ticket)
+            .map(|t| t.expires.saturating_duration_since(Instant::now()).as_secs())
+            .unwrap_or(0);
+        let queued = self.mcp.deferred.len();
         let mut decision: Option<bool> = None;
         egui::Window::new("Agent request")
             .collapsible(false)
@@ -1000,7 +1292,8 @@ impl TtgApp {
                 ui.label(egui::RichText::new(format!("The agent wants to {reason}.")).strong());
                 ui.label(
                     egui::RichText::new(format!(
-                        "Tool: {label}. Waiting {waited}s. Agent \u{25b8} settings chooses which actions ask."
+                        "Tool: {label}, ticket {ticket}. Waiting {waited}s; expires unapplied in {left}s.{} Agent \u{25b8} settings chooses which actions ask.",
+                        if queued > 0 { format!(" {queued} more waiting after this.") } else { String::new() }
                     ))
                     .small()
                     .color(egui::Color32::from_gray(110)),
@@ -1018,6 +1311,65 @@ impl TtgApp {
         match decision {
             Some(allow) => self.resolve_confirm(allow),
             None => ctx.request_repaint_after(std::time::Duration::from_millis(250)),
+        }
+    }
+
+    /// "Allow <client> to edit this project?" for each OAuth sign-in waiting for the
+    /// user. The browser page shows the same code, so the user can tell their own
+    /// sign-in from one somebody else started.
+    fn oauth_consent_window(&mut self, ctx: &egui::Context) {
+        let waiting = self.mcp.oauth.pending_consents();
+        let Some(c) = waiting.first() else {
+            return;
+        };
+        let mut decision: Option<bool> = None;
+        egui::Window::new("Sign-in request")
+            .collapsible(false)
+            .resizable(false)
+            .anchor(egui::Align2::CENTER_CENTER, [0.0, -60.0])
+            .show(ctx, |ui| {
+                ui.set_min_width(380.0);
+                ui.label(
+                    egui::RichText::new(format!("Allow {} to edit this project?", c.client_name)).strong(),
+                );
+                ui.label(format!(
+                    "It signs in through {} and gets the same access as the agent token: it can read and change the diagram, save, open and export.",
+                    c.redirect_host
+                ));
+                ui.add_space(4.0);
+                ui.horizontal(|ui| {
+                    ui.label("The browser page should show");
+                    ui.label(egui::RichText::new(&c.verify).monospace().strong().size(18.0));
+                });
+                ui.label(
+                    egui::RichText::new(format!(
+                        "Deny if it does not, or if you did not just connect a client. Waiting {}s.{}",
+                        c.waiting_s,
+                        if waiting.len() > 1 { format!(" {} more waiting.", waiting.len() - 1) } else { String::new() }
+                    ))
+                    .small()
+                    .color(egui::Color32::from_gray(110)),
+                );
+                ui.add_space(6.0);
+                ui.horizontal(|ui| {
+                    if ui.button("Allow").clicked() {
+                        decision = Some(true);
+                    }
+                    if ui.button("Deny").clicked() {
+                        decision = Some(false);
+                    }
+                });
+            });
+        match decision {
+            Some(allow) => {
+                self.mcp.oauth.decide(&c.id, allow);
+                self.status = format!(
+                    "Sign-in for {} {}",
+                    c.client_name,
+                    if allow { "allowed" } else { "denied" }
+                );
+            }
+            None => ctx.request_repaint_after(std::time::Duration::from_millis(500)),
         }
     }
 
@@ -1039,6 +1391,12 @@ impl TtgApp {
         storage.set_string("mcp_token", s.token.clone());
         storage.set_string("mcp_confirm_disk", s.confirm_disk.to_string());
         storage.set_string("mcp_confirm_delete", s.confirm_delete.to_string());
+        storage.set_string("mcp_bind", s.bind.clone());
+        storage.set_string("mcp_public_url", s.public_url.clone());
+        storage.set_string("mcp_oauth", s.oauth.to_string());
+        storage.set_string("mcp_approval_ttl", s.approval_ttl_secs.to_string());
+        // Hashes only: registered clients and the grants users allowed.
+        storage.set_string("mcp_oauth_grants", self.mcp.oauth.to_json());
     }
 
     pub fn mcp_restore(&mut self, storage: &dyn eframe::Storage) {
@@ -1056,6 +1414,24 @@ impl TtgApp {
         }
         if let Some(v) = storage.get_string("mcp_confirm_delete") {
             self.mcp.settings.confirm_delete = v == "true";
+        }
+        if let Some(v) = storage.get_string("mcp_bind").filter(|v| !v.is_empty()) {
+            self.mcp.settings.bind = v;
+        }
+        if let Some(v) = storage.get_string("mcp_public_url") {
+            self.mcp.settings.public_url = v;
+        }
+        if let Some(v) = storage.get_string("mcp_oauth") {
+            self.mcp.settings.oauth = v == "true";
+        }
+        if let Some(v) = storage
+            .get_string("mcp_approval_ttl")
+            .and_then(|v| v.parse().ok())
+        {
+            self.mcp.settings.approval_ttl_secs = v;
+        }
+        if let Some(v) = storage.get_string("mcp_oauth_grants") {
+            self.mcp.oauth.load_json(&v);
         }
     }
 }
@@ -1096,18 +1472,37 @@ mod tests {
     use super::*;
     use crate::app::TtgApp;
 
-    type Reply = tokio::sync::oneshot::Receiver<Result<serde_json::Value, String>>;
+    type Reply = ReplyWait;
 
     fn push(app: &TtgApp, cmd: AgentCommand) -> Reply {
-        let (tx, rx) = tokio::sync::oneshot::channel();
+        let (tx, rx) = AgentReply::channel();
         app.mcp.tx.send((cmd, tx)).unwrap();
         rx
     }
 
-    /// A pending approval prompt must not park the whole queue: a read queued behind a
-    /// write that is waiting for Allow/Deny still gets answered on the same drain.
+    /// The ticket a parked write answered with.
+    fn ticket_of(rx: &mut Reply) -> String {
+        let v = rx.try_recv().expect("answered at once").expect("ok");
+        assert_eq!(v["status"], "pending_approval", "{v}");
+        assert_eq!(v["applied"], false, "{v}");
+        v["ticket"].as_str().expect("a ticket").to_string()
+    }
+
+    fn add(name: &str) -> AgentCommand {
+        AgentCommand::EntityAdd {
+            type_id: "compute_instance".into(),
+            name: Some(name.into()),
+            parent: None,
+            x: None,
+            y: None,
+            providers: None,
+        }
+    }
+
+    /// A write that needs approval answers at once with a ticket, and the queue keeps
+    /// moving: a read behind it is answered on the same drain.
     #[test]
-    fn reads_answer_while_a_write_waits_for_approval() {
+    fn an_approval_gated_write_answers_at_once_with_a_ticket() {
         let ctx = egui::Context::default();
         let mut app = TtgApp::build(&ctx, None, None, None);
         app.mcp.settings.confirm_disk = true;
@@ -1122,30 +1517,33 @@ mod tests {
 
         app.drain_agent_commands(&ctx);
 
-        // The read behind the pending write was still answered immediately.
+        let ticket = ticket_of(&mut save_rx);
         summary_rx
             .try_recv()
             .expect("summary answered")
             .expect("summary ok");
-        // The write is parked, not yet answered.
-        assert!(save_rx.try_recv().is_err(), "save should still be pending");
-        match app.mcp.pending_confirm.as_ref().map(|p| &p.cmd) {
-            Some(AgentCommand::ProjectSave { .. }) => {}
-            other => panic!("expected a pending ProjectSave, got {other:?}"),
+        match app.mcp.pending_confirm.as_ref() {
+            Some(PendingConfirm {
+                cmd: AgentCommand::ProjectSave { .. },
+                ticket: t,
+                ..
+            }) => assert_eq!(t, &ticket),
+            _ => panic!("expected a pending ProjectSave"),
         }
 
         // Resolve it exactly the way the Allow/Deny window does.
         app.resolve_confirm(false);
-        let result = save_rx.try_recv().expect("save answered after being resolved");
-        assert!(result.is_err(), "denied write should come back as an error");
+        let st = app.mcp.approvals.status_json(&ticket).unwrap();
+        assert_eq!(st["status"], "denied", "{st}");
+        assert_eq!(st["applied"], false);
         assert!(app.mcp.pending_confirm.is_none());
     }
 
-    /// A second write that arrives while one is already waiting for approval queues in
-    /// `deferred` instead of jumping ahead; resolving the first starts the next one,
-    /// which may itself need approval and become the new `pending_confirm`.
+    /// While a prompt is open, a write that needs no approval runs at once, and a second
+    /// one that does gets its own ticket and the next prompt. An approved write that
+    /// fails says so on its ticket.
     #[test]
-    fn a_second_write_defers_behind_the_first_and_starts_when_resolved() {
+    fn approval_gated_writes_are_prompted_in_order_and_others_run() {
         let ctx = egui::Context::default();
         let mut app = TtgApp::build(&ctx, None, None, None);
         app.mcp.settings.confirm_delete = true;
@@ -1162,30 +1560,95 @@ mod tests {
                 entities: vec!["second".into()],
             },
         );
+        let mut add_rx = push(&app, add("meanwhile"));
 
         app.drain_agent_commands(&ctx);
 
-        assert!(app.mcp.pending_confirm.is_some());
+        let first = ticket_of(&mut first_rx);
+        let second_reply = second_rx.try_recv().expect("answered").expect("ok");
+        let second = second_reply["ticket"].as_str().unwrap().to_string();
+        assert_eq!(second_reply["prompts_ahead"], 1, "{second_reply}");
+        add_rx.try_recv().expect("the add ran").expect("ok");
+        assert!(app.project.entities().iter().any(|e| e.name == "meanwhile"));
         assert_eq!(app.mcp.deferred.len(), 1);
-        assert!(second_rx.try_recv().is_err(), "deferred write not answered yet");
 
-        app.resolve_confirm(true); // Allow the first.
-        let _ = first_rx.try_recv().expect("first answered");
-        assert!(app.mcp.deferred.is_empty(), "the deferred write was started");
-        match app.mcp.pending_confirm.as_ref().map(|p| &p.cmd) {
-            Some(AgentCommand::EntityDelete { entities }) => {
-                assert_eq!(entities, &vec!["second".to_string()])
-            }
-            other => panic!("expected the deferred EntityDelete to now be pending, got {other:?}"),
+        app.resolve_confirm(true); // Allow the first: there is no "first", so it fails.
+        let st = app.mcp.approvals.status_json(&first).unwrap();
+        assert_eq!(st["status"], "failed", "{st}");
+        assert_eq!(st["applied"], false);
+        assert!(app.mcp.deferred.is_empty(), "the deferred write was prompted");
+        match app.mcp.pending_confirm.as_ref() {
+            Some(p) => assert_eq!(p.ticket, second),
+            None => panic!("expected the second delete to be pending"),
         }
-        assert!(
-            second_rx.try_recv().is_err(),
-            "still waiting for its own approval"
+        assert_eq!(
+            app.mcp.approvals.status_json(&second).unwrap()["prompts_ahead"],
+            0
         );
 
-        app.resolve_confirm(false); // Deny the second.
-        let _ = second_rx.try_recv().expect("second answered");
+        // Allow the second against a real entity name now; it is applied with a result.
+        if let Some(p) = app.mcp.pending_confirm.as_mut() {
+            p.cmd = AgentCommand::EntityDelete {
+                entities: vec!["meanwhile".into()],
+            };
+        }
+        app.resolve_confirm(true);
+        let st = app.mcp.approvals.status_json(&second).unwrap();
+        assert_eq!(st["status"], "applied", "{st}");
+        assert_eq!(st["applied"], true);
+        assert!(st["result"].is_object(), "{st}");
+        assert!(!app.project.entities().iter().any(|e| e.name == "meanwhile"));
         assert!(app.mcp.pending_confirm.is_none());
+    }
+
+    /// A ticket nobody answers expires: the command never runs, the prompt goes, and the
+    /// next parked write gets its turn.
+    #[test]
+    fn an_unanswered_ticket_expires_unapplied() {
+        let ctx = egui::Context::default();
+        let mut app = TtgApp::build(&ctx, None, None, None);
+        app.mcp.settings.confirm_delete = true;
+        app.mcp.settings.approval_ttl_secs = 1;
+        let mut rx = push(&app, add("victim"));
+        app.drain_agent_commands(&ctx);
+        rx.try_recv().unwrap().unwrap();
+        let mut del_rx = push(
+            &app,
+            AgentCommand::EntityDelete {
+                entities: vec!["victim".into()],
+            },
+        );
+        app.drain_agent_commands(&ctx);
+        let ticket = ticket_of(&mut del_rx);
+        std::thread::sleep(Duration::from_millis(1100));
+        app.drain_agent_commands(&ctx);
+        let st = app.mcp.approvals.status_json(&ticket).unwrap();
+        assert_eq!(st["status"], "expired", "{st}");
+        assert_eq!(st["applied"], false);
+        assert!(app.mcp.pending_confirm.is_none());
+        assert!(app.project.entities().iter().any(|e| e.name == "victim"));
+        // Allowing after the fact does nothing.
+        app.resolve_confirm(true);
+        assert!(app.project.entities().iter().any(|e| e.name == "victim"));
+    }
+
+    /// The server withdraws a call that timed out before the UI started it, and the UI
+    /// then never runs it; once the UI has claimed a call it can no longer be withdrawn,
+    /// so the server knows to wait for the answer instead of saying nothing happened.
+    #[test]
+    fn a_withdrawn_call_never_runs_and_a_claimed_one_cannot_be_withdrawn() {
+        let ctx = egui::Context::default();
+        let mut app = TtgApp::build(&ctx, None, None, None);
+        let before = app.project.nodes.len();
+        let withdrawn = push(&app, add("late"));
+        assert!(withdrawn.withdraw());
+        app.drain_agent_commands(&ctx);
+        assert_eq!(app.project.nodes.len(), before);
+
+        let (reply, wait) = AgentReply::channel();
+        assert!(reply.claim());
+        assert!(!wait.withdraw(), "claimed first: the call is running");
+        assert!(reply.claim(), "claiming twice is fine");
     }
 
     /// R2.1: a command whose caller has gone — the tool call timed out, or the client
@@ -1238,49 +1701,6 @@ mod tests {
             .log
             .iter()
             .any(|l| !l.ok && l.summary == "dropped: caller gone"));
-    }
-
-    /// The same rule for a write that waited behind an approval prompt: by the time the
-    /// user answers, the call may be long gone.
-    #[test]
-    fn a_deferred_write_whose_caller_has_gone_is_dropped() {
-        let ctx = egui::Context::default();
-        let mut app = TtgApp::build(&ctx, None, None, None);
-        app.mcp.settings.confirm_delete = true;
-
-        let mut first_rx = push(
-            &app,
-            AgentCommand::EntityDelete {
-                entities: vec!["first".into()],
-            },
-        );
-        let abandoned = push(
-            &app,
-            AgentCommand::EntityDelete {
-                entities: vec!["second".into()],
-            },
-        );
-        let mut third_rx = push(
-            &app,
-            AgentCommand::EntityDelete {
-                entities: vec!["third".into()],
-            },
-        );
-        app.drain_agent_commands(&ctx);
-        assert_eq!(app.mcp.deferred.len(), 2);
-        drop(abandoned);
-
-        app.resolve_confirm(false); // Deny the first; the queue moves on.
-        let _ = first_rx.try_recv().expect("first answered");
-        assert!(app.mcp.deferred.is_empty(), "both deferred writes were taken");
-        // The abandoned one was skipped, so the third is what now waits for approval.
-        match app.mcp.pending_confirm.as_ref().map(|p| &p.cmd) {
-            Some(AgentCommand::EntityDelete { entities }) => {
-                assert_eq!(entities, &vec!["third".to_string()])
-            }
-            other => panic!("expected the third delete to be pending, got {other:?}"),
-        }
-        assert!(third_rx.try_recv().is_err(), "still waiting for its own approval");
     }
 
     /// R2.1: the heartbeat tells a blocked UI from a merely idle one. Draining beats

@@ -3,7 +3,8 @@
 //! Every tool forwards an [`AgentCommand`] to the UI thread and waits for the reply.
 //! The server itself holds no project state, so any number of sessions can share it.
 
-use super::{AgentCommand, AgentReply, Heartbeat, ServerEvent, Started};
+use super::approvals::Approvals;
+use super::{oauth, AgentCommand, AgentReply, Heartbeat, ServerEvent, Started};
 use rmcp::{
     handler::server::{router::tool::ToolRouter, wrapper::Parameters},
     model::{
@@ -38,6 +39,8 @@ pub struct TtgServer {
     session: u64,
     /// Fingerprint of the loaded definitions, quoted in `serverInfo` (R3.20).
     catalog_hash: String,
+    /// Approval tickets, read directly for `approval_status` (no trip through the UI).
+    approvals: Arc<Approvals>,
     /// Read by the `#[tool_handler]`-generated `call_tool` / `list_tools`.
     #[allow(dead_code)]
     tool_router: ToolRouter<Self>,
@@ -895,6 +898,14 @@ pub struct ExportArgs {
 const STALE: Duration = Duration::from_secs(3);
 const WAKE: Duration = Duration::from_millis(600);
 
+/// The longest a call waits for the UI. Shorter than the 60 s many MCP clients allow, so
+/// the caller hears from the server, with what happened, rather than from its own timer.
+const CALL_TIMEOUT: Duration = Duration::from_secs(45);
+
+/// How long a write that needs approval waits for a quick Allow / Deny before answering
+/// with its ticket.
+const APPROVAL_GRACE: Duration = Duration::from_secs(3);
+
 impl TtgServer {
     pub fn new(
         tx: mpsc::Sender<(AgentCommand, AgentReply)>,
@@ -902,6 +913,7 @@ impl TtgServer {
         subs: Subscribers,
         beat: Arc<Heartbeat>,
         catalog_hash: String,
+        approvals: Arc<Approvals>,
     ) -> Self {
         TtgServer {
             tx,
@@ -910,6 +922,7 @@ impl TtgServer {
             beat,
             session: SESSIONS.fetch_add(1, Ordering::Relaxed),
             catalog_hash,
+            approvals,
             tool_router: Self::tool_router(),
         }
     }
@@ -942,24 +955,62 @@ impl TtgServer {
         ))
     }
 
-    /// Queue a command for the UI thread and wait for its answer. Writes get a long
-    /// timeout because the user may be looking at an Allow / Deny prompt.
+    /// Queue a command for the UI thread and wait for its answer, never longer than
+    /// [`CALL_TIMEOUT`]: the reply always arrives before a typical client gives up, and it
+    /// always says whether anything was applied.
+    ///
+    /// A write that needs the user's approval comes back at once as a ticket
+    /// (`pending_approval`); if the user answers within [`APPROVAL_GRACE`] the reply is
+    /// the outcome instead. On a timeout the call is withdrawn, so the UI will never run
+    /// it; if the UI had already started it, the answer is waited for.
     async fn exec(&self, cmd: AgentCommand) -> Result<serde_json::Value, String> {
         self.refuse_if_busy().await?;
-        let secs = if cmd.is_write() { 600 } else { 60 };
-        let (reply_tx, reply_rx) = tokio::sync::oneshot::channel();
-        if self.tx.send((cmd, reply_tx)).is_err() {
-            return Err("the app is shutting down".into());
+        let (reply, mut wait) = AgentReply::channel();
+        if self.tx.send((cmd, reply)).is_err() {
+            return Err("the app is shutting down; nothing was applied".into());
         }
         self.ctx.request_repaint();
-        match tokio::time::timeout(Duration::from_secs(secs), reply_rx).await {
+        let answer = match tokio::time::timeout(CALL_TIMEOUT, &mut wait.rx).await {
             Ok(Ok(r)) => r,
-            Ok(Err(_)) => Err("the app dropped the request".into()),
-            Err(_) => Err(
-                "timed out waiting for the app (is a dialog or an approval prompt open?); \
-                 the queued command is dropped rather than applied late, so it is safe to retry"
-                    .into(),
-            ),
+            Ok(Err(_)) => return Err("the app dropped the request without running it; nothing was applied".into()),
+            Err(_) if wait.withdraw() => {
+                return Err(format!(
+                    "the app did not get to this call within {}s{}; it has been withdrawn and will not run later, so nothing was applied and it is safe to retry",
+                    CALL_TIMEOUT.as_secs(),
+                    self.beat
+                        .since_drain()
+                        .1
+                        .map(|b| format!(" (it is busy: {b})"))
+                        .unwrap_or_default()
+                ))
+            }
+            // The UI claimed it just before the deadline: it is running, so wait.
+            Err(_) => match wait.rx.await {
+                Ok(r) => r,
+                Err(_) => return Err("the app stopped while running this call; check project_changes".into()),
+            },
+        };
+        match answer {
+            Ok(v) if v.get("status").and_then(|s| s.as_str()) == Some("pending_approval") => {
+                let ticket = v["ticket"].as_str().unwrap_or_default().to_string();
+                Ok(self.await_ticket(&ticket, APPROVAL_GRACE).await.unwrap_or(v))
+            }
+            other => other,
+        }
+    }
+
+    /// The ticket's status once it is no longer pending, if that happens within `grace`.
+    async fn await_ticket(&self, ticket: &str, grace: Duration) -> Option<serde_json::Value> {
+        let deadline = tokio::time::Instant::now() + grace;
+        loop {
+            let st = self.approvals.status_json(ticket)?;
+            if st["status"] != "pending_approval" {
+                return Some(st);
+            }
+            if tokio::time::Instant::now() >= deadline {
+                return None;
+            }
+            tokio::time::sleep(Duration::from_millis(100)).await;
         }
     }
 
@@ -1060,6 +1111,26 @@ pub struct DiffArgs {
     pub provider: Option<String>,
     #[schemars(description = "Compare an export with (true) or without (false) Kubernetes manifests")]
     pub k8s: Option<bool>,
+}
+
+#[derive(Debug, Default, serde::Deserialize, schemars::JsonSchema)]
+pub struct ApprovalStatusArgs {
+    #[schemars(
+        description = "Ticket from a reply whose status was pending_approval. Omit to list every ticket still known (pending ones and those answered in the last 30 minutes)"
+    )]
+    pub ticket: Option<String>,
+}
+
+#[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
+pub struct ImportArgs {
+    #[schemars(
+        description = "The project: a JSON object in the .ttg.json format (schemas/project.schema.json), or that JSON as a string. At least schema_version and name; containers, nodes, edges, views and settings as in a saved file"
+    )]
+    pub json: serde_json::Value,
+    #[schemars(
+        description = "Replace the open project when it already has entities. Without it the import is refused unless the open project is empty. The replaced project comes back with one undo; when it has unsaved changes the user is asked first"
+    )]
+    pub replace: Option<bool>,
 }
 
 #[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
@@ -1216,7 +1287,7 @@ impl TtgServer {
         if let Err(e) = self.refuse_if_busy().await {
             return fail(e);
         }
-        let (reply_tx, reply_rx) = tokio::sync::oneshot::channel();
+        let (reply_tx, wait) = AgentReply::channel();
         let resized = a.width.is_some() || a.height.is_some();
         let cmd = AgentCommand::Screenshot {
             fit: a.fit.unwrap_or(false),
@@ -1230,8 +1301,8 @@ impl TtgServer {
         }
         self.ctx.request_repaint();
         // A resize needs a few more frames (and a window manager round trip).
-        let wait = if resized { 30 } else { 15 };
-        match tokio::time::timeout(Duration::from_secs(wait), reply_rx).await {
+        let wait_s = if resized { 30 } else { 15 };
+        match tokio::time::timeout(Duration::from_secs(wait_s), wait.rx).await {
             Ok(Ok(Ok(v))) => {
                 let data = v.get("data").and_then(|d| d.as_str()).unwrap_or("").to_string();
                 let meta = serde_json::json!({
@@ -1587,24 +1658,32 @@ impl TtgServer {
         if !a.validate.unwrap_or(false) || result.is_error.unwrap_or(false) {
             return result;
         }
-        // Validate off the UI thread; it can take a minute.
-        let tool_name = result
+        let reply = result
             .content
             .first()
             .and_then(|c| c.as_text())
             .and_then(|t| serde_json::from_str::<serde_json::Value>(&t.text).ok())
-            .and_then(|v| v.get("tool").and_then(|t| t.as_str()).map(|s| s.to_string()))
-            .unwrap_or("opentofu".into());
-        let tool = if tool_name == "terraform" {
-            ttg_core::Tool::Terraform
-        } else {
-            ttg_core::Tool::OpenTofu
+            .unwrap_or_default();
+        // The export reply itself, or the one an approved ticket carries.
+        let export = match reply.get("status").and_then(|s| s.as_str()) {
+            Some("pending_approval") => {
+                // Nothing is written yet: validate once the user allows it, and put the
+                // outcome on the ticket where approval_status reports it.
+                let ticket = reply["ticket"].as_str().unwrap_or_default().to_string();
+                let approvals = self.approvals.clone();
+                tokio::spawn(async move { validate_after_approval(approvals, ticket, dir).await });
+                let mut content = result.content;
+                content.push(Content::text(
+                    "validate: runs once the export is approved; approval_status { ticket } reports it as result.validate",
+                ));
+                return CallToolResult::success(content);
+            }
+            Some("applied") => reply["result"].clone(),
+            Some("denied") | Some("expired") | Some("failed") => return result,
+            _ => reply,
         };
-        let outcome = tokio::task::spawn_blocking(move || {
-            ttg_codegen::validate::run(std::path::Path::new(&dir), tool).summary()
-        })
-        .await
-        .unwrap_or_else(|e| format!("validate task failed: {e}"));
+        // Validate off the UI thread; it can take a minute.
+        let outcome = run_validate(dir, tool_of(&export)).await;
         let mut content = result.content;
         content.push(Content::text(format!("validate: {outcome}")));
         CallToolResult::success(content)
@@ -1648,6 +1727,39 @@ impl TtgServer {
     )]
     async fn project_changes(&self, Parameters(a): Parameters<ChangesArgs>) -> CallToolResult {
         self.run(AgentCommand::Changes { since: a.since }).await
+    }
+
+    // Approval tickets and file interchange.
+
+    #[tool(
+        description = "Outcome of a write that needed the user's approval. Such a write (save, open, new, export, import over unsaved work, delete when the user asks for that) answers within seconds with { status: \"pending_approval\", ticket, what, applied: false } instead of waiting for the prompt. Poll this with the ticket every few seconds: it answers at once with pending_approval (and how many prompts are ahead and when it expires), applied (applied: true, with the command's result), failed (allowed, but the command failed: nothing applied), denied, or expired (nobody answered in time: nothing applied). Never repeat the original call while its ticket is pending. Without a ticket it lists every ticket still known."
+    )]
+    async fn approval_status(&self, Parameters(a): Parameters<ApprovalStatusArgs>) -> CallToolResult {
+        match a.ticket {
+            None => ok_json(serde_json::json!({ "tickets": self.approvals.list_json() })),
+            Some(t) => match self.approvals.status_json(&t) {
+                Some(v) => ok_json(v),
+                None => fail(format!(
+                    "unknown ticket {t}: tickets are kept for 30 minutes after they are answered (and lost when the app restarts); approval_status without a ticket lists the known ones"
+                )),
+            },
+        }
+    }
+
+    #[tool(
+        description = "Replace the open project with one given as .ttg.json JSON (the format project_get returns and the app saves; schema: https://raw.githubusercontent.com/geawilliamsUK/TerraTofuGUi/master/schemas/project.schema.json). The JSON is checked against the schema first and every problem is reported with its line; nothing changes unless it loads. Refused while the open project has entities unless `replace` is true; the replaced project comes back with one undo. When the open project has unsaved changes the user is asked first (the reply is then an approval ticket). The imported project is not saved: it has no file until project_save { path }."
+    )]
+    async fn project_import(&self, Parameters(a): Parameters<ImportArgs>) -> CallToolResult {
+        let text = match a.json {
+            serde_json::Value::String(s) => s,
+            v @ serde_json::Value::Object(_) => serde_json::to_string_pretty(&v).unwrap_or_default(),
+            _ => return fail("`json` must be the project object, or that object as a JSON string"),
+        };
+        self.run(AgentCommand::ProjectImport {
+            json: text,
+            replace: a.replace.unwrap_or(false),
+        })
+        .await
     }
 
     #[tool(description = "Undo the last change (agent or user).")]
@@ -1791,8 +1903,63 @@ impl ServerHandler for TtgServer {
              you make it and every write is one undo step. Start with project_summary and \
              catalog_types. Entities can be addressed by id or by display name. Never call \
              project_save without the user asking. Prefer entity_set_parent over explicit \
-             network_membership links to containers: containment implies membership. One              diagram serves every provider: tag an entity or link with `providers` to keep it              out of the other provider's export (provider-only types are tagged automatically).              Curated types cover the portable concepts; for anything else use schema_search and add              a native resource (`native:<provider>:<type>`), setting its arguments via              entity_update.extra. Extra arguments on curated types add or override provider              arguments and are validated against the schema. Use project_apply to make several              writes as one undo step, project_changes (or a subscription to ttg://project) to notice              the user's own edits, and export_diff before export_run to show what would change. Some              writes (saving, opening, exporting, deleting) may wait for the user's approval; while a              prompt is open, reads keep answering (writes queue up behind it in arrival order).              A call that comes back \"the app is busy\" was never queued and a call that times out              is dropped rather than applied late, so either is safe to retry once; nothing is ever              applied twice.              Views: view_set while a saved view is active rewrites that view's filter (use              view_activate All first to filter without touching it), view_update takes a filter of              its own, view_save refuses a name already in use unless replace is true, and              view_delete removes one.              `terratofu-gui --serve --port N --token T [project]` runs the same server headless, with              no window and no approval prompts, for scripting and CI.",
+             network_membership links to containers: containment implies membership. One              diagram serves every provider: tag an entity or link with `providers` to keep it              out of the other provider's export (provider-only types are tagged automatically).              Curated types cover the portable concepts; for anything else use schema_search and add              a native resource (`native:<provider>:<type>`), setting its arguments via              entity_update.extra. Extra arguments on curated types add or override provider              arguments and are validated against the schema. Use project_apply to make several              writes as one undo step, project_changes (or a subscription to ttg://project) to notice              the user's own edits, and export_diff before export_run to show what would change. \
+             Writes that need the user's approval (saving, opening, a new project, exporting, \
+             importing over unsaved work, deleting when the user asked for that) answer within \
+             seconds with {status: \"pending_approval\", ticket, what, applied: false}: nothing has \
+             happened yet. Tell the user it is waiting for them in the app, then poll \
+             approval_status {ticket} every few seconds until it says applied (with the result), \
+             failed, denied or expired; never repeat the original call. Other calls keep working \
+             meanwhile. Every reply says whether anything was applied: a call that comes back \
+             \"the app is busy\" was never queued, and one that times out was withdrawn before it \
+             ran, so either is safe to retry once; nothing is ever applied twice. \
+             The .ttg.json file is the interchange format (docs/FILE_FORMAT.md, JSON schema at \
+             https://raw.githubusercontent.com/geawilliamsUK/TerraTofuGUi/master/schemas/project.schema.json): \
+             project_import {json, replace} loads one in memory, checking it against the schema \
+             first; without this server an agent can write the file for the user to open or run \
+             `ttg check --schema` / `ttg export` on.              Views: view_set while a saved view is active rewrites that view's filter (use              view_activate All first to filter without touching it), view_update takes a filter of              its own, view_save refuses a name already in use unless replace is true, and              view_delete removes one.              `terratofu-gui --serve --port N --token T [project]` runs the same server headless, with \
+             no window and no approval prompts, for scripting and CI; with --oauth and \
+             --public-url behind an HTTPS tunnel it is reachable from cloud sessions.",
         ))
+    }
+}
+
+/// The tool an export reply says it wrote for.
+fn tool_of(export: &serde_json::Value) -> ttg_core::Tool {
+    if export.get("tool").and_then(|t| t.as_str()) == Some("terraform") {
+        ttg_core::Tool::Terraform
+    } else {
+        ttg_core::Tool::OpenTofu
+    }
+}
+
+/// `<tool> init && validate` in `dir`, off the async threads.
+async fn run_validate(dir: String, tool: ttg_core::Tool) -> String {
+    tokio::task::spawn_blocking(move || {
+        ttg_codegen::validate::run(std::path::Path::new(&dir), tool).summary()
+    })
+    .await
+    .unwrap_or_else(|e| format!("validate task failed: {e}"))
+}
+
+/// `export_run { validate: true }` behind an approval prompt: wait for the ticket, and
+/// once the export is applied, validate it and add the outcome to the ticket's result
+/// (`running` meanwhile, so a poll in between does not mistake it for skipped).
+async fn validate_after_approval(approvals: Arc<Approvals>, ticket: String, dir: String) {
+    loop {
+        let Some(t) = approvals.get(&ticket) else {
+            return;
+        };
+        match t.outcome {
+            super::approvals::Outcome::Pending => tokio::time::sleep(Duration::from_millis(500)).await,
+            super::approvals::Outcome::Applied(result) => {
+                approvals.amend(&ticket, "validate", serde_json::json!("running"));
+                let outcome = run_validate(dir, tool_of(&result)).await;
+                approvals.amend(&ticket, "validate", serde_json::json!(outcome));
+                return;
+            }
+            _ => return,
+        }
     }
 }
 
@@ -1833,10 +2000,75 @@ fn with_identity(catalog_hash: &str, standing: &str) -> String {
 
 // ------------------------------------------------------------------ runtime thread
 
+/// How the server listens and who it lets in.
+pub struct ServeOptions {
+    pub port: u16,
+    /// Listen address; 127.0.0.1 unless the user chose otherwise.
+    pub bind: std::net::IpAddr,
+    /// The bearer token local clients send (`claude mcp add --header ...`).
+    pub token: String,
+    /// The HTTPS origin a tunnel publishes the server under, without a trailing slash.
+    pub public_url: Option<String>,
+    /// OAuth sign-in, when it is on: its endpoints are served and its access tokens are
+    /// accepted beside the bearer token.
+    pub oauth: Option<Arc<oauth::OAuth>>,
+    pub approvals: Arc<Approvals>,
+}
+
+impl ServeOptions {
+    /// The Host headers accepted: this machine's names, plus the public URL's host. rmcp
+    /// refuses any other to stop DNS-rebinding attacks on a local server, and the OAuth
+    /// endpoints use the same list.
+    pub fn allowed_hosts(&self) -> Vec<String> {
+        let mut hosts = vec![
+            "localhost".to_string(),
+            "127.0.0.1".to_string(),
+            "::1".to_string(),
+        ];
+        let endpoint = oauth::Endpoint {
+            public_url: self.public_url.clone(),
+        };
+        if let Some(auth) = endpoint.public_authority() {
+            let name = auth.split(':').next().unwrap_or("").to_string();
+            hosts.push(name);
+            hosts.push(auth);
+        }
+        // Bound to one outside address: clients on the network use it as the host.
+        if !self.bind.is_loopback() && !self.bind.is_unspecified() {
+            hosts.push(self.bind.to_string());
+        }
+        hosts.dedup();
+        hosts
+    }
+}
+
+/// Whether a request's Host is one of `allowed` (a bare name matches any port).
+fn host_allowed(headers: &axum::http::HeaderMap, allowed: &[String]) -> bool {
+    let Some(host) = headers
+        .get(axum::http::header::HOST)
+        .and_then(|h| h.to_str().ok())
+        .and_then(|h| h.parse::<axum::http::uri::Authority>().ok())
+    else {
+        return false;
+    };
+    let name = host.host().trim_matches(['[', ']']).to_ascii_lowercase();
+    allowed
+        .iter()
+        .any(|a| match a.parse::<axum::http::uri::Authority>() {
+            Ok(allowed) => {
+                allowed
+                    .host()
+                    .trim_matches(['[', ']'])
+                    .eq_ignore_ascii_case(&name)
+                    && allowed.port_u16().is_none_or(|p| host.port_u16() == Some(p))
+            }
+            Err(_) => a.trim_matches(['[', ']']).eq_ignore_ascii_case(&name),
+        })
+}
+
 /// Body of the server thread: bind, serve until the cancellation token fires.
 pub fn run(
-    port: u16,
-    token: String,
+    opts: ServeOptions,
     tx: mpsc::Sender<(AgentCommand, AgentReply)>,
     ctx: egui::Context,
     beat: Arc<Heartbeat>,
@@ -1858,7 +2090,9 @@ pub fn run(
         }
     };
     rt.block_on(async move {
-        let listener = match tokio::net::TcpListener::bind(("127.0.0.1", port)).await {
+        let port = opts.port;
+        let bind = opts.bind;
+        let listener = match tokio::net::TcpListener::bind((bind, port)).await {
             Ok(l) => l,
             Err(e) => {
                 let hint = if e.raw_os_error() == Some(10013) {
@@ -1868,14 +2102,16 @@ pub fn run(
                 } else {
                     ""
                 };
-                let _ = started.send(Err(format!("cannot listen on 127.0.0.1:{port}: {e}{hint}")));
+                let _ = started.send(Err(format!("cannot listen on {bind}:{port}: {e}{hint}")));
                 return;
             }
         };
-        let config = StreamableHttpServerConfig::default();
+        let allowed = opts.allowed_hosts();
+        let config = StreamableHttpServerConfig::default().with_allowed_hosts(allowed.clone());
         let cancel = config.cancellation_token.clone();
         let subs: Subscribers = Arc::new(Mutex::new(Vec::new()));
         let subs_for_service = subs.clone();
+        let approvals = opts.approvals.clone();
         let service = StreamableHttpService::new(
             move || {
                 Ok(TtgServer::new(
@@ -1884,6 +2120,7 @@ pub fn run(
                     subs_for_service.clone(),
                     beat.clone(),
                     catalog_hash.clone(),
+                    approvals.clone(),
                 ))
             },
             std::sync::Arc::new(LocalSessionManager::default()),
@@ -1914,30 +2151,103 @@ pub fn run(
                 }
             }
         });
-        let expected = format!("Bearer {token}");
+        // `/mcp` takes the bearer token or, with OAuth on, a live access token. A 401
+        // then says where to sign in (RFC 9728), which is how a connector discovers it.
+        let expected = format!("Bearer {}", opts.token);
+        let endpoint = oauth::Endpoint {
+            public_url: opts.public_url.clone(),
+        };
+        let signin = opts.oauth.clone();
+        let auth_endpoint = endpoint.clone();
         let auth = axum::middleware::from_fn(move |req: axum::extract::Request, next: axum::middleware::Next| {
-            let ok = req
+            let given = req
                 .headers()
                 .get(axum::http::header::AUTHORIZATION)
                 .and_then(|v| v.to_str().ok())
-                .map(|v| v == expected)
-                .unwrap_or(false);
+                .map(str::to_string);
+            let ok = given.as_deref() == Some(expected.as_str())
+                || match (&signin, given.as_deref().and_then(|g| g.strip_prefix("Bearer "))) {
+                    (Some(o), Some(tok)) => o.check_access(tok.trim()),
+                    _ => false,
+                };
+            let challenge = (!ok && signin.is_some())
+                .then(|| oauth::challenge(&auth_endpoint, req.headers(), given.is_some()));
+            async move {
+                if ok {
+                    return next.run(req).await;
+                }
+                let mut resp = axum::response::IntoResponse::into_response((
+                    axum::http::StatusCode::UNAUTHORIZED,
+                    "missing or wrong bearer token (see Agent ▸ MCP settings in TerraTofu GUI)",
+                ));
+                let value = challenge.unwrap_or_else(|| "Bearer".to_string());
+                if let Ok(v) = value.parse() {
+                    resp.headers_mut().insert(axum::http::header::WWW_AUTHENTICATE, v);
+                }
+                resp
+            }
+        });
+        let mut router = axum::Router::new().nest_service("/mcp", service).route_layer(auth);
+        if let Some(o) = &opts.oauth {
+            router = router.merge(oauth::routes(o.clone(), endpoint));
+        }
+        // The same Host rule for every route, the OAuth pages included.
+        let host_check = axum::middleware::from_fn(move |req: axum::extract::Request, next: axum::middleware::Next| {
+            let ok = host_allowed(req.headers(), &allowed);
             async move {
                 if ok {
                     next.run(req).await
                 } else {
                     axum::response::IntoResponse::into_response((
-                        axum::http::StatusCode::UNAUTHORIZED,
-                        "missing or wrong bearer token (see Agent ▸ MCP settings in TerraTofu GUI)",
+                        axum::http::StatusCode::FORBIDDEN,
+                        "Forbidden: Host header is not allowed (set the public URL in Agent settings, or --public-url, to the address the tunnel uses)",
                     ))
                 }
             }
         });
-        let router = axum::Router::new().nest_service("/mcp", service).layer(auth);
+        let router = router.layer(host_check);
         let _ = started.send(Ok((cancel.clone(), ev_tx)));
         let shutdown = cancel.clone();
         let _ = axum::serve(listener, router)
             .with_graceful_shutdown(async move { shutdown.cancelled().await })
             .await;
     });
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn opts(public_url: Option<&str>) -> ServeOptions {
+        ServeOptions {
+            port: 9337,
+            bind: "127.0.0.1".parse().unwrap(),
+            token: "t".into(),
+            public_url: public_url.map(str::to_string),
+            oauth: None,
+            approvals: Arc::new(Approvals::default()),
+        }
+    }
+
+    fn host(h: &str) -> axum::http::HeaderMap {
+        let mut m = axum::http::HeaderMap::new();
+        m.insert(axum::http::header::HOST, h.parse().unwrap());
+        m
+    }
+
+    #[test]
+    fn only_local_names_and_the_public_host_are_accepted() {
+        let local = opts(None).allowed_hosts();
+        assert!(host_allowed(&host("127.0.0.1:9337"), &local));
+        assert!(host_allowed(&host("localhost:9337"), &local));
+        assert!(host_allowed(&host("[::1]:9337"), &local));
+        assert!(!host_allowed(&host("ttg.example.com"), &local));
+        assert!(!host_allowed(&host("attacker.example:9337"), &local));
+
+        let public = opts(Some("https://ttg.example.com")).allowed_hosts();
+        assert!(host_allowed(&host("ttg.example.com"), &public));
+        assert!(host_allowed(&host("TTG.example.com:443"), &public));
+        assert!(host_allowed(&host("127.0.0.1:9337"), &public));
+        assert!(!host_allowed(&host("other.example.com"), &public));
+    }
 }

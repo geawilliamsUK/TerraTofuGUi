@@ -19,6 +19,9 @@ mod scoped;
 use scoped::{gen_error_text, note_geometry};
 // `cost_estimate`.
 mod cost;
+// `project_import`.
+mod import;
+pub(crate) use import::import_check;
 
 /// What `entity_move` / `entity_resize` were pointed at. Resources live in the project;
 /// notes, logical nodes and grouping boxes live in one view, so they are only movable
@@ -1327,6 +1330,7 @@ impl TtgApp {
                 relation,
                 providers,
             } => self.bulk_link(select, target, relation, providers),
+            AgentCommand::ProjectImport { json, replace } => self.project_import(json, replace),
             AgentCommand::CostEstimate {
                 provider,
                 environment,

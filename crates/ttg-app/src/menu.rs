@@ -314,6 +314,134 @@ fn toggle_mcp(app: &mut TtgApp, ctx: &egui::Context, on: bool) {
     }
 }
 
+/// Bind address, public URL, OAuth sign-in and the grants it has handed out, for using
+/// the server from a cloud session through a tunnel (docs/MCP_PLAN.md §5).
+#[cfg(feature = "mcp")]
+fn remote_access_ui(app: &mut TtgApp, ui: &mut Ui, running: bool) {
+    let grants = app.mcp.oauth.grants();
+    let header = if grants.is_empty() {
+        "Remote access".to_string()
+    } else {
+        format!("Remote access ({} signed-in client(s))", grants.len())
+    };
+    egui::CollapsingHeader::new(RichText::new(header).strong())
+        .id_salt("mcp_remote")
+        .show(ui, |ui| {
+            ui.add_enabled_ui(!running, |ui| {
+                egui::Grid::new("mcp_remote_grid").num_columns(2).show(ui, |ui| {
+                    ui.label("Listen on");
+                    ui.add(egui::TextEdit::singleline(&mut app.mcp.settings.bind).desired_width(140.0))
+                        .on_hover_text("127.0.0.1 keeps the server on this machine; a tunnel connects to it there. 0.0.0.0 listens on every network interface.");
+                    ui.end_row();
+                    ui.label("Public URL");
+                    ui.add(
+                        egui::TextEdit::singleline(&mut app.mcp.settings.public_url)
+                            .hint_text("https://… from cloudflared or Tailscale Funnel")
+                            .desired_width(300.0),
+                    )
+                    .on_hover_text("The HTTPS origin your tunnel publishes this server under. Its host name is the only outside name the server answers to.");
+                    ui.end_row();
+                });
+                ui.checkbox(&mut app.mcp.settings.oauth, "Allow OAuth sign-in (claude.ai custom connectors)")
+                    .on_hover_text("Serves the OAuth endpoints. Every sign-in asks you here first; the bearer token above keeps working for local clients.");
+            });
+            ui.horizontal(|ui| {
+                ui.label("Approval prompts expire after");
+                ui.add(
+                    egui::DragValue::new(&mut app.mcp.settings.approval_ttl_secs)
+                        .range(10..=86_400)
+                        .suffix(" s"),
+                );
+            });
+            for err in [app.mcp.settings.bind_addr().err(), app.mcp.settings.public_url().err()]
+                .into_iter()
+                .flatten()
+            {
+                ui.label(RichText::new(err).small().color(Color32::from_rgb(200, 40, 40)));
+            }
+            if let Ok(ip) = app.mcp.settings.bind_addr() {
+                if !ip.is_loopback() {
+                    ui.label(
+                        RichText::new("Listening beyond this machine: anyone who can reach the port can try to connect. The token or an OAuth grant is still required, but prefer 127.0.0.1 behind a tunnel.")
+                            .small()
+                            .color(Color32::from_rgb(190, 110, 20)),
+                    );
+                }
+            }
+            if let Some(url) = app.mcp.connector_url() {
+                ui.horizontal(|ui| {
+                    ui.label("Connector URL");
+                    ui.label(RichText::new(&url).monospace().small());
+                    if ui.small_button("copy").clicked() {
+                        ui.ctx().copy_text(url.clone());
+                        app.status = "Copied the connector URL".into();
+                    }
+                });
+                if !app.mcp.settings.oauth {
+                    ui.label(
+                        RichText::new("claude.ai connectors sign in with OAuth: turn it on above.")
+                            .small()
+                            .color(Color32::from_gray(110)),
+                    );
+                }
+            }
+            if running {
+                ui.label(
+                    RichText::new("Stop the server to change these.")
+                        .small()
+                        .color(Color32::from_gray(120)),
+                );
+            }
+            if !grants.is_empty() {
+                ui.add_space(4.0);
+                ui.horizontal(|ui| {
+                    ui.label(RichText::new("Signed-in clients").strong());
+                    if ui
+                        .small_button("revoke all")
+                        .on_hover_text("Every OAuth client must sign in again")
+                        .clicked()
+                    {
+                        app.mcp.oauth.revoke_all();
+                        app.status = "Revoked every OAuth sign-in".into();
+                    }
+                });
+                let now = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .map(|d| d.as_secs())
+                    .unwrap_or(0);
+                let ago = |t: u64| {
+                    let s = now.saturating_sub(t);
+                    if s < 120 {
+                        format!("{s}s ago")
+                    } else if s < 7200 {
+                        format!("{}m ago", s / 60)
+                    } else {
+                        format!("{}h ago", s / 3600)
+                    }
+                };
+                for g in &grants {
+                    ui.horizontal(|ui| {
+                        ui.label(RichText::new(&g.client_name).small().strong());
+                        ui.label(
+                            RichText::new(format!(
+                                "allowed {}, last used {}, expires in {} days",
+                                ago(g.created),
+                                ago(g.last_used),
+                                g.refresh_expires.saturating_sub(now) / 86_400
+                            ))
+                            .small()
+                            .color(Color32::from_gray(100)),
+                        );
+                        if ui.small_button("revoke").clicked() {
+                            app.mcp.oauth.revoke(&g.id);
+                            app.status = format!("Revoked {}'s sign-in", g.client_name);
+                        }
+                    });
+                }
+            }
+        });
+}
+
 /// Settings, connection details and the activity log for the MCP server.
 #[cfg(feature = "mcp")]
 pub fn mcp_window(app: &mut TtgApp, ui: &mut Ui) {
@@ -387,10 +515,12 @@ pub fn mcp_window(app: &mut TtgApp, ui: &mut Ui) {
         app.status = "Copied the claude mcp add command".into();
     }
     ui.label(
-        RichText::new("Run it once in the project you want to work from; the token is persistent. Only localhost can connect. Every change the agent makes is one undo step and flashes on the canvas; saving to disk only happens when a tool explicitly asks.")
+        RichText::new("Run it once in the project you want to work from; the token is persistent. Unless Remote access below says otherwise, only this machine can connect. Every change the agent makes is one undo step and flashes on the canvas; saving to disk only happens when a tool explicitly asks.")
             .small()
             .color(Color32::from_gray(110)),
     );
+    ui.add_space(6.0);
+    remote_access_ui(app, ui, running);
     ui.add_space(6.0);
     ui.horizontal(|ui| {
         ui.label(RichText::new("Activity").strong());

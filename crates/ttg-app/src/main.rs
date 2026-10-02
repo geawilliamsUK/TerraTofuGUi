@@ -1,12 +1,16 @@
 //! TerraTofu GUI — native desktop entry point.
 //!
 //! `terratofu-gui [project.ttg.json] [--definitions DIR] [--screenshot out.png]`
-//! `terratofu-gui --serve [--port N] [--token T] [project.ttg.json]`
+//! `terratofu-gui --serve [--port N] [--token T] [--bind ADDR] [--public-url URL]
+//!                [--oauth] [--grants FILE] [project.ttg.json]`
 //!
 //! `--screenshot` renders a few frames, writes a PNG of the window and exits. Used for
 //! documentation and smoke tests in CI. `--serve` runs the MCP server without a window
 //! (no screenshots, no approval prompts): the same app logic, driven only by agents.
-//! Used by the CI test and for scripted editing.
+//! Used by the CI test and for scripted editing. `--public-url` is the HTTPS address a
+//! tunnel publishes it under; `--oauth` serves OAuth sign-in for clients such as
+//! claude.ai custom connectors, approving each sign-in with a one-time code printed on
+//! stdout, and `--grants FILE` keeps what was allowed across restarts.
 
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
@@ -37,6 +41,7 @@ fn main() -> eframe::Result {
     let mut serve = false;
     let mut port: Option<u16> = None;
     let mut token: Option<String> = None;
+    let mut remote = Remote::default();
     while let Some(a) = args.next() {
         if a == "--definitions" {
             defs = args.next().map(PathBuf::from);
@@ -48,6 +53,14 @@ fn main() -> eframe::Result {
             port = args.next().and_then(|p| p.parse().ok());
         } else if a == "--token" {
             token = args.next();
+        } else if a == "--bind" {
+            remote.bind = args.next();
+        } else if a == "--public-url" {
+            remote.public_url = args.next();
+        } else if a == "--oauth" {
+            remote.oauth = true;
+        } else if a == "--grants" {
+            remote.grants = args.next().map(PathBuf::from);
         } else {
             open = Some(PathBuf::from(a));
         }
@@ -56,11 +69,11 @@ fn main() -> eframe::Result {
     if serve {
         #[cfg(feature = "mcp")]
         {
-            serve_headless(open, defs, port, token);
+            serve_headless(open, defs, port, token, remote);
         }
         #[cfg(not(feature = "mcp"))]
         {
-            let _ = (port, token);
+            let _ = (port, token, remote);
             eprintln!("this build has no MCP support (built without the `mcp` feature)");
             std::process::exit(2);
         }
@@ -91,6 +104,16 @@ fn main() -> eframe::Result {
     )
 }
 
+/// `--serve` options for reaching the server from elsewhere.
+#[derive(Default)]
+#[cfg_attr(not(feature = "mcp"), allow(dead_code))]
+struct Remote {
+    bind: Option<String>,
+    public_url: Option<String>,
+    oauth: bool,
+    grants: Option<PathBuf>,
+}
+
 /// Run the MCP server without a window until the process is killed.
 #[cfg(feature = "mcp")]
 fn serve_headless(
@@ -98,6 +121,7 @@ fn serve_headless(
     defs: Option<PathBuf>,
     port: Option<u16>,
     token: Option<String>,
+    remote: Remote,
 ) -> ! {
     use std::io::Write;
     let ctx = egui::Context::default();
@@ -109,6 +133,19 @@ fn serve_headless(
     if let Some(t) = token {
         app.mcp.settings.token = t;
     }
+    if let Some(b) = remote.bind {
+        app.mcp.settings.bind = b;
+    }
+    if let Some(u) = remote.public_url {
+        app.mcp.settings.public_url = u;
+    }
+    app.mcp.settings.oauth = remote.oauth;
+    if let Some(g) = remote.grants {
+        if let Err(e) = app.mcp.oauth.use_file(g) {
+            eprintln!("[mcp] cannot read the grants file: {e}");
+            std::process::exit(1);
+        }
+    }
     if let Some(e) = app.error.take() {
         eprintln!("{e}");
         std::process::exit(1);
@@ -118,6 +155,12 @@ fn serve_headless(
         std::process::exit(1);
     }
     println!("[mcp] listening on {} (headless)", app.mcp.url());
+    if let Some(u) = app.mcp.connector_url() {
+        println!("[mcp] public URL: {u}");
+    }
+    if app.mcp.settings.oauth {
+        println!("[mcp] OAuth sign-in is on: each sign-in prints a one-time code here to type into the browser page");
+    }
     let _ = std::io::stdout().flush();
     loop {
         app.drain_agent_commands(&ctx);

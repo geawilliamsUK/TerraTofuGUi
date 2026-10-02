@@ -2416,3 +2416,403 @@ fn headless_views_and_metadata() {
     assert!(!err, "{again}");
     assert_eq!(again["status"], json!("view refreshed"), "{again}");
 }
+
+// ------------------------------------------------------------------ remote access
+
+/// `--serve` with extra flags, its stdout forwarded line by line (OAuth prints the
+/// one-time codes there).
+fn start_with(project: &str, extra: &[&str]) -> (Server, std::sync::mpsc::Receiver<String>, u16) {
+    let port = free_port();
+    let token = "test-token".to_string();
+    let example = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("../../examples")
+        .join(project);
+    let mut child = Command::new(env!("CARGO_BIN_EXE_terratofu-gui"))
+        .args(["--serve", "--port", &port.to_string(), "--token", &token])
+        .args(extra)
+        .arg(&example)
+        .stdout(Stdio::piped())
+        .stderr(Stdio::inherit())
+        .spawn()
+        .expect("spawn terratofu-gui --serve");
+    let stdout = child.stdout.take().unwrap();
+    let (tx, rx) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        for l in BufReader::new(stdout).lines().map_while(Result::ok) {
+            if tx.send(l).is_err() {
+                break;
+            }
+        }
+    });
+    let deadline = Instant::now() + Duration::from_secs(60);
+    loop {
+        let left = deadline.saturating_duration_since(Instant::now());
+        match rx.recv_timeout(left) {
+            Ok(l) if l.contains("listening on") => break,
+            Ok(_) => continue,
+            Err(_) => panic!("server did not report listening"),
+        }
+    }
+    let server = Server {
+        child,
+        url: format!("http://127.0.0.1:{port}/mcp"),
+        token,
+    };
+    (server, rx, port)
+}
+
+/// Status, headers and body of any response, 4xx/5xx included.
+fn raw(r: Result<ureq::Response, ureq::Error>) -> (u16, ureq::Response) {
+    match r {
+        Ok(resp) => (resp.status(), resp),
+        Err(ureq::Error::Status(code, resp)) => (code, resp),
+        Err(e) => panic!("transport error: {e}"),
+    }
+}
+
+fn body_json(resp: ureq::Response) -> Value {
+    let text = resp.into_string().unwrap();
+    serde_json::from_str(&text).unwrap_or_else(|e| panic!("{e}: {text}"))
+}
+
+fn pkce_challenge(verifier: &str) -> String {
+    use base64::Engine;
+    use sha2::Digest;
+    base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(sha2::Sha256::digest(verifier.as_bytes()))
+}
+
+/// The value of `key` in a URL's query string.
+fn query_param(url: &str, key: &str) -> Option<String> {
+    let q = url.split_once('?')?.1;
+    q.split('&').find_map(|kv| {
+        let (k, v) = kv.split_once('=')?;
+        (k == key).then(|| {
+            // Tokens and states here are URL-safe; only `%3A` / `%2F` appear in `iss`.
+            v.replace("%3A", ":").replace("%2F", "/")
+        })
+    })
+}
+
+fn mcp_status(url: &str, bearer: &str) -> (u16, Option<String>) {
+    let (status, resp) = raw(ureq::post(url)
+        .set("Authorization", &format!("Bearer {bearer}"))
+        .set("Content-Type", "application/json")
+        .set("Accept", "application/json, text/event-stream")
+        .send_string(
+            &json!({"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {
+                    "protocolVersion": "2025-06-18", "capabilities": {},
+                    "clientInfo": {"name": "probe", "version": "0"}}})
+            .to_string(),
+        ));
+    (status, resp.header("www-authenticate").map(str::to_string))
+}
+
+/// The whole OAuth flow a claude.ai connector goes through, headless: discovery from
+/// the 401, registration, authorization with PKCE approved by the one-time code printed
+/// on stdout, the token exchange, MCP calls with the access token, a refresh (rotating
+/// the refresh token), and revocation ending access at once. The bearer token keeps
+/// working throughout, and an unknown Host is refused.
+#[test]
+fn headless_oauth_sign_in_refresh_and_revoke() {
+    let (server, lines, port) = start_with("three-tier.ttg.json", &["--oauth"]);
+    let base = format!("http://127.0.0.1:{port}");
+    let agent = ureq::AgentBuilder::new().redirects(0).build();
+
+    // An unauthenticated call says where to sign in.
+    let (status, challenge) = mcp_status(&server.url, "nothing");
+    assert_eq!(status, 401);
+    let challenge = challenge.expect("WWW-Authenticate on the 401");
+    let meta_url = format!("{base}/.well-known/oauth-protected-resource/mcp");
+    assert!(
+        challenge.contains(&format!("resource_metadata=\"{meta_url}\"")),
+        "{challenge}"
+    );
+    assert!(challenge.contains("invalid_token"), "{challenge}");
+
+    let (status, resp) = raw(agent.get(&meta_url).call());
+    assert_eq!(status, 200);
+    let prm = body_json(resp);
+    assert_eq!(prm["resource"], json!(format!("{base}/mcp")), "{prm}");
+    assert_eq!(prm["authorization_servers"], json!([base]), "{prm}");
+
+    let (status, resp) = raw(agent
+        .get(&format!("{base}/.well-known/oauth-authorization-server"))
+        .call());
+    assert_eq!(status, 200);
+    let asm = body_json(resp);
+    assert_eq!(asm["issuer"], json!(base), "{asm}");
+    assert_eq!(asm["code_challenge_methods_supported"], json!(["S256"]), "{asm}");
+    let register_url = asm["registration_endpoint"].as_str().unwrap().to_string();
+    let authorize_url = asm["authorization_endpoint"].as_str().unwrap().to_string();
+    let token_url = asm["token_endpoint"].as_str().unwrap().to_string();
+    let revoke_url = asm["revocation_endpoint"].as_str().unwrap().to_string();
+
+    // Registration: only https or loopback redirects.
+    let (status, resp) = raw(agent
+        .post(&register_url)
+        .set("Content-Type", "application/json")
+        .send_string(
+            &json!({"client_name": "Evil", "redirect_uris": ["http://evil.example/cb"]}).to_string(),
+        ));
+    assert_eq!(status, 400);
+    assert_eq!(body_json(resp)["error"], "invalid_redirect_uri");
+    let redirect = "http://127.0.0.1:1/callback";
+    let (status, resp) = raw(agent
+        .post(&register_url)
+        .set("Content-Type", "application/json")
+        .send_string(
+            &json!({
+                "client_name": "Test connector",
+                "redirect_uris": [redirect],
+                "token_endpoint_auth_method": "none",
+            })
+            .to_string(),
+        ));
+    assert_eq!(status, 201);
+    let reg = body_json(resp);
+    let client_id = reg["client_id"].as_str().unwrap().to_string();
+    assert!(reg.get("client_secret").is_none(), "{reg}");
+
+    // Authorization without PKCE goes back to the client with an error.
+    let (status, resp) = raw(agent
+        .get(&authorize_url)
+        .query("response_type", "code")
+        .query("client_id", &client_id)
+        .query("redirect_uri", redirect)
+        .query("state", "s1")
+        .call());
+    assert_eq!(status, 302);
+    let loc = resp.header("location").unwrap().to_string();
+    assert_eq!(
+        query_param(&loc, "error").as_deref(),
+        Some("invalid_request"),
+        "{loc}"
+    );
+
+    // With PKCE: the browser lands on a page asking for the one-time code.
+    let verifier = "verifier-0123456789-abcdefghijklmnopqrstuvwxyz-ABCDEFG";
+    let (status, resp) = raw(agent
+        .get(&authorize_url)
+        .query("response_type", "code")
+        .query("client_id", &client_id)
+        .query("redirect_uri", redirect)
+        .query("state", "xyz")
+        .query("code_challenge", &pkce_challenge(verifier))
+        .query("code_challenge_method", "S256")
+        .query("resource", &format!("{base}/mcp"))
+        .call());
+    assert_eq!(status, 303);
+    let wait = resp.header("location").unwrap().to_string();
+    let request = query_param(&wait, "request").expect("request id");
+    let (status, resp) = raw(agent.get(&format!("{base}{wait}")).call());
+    assert_eq!(status, 200);
+    let page = resp.into_string().unwrap();
+    assert!(
+        page.contains("Test connector") && page.contains("one-time code"),
+        "{page}"
+    );
+
+    // The code is printed on stdout, for the person at the terminal.
+    let deadline = Instant::now() + Duration::from_secs(10);
+    let code = loop {
+        let l = lines
+            .recv_timeout(deadline.saturating_duration_since(Instant::now()))
+            .expect("the one-time code was printed");
+        if let Some(rest) = l.split("One-time code: ").nth(1) {
+            assert!(l.contains("Test connector"), "{l}");
+            break rest.split_whitespace().next().unwrap().to_string();
+        }
+    };
+
+    // A wrong code is refused; the right one sends the browser back with a code.
+    let (status, resp) = raw(agent.post(&format!("{base}/authorize/wait")).send_form(&[
+        ("request", &request),
+        ("code", "WRONG-CODE"),
+        ("action", "allow"),
+    ]));
+    assert_eq!(status, 401);
+    assert!(resp.into_string().unwrap().contains("not right"));
+    let (status, resp) = raw(agent.post(&format!("{base}/authorize/wait")).send_form(&[
+        ("request", &request),
+        ("code", &code.to_lowercase()),
+        ("action", "allow"),
+    ]));
+    assert_eq!(status, 302);
+    let back = resp.header("location").unwrap().to_string();
+    assert!(back.starts_with(redirect), "{back}");
+    assert_eq!(query_param(&back, "state").as_deref(), Some("xyz"));
+    assert_eq!(
+        query_param(&back, "iss").as_deref(),
+        Some(base.as_str()),
+        "{back}"
+    );
+    let auth_code = query_param(&back, "code").expect("authorization code");
+
+    // Token exchange: PKCE checked, the code good once.
+    let exchange = |code: &str, verifier: &str| {
+        raw(agent.post(&token_url).send_form(&[
+            ("grant_type", "authorization_code"),
+            ("code", code),
+            ("redirect_uri", redirect),
+            ("client_id", &client_id),
+            ("code_verifier", verifier),
+        ]))
+    };
+    let (status, resp) = exchange(&auth_code, verifier);
+    assert_eq!(status, 200);
+    assert_eq!(resp.header("cache-control"), Some("no-store"));
+    let tok = body_json(resp);
+    assert_eq!(tok["token_type"], "Bearer", "{tok}");
+    assert_eq!(tok["expires_in"], 3600, "{tok}");
+    let access = tok["access_token"].as_str().unwrap().to_string();
+    let refresh = tok["refresh_token"].as_str().unwrap().to_string();
+    let (status, resp) = exchange(&auth_code, verifier);
+    assert_eq!(status, 400);
+    assert_eq!(body_json(resp)["error"], "invalid_grant");
+
+    // The access token opens the MCP endpoint.
+    let mut c = Client {
+        url: server.url.clone(),
+        token: access.clone(),
+        session: None,
+        next_id: 1,
+    };
+    c.initialize();
+    let tools = c.request("tools/list", json!({}));
+    let names: Vec<&str> = tools["tools"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|t| t["name"].as_str().unwrap())
+        .collect();
+    for want in ["approval_status", "project_import", "project_summary"] {
+        assert!(names.contains(&want), "missing {want}: {names:?}");
+    }
+    let (err, summary) = c.call("project_summary", json!({}));
+    assert!(!err, "{summary}");
+
+    // Refresh rotates the refresh token: the new pair works, the old refresh does not.
+    let refresh_with = |rt: &str| {
+        raw(agent.post(&token_url).send_form(&[
+            ("grant_type", "refresh_token"),
+            ("refresh_token", rt),
+            ("client_id", &client_id),
+        ]))
+    };
+    let (status, resp) = refresh_with(&refresh);
+    assert_eq!(status, 200);
+    let tok2 = body_json(resp);
+    let access2 = tok2["access_token"].as_str().unwrap().to_string();
+    let refresh2 = tok2["refresh_token"].as_str().unwrap().to_string();
+    assert_ne!(refresh2, refresh);
+    let (status, _) = refresh_with(&refresh);
+    assert_eq!(status, 400, "a used refresh token is refused");
+    assert_eq!(mcp_status(&server.url, &access2).0, 200);
+
+    // Revoking the refresh token ends the grant: its access tokens stop at once.
+    let (status, _) = raw(agent.post(&revoke_url).send_form(&[("token", &refresh2)]));
+    assert_eq!(status, 200);
+    let (status, challenge) = mcp_status(&server.url, &access2);
+    assert_eq!(status, 401);
+    assert!(challenge.unwrap_or_default().contains("invalid_token"));
+    assert_eq!(mcp_status(&server.url, &access).0, 401);
+    assert_eq!(refresh_with(&refresh2).0, 400);
+
+    // The bearer token still works for local clients.
+    assert_eq!(mcp_status(&server.url, &server.token).0, 200);
+
+    // A Host the server was not told about is refused (DNS rebinding).
+    let (status, _) = raw(agent
+        .get(&format!("{base}/.well-known/oauth-authorization-server"))
+        .set("Host", "attacker.example")
+        .call());
+    assert_eq!(status, 403);
+}
+
+/// `--public-url`: requests under the public host name get it as the issuer and
+/// resource, so a client behind the tunnel sees one consistent origin; without
+/// `--oauth` there are no OAuth endpoints and a 401 names none.
+#[test]
+fn headless_public_url_and_oauth_off() {
+    let (server, _lines, port) = start_with(
+        "three-tier.ttg.json",
+        &["--oauth", "--public-url", "https://ttg-test.example.com/"],
+    );
+    let (status, resp) = raw(ureq::get(&format!(
+        "http://127.0.0.1:{port}/.well-known/oauth-protected-resource"
+    ))
+    .set("Host", "ttg-test.example.com")
+    .call());
+    assert_eq!(status, 200);
+    let prm = body_json(resp);
+    assert_eq!(prm["resource"], "https://ttg-test.example.com/mcp", "{prm}");
+    assert_eq!(
+        prm["authorization_servers"],
+        json!(["https://ttg-test.example.com"])
+    );
+    drop(server);
+
+    let (server, _lines, port) = start_with("three-tier.ttg.json", &[]);
+    let (status, _) = raw(ureq::get(&format!(
+        "http://127.0.0.1:{port}/.well-known/oauth-authorization-server"
+    ))
+    .call());
+    assert_eq!(status, 404);
+    let (status, challenge) = mcp_status(&server.url, "wrong");
+    assert_eq!(status, 401);
+    assert!(!challenge.unwrap_or_default().contains("resource_metadata"));
+}
+
+/// `project_import` replaces the project from `.ttg.json` text (schema problems come
+/// back with their lines, a non-empty project needs `replace`, one undo restores it),
+/// and `approval_status` reports unknown tickets and lists known ones.
+#[test]
+fn headless_project_import_and_approval_status() {
+    let server = start("three-tier.ttg.json");
+    let mut c = Client::new(&server);
+    c.initialize();
+    let minimal: Value = serde_json::from_str(
+        &std::fs::read_to_string(
+            PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../examples/minimal.ttg.json"),
+        )
+        .unwrap(),
+    )
+    .unwrap();
+    let (_, before) = c.call("project_summary", json!({}));
+
+    let (err, msg) = c.call("project_import", json!({"json": minimal}));
+    assert!(err, "{msg}");
+    assert!(msg.as_str().unwrap().contains("replace: true"), "{msg}");
+
+    let broken = "{\n  \"schema_version\": 1,\n  \"name\": 5,\n  \"nodes\": {\"x\": {\"id\": \"x\", \"name\": \"x\"}}\n}";
+    let (err, msg) = c.call("project_import", json!({"json": broken, "replace": true}));
+    assert!(err, "{msg}");
+    let text = msg.as_str().unwrap();
+    assert!(text.contains("line 3") && text.contains("/name"), "{text}");
+    assert!(text.contains("resource_type"), "{text}");
+    let (_, same) = c.call("project_summary", json!({}));
+    assert_eq!(same["name"], before["name"], "nothing changed");
+
+    let (err, imported) = c.call("project_import", json!({"json": minimal, "replace": true}));
+    assert!(!err, "{imported}");
+    assert_eq!(imported["status"], "imported", "{imported}");
+    assert_eq!(imported["counts"]["nodes"], 3, "{imported}");
+    assert_eq!(imported["diagnostics"]["errors"], 0, "{imported}");
+    assert_eq!(imported["path"], Value::Null);
+    let (_, now) = c.call("project_summary", json!({}));
+    assert_eq!(now["name"], "minimal");
+    assert_eq!(now["dirty"], true);
+
+    let (err, _) = c.call("undo", json!({}));
+    assert!(!err);
+    let (_, back) = c.call("project_summary", json!({}));
+    assert_eq!(back["name"], before["name"]);
+    assert_eq!(back["counts"], before["counts"]);
+
+    let (err, msg) = c.call("approval_status", json!({"ticket": "apv-nope"}));
+    assert!(err, "{msg}");
+    assert!(msg.as_str().unwrap().contains("unknown ticket"), "{msg}");
+    let (err, list) = c.call("approval_status", json!({}));
+    assert!(!err, "{list}");
+    assert_eq!(list["tickets"], json!([]), "headless never prompts");
+}
