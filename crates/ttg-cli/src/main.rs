@@ -29,6 +29,12 @@ struct Cli {
 }
 
 #[derive(Clone, Copy, ValueEnum)]
+enum SchemaKindArg {
+    Resource,
+    Data,
+}
+
+#[derive(Clone, Copy, ValueEnum)]
 enum ToolArg {
     Terraform,
     Opentofu,
@@ -219,8 +225,13 @@ enum SchemaCmd {
         query: String,
         #[arg(long, default_value_t = 20)]
         limit: usize,
+        /// Only resources or only data sources; both by default (data sources print
+        /// as data.<type>).
+        #[arg(long, value_enum)]
+        kind: Option<SchemaKindArg>,
     },
-    /// Print the arguments and nested blocks of one resource type.
+    /// Print the arguments and nested blocks of one resource type (data.<type> for a
+    /// data source).
     Show {
         provider: String,
         resource: String,
@@ -336,10 +347,11 @@ fn main() -> Result<()> {
                 println!("index: {} ({})", ttg_schema::index_source(), idx.generated);
                 for (id, p) in &idx.providers {
                     println!(
-                        "  {id:<6} {} {}  {} resources",
+                        "  {id:<6} {} {}  {} resources, {} data sources",
                         p.source,
                         p.version,
-                        p.resources.len()
+                        p.resources.len(),
+                        p.data_sources.len()
                     );
                 }
                 if let Some(p) = ttg_schema::user_index_path() {
@@ -415,13 +427,19 @@ fn main() -> Result<()> {
                     std::fs::create_dir_all(d)?;
                 }
                 std::fs::write(&dest, idx.to_gzip().map_err(|e| anyhow::anyhow!(e))?)?;
-                println!("wrote {} ({} resources)", dest.display(), idx.resource_count());
+                println!(
+                    "wrote {} ({} resources, {} data sources)",
+                    dest.display(),
+                    idx.resource_count(),
+                    idx.data_source_count()
+                );
                 for (id, p) in &idx.providers {
                     println!(
-                        "  {id:<6} {} {}  {} resources",
+                        "  {id:<6} {} {}  {} resources, {} data sources",
                         p.source,
                         p.version,
-                        p.resources.len()
+                        p.resources.len(),
+                        p.data_sources.len()
                     );
                 }
             }
@@ -429,13 +447,22 @@ fn main() -> Result<()> {
                 provider,
                 query,
                 limit,
+                kind,
             } => {
                 let idx = ttg_schema::index();
                 let p = idx
                     .provider(&provider)
                     .ok_or_else(|| anyhow::anyhow!("unknown provider {provider}"))?;
-                for r in p.search(&query, limit) {
-                    println!("{r}");
+                let kinds = match kind {
+                    Some(SchemaKindArg::Resource) => vec![ttg_schema::SchemaKind::Resource],
+                    Some(SchemaKindArg::Data) => vec![ttg_schema::SchemaKind::Data],
+                    None => vec![ttg_schema::SchemaKind::Resource, ttg_schema::SchemaKind::Data],
+                };
+                for (k, r) in p.search_kinds(&query, &kinds, limit) {
+                    match k {
+                        ttg_schema::SchemaKind::Resource => println!("{r}"),
+                        ttg_schema::SchemaKind::Data => println!("data.{r}"),
+                    }
                 }
             }
             SchemaCmd::Show {
@@ -446,7 +473,7 @@ fn main() -> Result<()> {
             } => {
                 let idx = ttg_schema::index();
                 let b = idx
-                    .resource(&provider, &resource)
+                    .block(&provider, &resource)
                     .ok_or_else(|| anyhow::anyhow!("no {resource} on {provider}"))?;
                 print_block(&b.filtered(depth, required_only), 0);
             }

@@ -1,8 +1,9 @@
 //! `ttg-schema` — a compact, bundled index of the Terraform provider schemas.
 //!
 //! The curated catalog (`ttg-catalog`) describes *portable* concepts by hand. This crate
-//! carries the other side: every resource the AWS and Azure providers actually expose,
-//! with every argument and nested block, as reported by `tofu providers schema -json`.
+//! carries the other side: every resource and data source the AWS, Azure and Google Cloud
+//! providers actually expose, with every argument and nested block, as reported by
+//! `tofu providers schema -json`.
 //! It powers the "Advanced arguments" editor on curated resources, the native
 //! provider-resource palette, schema validation of extra arguments, and a test that keeps
 //! the curated definitions honest against the real providers.
@@ -39,6 +40,37 @@ pub struct ProviderSchema {
     /// Resource type -> schema.
     #[serde(default)]
     pub resources: BTreeMap<String, BlockSchema>,
+    /// Data source type -> schema (`data "<type>" ...`). Absent from an index built before
+    /// data sources were indexed, which then simply has none.
+    #[serde(default, rename = "data", skip_serializing_if = "BTreeMap::is_empty")]
+    pub data_sources: BTreeMap<String, BlockSchema>,
+}
+
+/// Which half of a provider's schema a type lives in.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum SchemaKind {
+    Resource,
+    Data,
+}
+
+impl SchemaKind {
+    pub fn label(self) -> &'static str {
+        match self {
+            SchemaKind::Resource => "resource",
+            SchemaKind::Data => "data",
+        }
+    }
+}
+
+/// Native type ids name a data source as `data.<type>` (`native:aws:data.aws_vpc`).
+pub const DATA_PREFIX: &str = "data.";
+
+/// `data.aws_vpc` -> (`Data`, `aws_vpc`); `aws_vpc` -> (`Resource`, `aws_vpc`).
+pub fn split_kind(tf_type: &str) -> (SchemaKind, &str) {
+    match tf_type.strip_prefix(DATA_PREFIX) {
+        Some(t) => (SchemaKind::Data, t),
+        None => (SchemaKind::Resource, tf_type),
+    }
 }
 
 /// One block's shape: attributes and nested block types.
@@ -221,20 +253,59 @@ impl ProviderSchema {
     pub fn resource(&self, tf_type: &str) -> Option<&BlockSchema> {
         self.resources.get(tf_type)
     }
+    pub fn data_source(&self, tf_type: &str) -> Option<&BlockSchema> {
+        self.data_sources.get(tf_type)
+    }
+    /// A resource, or a data source when the name is `data.<type>`.
+    pub fn block(&self, tf_type: &str) -> Option<&BlockSchema> {
+        match split_kind(tf_type) {
+            (SchemaKind::Data, t) => self.data_source(t),
+            (SchemaKind::Resource, t) => self.resource(t),
+        }
+    }
     /// Resource types containing every whitespace-separated term of `query` (case-insensitive).
     pub fn search(&self, query: &str, limit: usize) -> Vec<&str> {
-        let terms: Vec<String> = query.split_whitespace().map(|t| t.to_lowercase()).collect();
-        let mut out: Vec<&str> = self
-            .resources
-            .keys()
-            .filter(|k| terms.iter().all(|t| k.contains(t.as_str())))
-            .map(|k| k.as_str())
-            .collect();
-        // Prefer shorter names (closer matches) for the same terms.
-        out.sort_by_key(|k| (k.len(), *k));
+        search_keys(&self.resources, query, limit)
+    }
+    /// Data source types containing every term of `query`, like [`ProviderSchema::search`].
+    pub fn search_data(&self, query: &str, limit: usize) -> Vec<&str> {
+        search_keys(&self.data_sources, query, limit)
+    }
+    /// Both halves, each hit labelled with its kind: resources and data sources ranked
+    /// together, shorter names first, a resource before a data source of the same name.
+    pub fn search_kinds(&self, query: &str, kinds: &[SchemaKind], limit: usize) -> Vec<(SchemaKind, &str)> {
+        let mut out: Vec<(SchemaKind, &str)> = Vec::new();
+        if kinds.contains(&SchemaKind::Resource) {
+            out.extend(
+                self.search(query, usize::MAX)
+                    .into_iter()
+                    .map(|k| (SchemaKind::Resource, k)),
+            );
+        }
+        if kinds.contains(&SchemaKind::Data) {
+            out.extend(
+                self.search_data(query, usize::MAX)
+                    .into_iter()
+                    .map(|k| (SchemaKind::Data, k)),
+            );
+        }
+        out.sort_by_key(|(kind, k)| (k.len(), *k, *kind == SchemaKind::Data));
         out.truncate(limit);
         out
     }
+}
+
+fn search_keys<'a>(map: &'a BTreeMap<String, BlockSchema>, query: &str, limit: usize) -> Vec<&'a str> {
+    let terms: Vec<String> = query.split_whitespace().map(|t| t.to_lowercase()).collect();
+    let mut out: Vec<&str> = map
+        .keys()
+        .filter(|k| terms.iter().all(|t| k.contains(t.as_str())))
+        .map(|k| k.as_str())
+        .collect();
+    // Prefer shorter names (closer matches) for the same terms.
+    out.sort_by_key(|k| (k.len(), *k));
+    out.truncate(limit);
+    out
 }
 
 impl SchemaIndex {
@@ -245,8 +316,19 @@ impl SchemaIndex {
     pub fn resource(&self, provider: &str, tf_type: &str) -> Option<&BlockSchema> {
         self.providers.get(provider)?.resources.get(tf_type)
     }
+    /// Schema of a data source type on a provider.
+    pub fn data_source(&self, provider: &str, tf_type: &str) -> Option<&BlockSchema> {
+        self.providers.get(provider)?.data_sources.get(tf_type)
+    }
+    /// A resource, or a data source when the name is `data.<type>`.
+    pub fn block(&self, provider: &str, tf_type: &str) -> Option<&BlockSchema> {
+        self.providers.get(provider)?.block(tf_type)
+    }
     pub fn resource_count(&self) -> usize {
         self.providers.values().map(|p| p.resources.len()).sum()
+    }
+    pub fn data_source_count(&self) -> usize {
+        self.providers.values().map(|p| p.data_sources.len()).sum()
     }
 
     /// Parse a gzipped JSON index.
@@ -327,11 +409,19 @@ pub fn compact_from_tool_json(
             source: addr.split_once('/').map(|x| x.1).unwrap_or(addr).to_string(),
             version: String::new(),
             resources: BTreeMap::new(),
+            data_sources: BTreeMap::new(),
         };
         if let Some(rs) = ps.get("resource_schemas").and_then(|r| r.as_object()) {
             for (rname, rs) in rs {
                 if let Some(b) = rs.get("block") {
                     prov.resources.insert(rname.clone(), compact_block(b));
+                }
+            }
+        }
+        if let Some(ds) = ps.get("data_source_schemas").and_then(|r| r.as_object()) {
+            for (dname, d) in ds {
+                if let Some(b) = d.get("block") {
+                    prov.data_sources.insert(dname.clone(), compact_block(b));
                 }
             }
         }
@@ -437,6 +527,36 @@ mod tests {
         let fa = idx.resource("azure", "azurerm_linux_function_app").unwrap();
         assert!(fa.blocks.contains_key("site_config"));
         assert!(fa.blocks["site_config"].required());
+    }
+
+    #[test]
+    fn the_index_carries_data_sources() {
+        let idx = index();
+        let pl = idx
+            .data_source("aws", "aws_ec2_managed_prefix_list")
+            .expect("aws_ec2_managed_prefix_list data source in the bundled index");
+        assert!(pl.attributes["name"].optional());
+        assert!(pl.attributes["id"].computed());
+        assert!(idx.block("aws", "data.aws_ec2_managed_prefix_list").is_some());
+        assert!(
+            idx.block("aws", "aws_ec2_managed_prefix_list").is_some(),
+            "the resource of the same name too"
+        );
+        assert!(idx.data_source("azure", "azurerm_client_config").is_some());
+        assert!(idx.data_source("gcp", "google_project").is_some());
+        let hits = idx.provider("aws").unwrap().search_kinds(
+            "managed_prefix_list",
+            &[SchemaKind::Resource, SchemaKind::Data],
+            10,
+        );
+        let pos = |k| {
+            hits.iter()
+                .position(|h| *h == (k, "aws_ec2_managed_prefix_list"))
+                .unwrap()
+        };
+        assert!(pos(SchemaKind::Resource) < pos(SchemaKind::Data));
+        assert_eq!(split_kind("data.aws_vpc"), (SchemaKind::Data, "aws_vpc"));
+        assert_eq!(split_kind("aws_vpc"), (SchemaKind::Resource, "aws_vpc"));
     }
 
     #[test]
