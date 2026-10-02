@@ -10,6 +10,7 @@ The app itself hosts the server; there is no separate process:
 
 ```
 Claude Code ──Streamable HTTP (MCP), localhost, bearer token──► terratofu-gui (rmcp + axum)
+claude.ai connector ──HTTPS tunnel, OAuth access token──────────┘   (optional, §5)
 ```
 
 - **Off until toggled.** Agent ▸ MCP server starts a tokio runtime on its own thread
@@ -252,6 +253,21 @@ older client — is refused too, listing the valid keys, instead of being droppe
 `SettingsArgs::into_command` rejects, for direct calls and inside `project_apply` alike.
 The reply echoes the state and version settings.
 
+Added 2026-10-02 (round 4, remote and file-based access, two tools):
+`approval_status { ticket? }` reports an approval ticket (§3) straight from the shared
+`approvals::Approvals` table on the server thread, so polling never queues behind the UI
+(without a ticket it lists every ticket still known). `project_import { json, replace? }`
+(`exec/import.rs`) replaces the open project with one given as `.ttg.json` JSON, an object
+or a string: `ttg_core::schema_check` validates it against the project schema first and
+every problem comes back with its line, then `project::load_str` runs its structural
+checks, and only then does anything change. A project with entities is not replaced
+without `replace: true`; the replacement is one undo step, leaves the project dirty and
+without a path (so a bare `project_save` cannot overwrite the file the old project came
+from), and the reply carries the counts, the new diagnostics and any unknown fields that
+were ignored. When the open project has unsaved changes the import needs approval, like
+`project_open`, regardless of `confirm_disk`; an import that would not load is refused
+before the prompt is shown. The format is in docs/FILE_FORMAT.md.
+
 Added 2026-09-09: `project_apply` (a list of `{tool, args}` diagram writes executed as
 one undo step; `AgentCommand::Batch` snapshots first, runs each sub-command through the
 normal path, then truncates the history back and pushes one step; any failure restores
@@ -286,19 +302,58 @@ blocks instead (e.g. Object Storage's `versioning` block on AWS).
 ## 3. Settings and persistence
 
 `autostart`, `port` (default 9337), `token` (uuid, regenerable), `confirm_disk`
-(default on: save / open / new / export wait for an Allow / Deny prompt) and
+(default on: save / open / new / export wait for an Allow / Deny prompt),
 `confirm_delete` (default off: entity and link removal; annotation removal is never
-exported, so it is never confirmed) persist in eframe storage. A command that needs
-approval parks in `McpState::pending_confirm`; the prompt is a centred window, and the
-tool call's timeout is ten minutes for writes so the user has time to answer. A pending
-prompt no longer stalls the whole queue: reads (`!AgentCommand::is_write`) keep answering
-while it is open, and further writes queue up in `McpState::deferred` in arrival order
-rather than jumping ahead of it. Resolving the prompt (Allow or Deny, via
-`TtgApp::resolve_confirm`, used by both the confirm window and the headless unit test)
-starts the next deferred write, which may itself need approval and become the new
-`pending_confirm`, still ahead of the rest of the queue. `TTG_MCP=1` (+ `TTG_MCP_PORT`,
-`TTG_MCP_TOKEN`) force the server on for one run without touching the stored autostart
-flag; `TTG_MCP_AUTOSTART=off` clears a stored autostart. Used by the smoke test.
+exported, so it is never confirmed), `approval_ttl_secs` (default 600), and the remote
+settings of §5 (`bind`, `public_url`, `oauth`, and the OAuth clients and grants as
+hashes) persist in eframe storage. `TTG_MCP=1` (+ `TTG_MCP_PORT`, `TTG_MCP_TOKEN`) force
+the server on for one run without touching the stored autostart flag;
+`TTG_MCP_AUTOSTART=off` clears a stored autostart. Used by the smoke test.
+
+**Approval tickets (round 4, TF-020).** A write that needs approval used to hold its
+call open for up to ten minutes while MCP clients gave up after about one, so the caller
+saw "Request timed out" and could not tell whether the save or export would still
+happen (one `project_save` was written after its caller's timeout). The contract now:
+
+- `TtgApp::approval_reason` decides (the settings, plus an import over unsaved work;
+  never in `--serve`). The command is claimed (see below), a ticket is opened in
+  `approvals::Approvals` (an `Arc<Mutex<…>>` shared with the server thread), and the
+  caller is answered *at once* with `{status: "pending_approval", ticket, tool, what,
+  applied: false, prompts_ahead, waiting_s, expires_in_s, message}`. The server waits up
+  to three seconds for a quick answer and then replies with whatever the ticket says, so
+  a fast Allow returns the result directly, in the same ticket shape.
+- The command parks as `McpState::pending_confirm` (the prompt on screen) or, when a
+  prompt is already open, in `McpState::deferred` with its ticket. Prompts are shown one
+  at a time in arrival order. Everything else, other writes included, keeps running:
+  an approved write runs against the project as it is when the user answers.
+- Allow runs it and records `applied` with the command's own reply, or `failed` with its
+  error (allowed, but nothing applied); Deny records `denied`. A ticket nobody answers
+  within `approval_ttl_secs` is `expired`: `drain_agent_commands` checks every frame,
+  takes the prompt down, never runs the command, and moves to the next. Answered
+  tickets stay readable for 30 minutes (at most 200).
+- `approval_status { ticket }` returns the same object; every state carries `applied`.
+  The server instructions tell agents to tell the user, poll, and never repeat the call.
+- `export_run { validate: true }` behind a prompt answers with the ticket; a task on the
+  server waits for it and, once the export is applied, validates the directory and adds
+  `validate` to the ticket's `result` (`"running"` until it finishes).
+
+The MCP Tasks extension (rmcp's `TaskManager`) is the protocol's own form of this, but a
+client has to opt in per request and the Claude clients do not yet; a tool-level ticket
+works with any client. Progress notifications (rmcp can send them for a request that
+carries a progress token) were not used either: whether they extend a client's timeout
+is up to the client (the TypeScript SDK only does with `resetTimeoutOnProgress`), and a
+held-open call is lost when the client reconnects, where a ticket is not.
+
+**Every call says whether it applied.** `TtgServer::exec` waits at most 45 s
+(`CALL_TIMEOUT`, below the 60 s many clients allow) and its errors all say whether
+anything happened. Behind that is a claim on each queued command (`AgentReply` /
+`ReplyWait`, an `AtomicU8` beside the oneshot): the UI thread claims a command just
+before running it (`AgentReply::claim`, in `run_agent` and when parking a ticket), and
+the server withdraws it on timeout (`ReplyWait::withdraw`). Whichever comes first wins,
+so a withdrawn command never runs ("…withdrawn and will not run later, so nothing was
+applied"), and a command the UI had already claimed is waited for rather than reported
+as not applied. This closes the window the round-2 `is_closed` check left between the
+check and the run.
 
 ## 4. Testing
 
@@ -336,7 +391,22 @@ refusing without a view and then ordering the pipeline left to right in the view
 layout while the shared layout stays put, the sequence export, the classification /
 description / owner round trip (reply, project, summary, undo, and the bulk form),
 the classification filter, and the personal-data view created and then refreshed.
-Codegen tests cover
+Round 4 adds
+`headless_oauth_sign_in_refresh_and_revoke` (the 401 and its `resource_metadata`, both
+metadata documents, registration refusing a non-loopback HTTP redirect, authorization
+without PKCE bounced to the client, the one-time code read from the server's stdout, a
+wrong code refused, the code exchange, the code refused a second time, `tools/list` with
+the access token, refresh rotation, revocation turning both access tokens into 401s, the
+bearer token still working and an unknown Host refused), `headless_public_url_and_oauth_off`
+(issuer and resource under the public host; with OAuth off no metadata and no
+`resource_metadata`) and `headless_project_import_and_approval_status` (refused without
+`replace`, schema errors with their lines and nothing changed, the import, one undo
+back, unknown and listed tickets). Unit tests cover the ticket states, ordering, expiry
+and the claim / withdraw race beside `mcp/mod.rs`; PKCE against RFC 7636's example,
+redirect rules, codes, grant persistence and revocation, the window app's consent path
+through the handlers, and the per-request base URL in `mcp/oauth.rs`; the Host rule in
+`mcp/server.rs`; the validator and line index in `ttg_core::schema_check`; and
+`ttg check --schema` in `crates/ttg-cli/tests/check_schema.rs`. Codegen tests cover
 the other-provider info lines, `Generated::entity_preview` and `views::reveal`; the
 catalog crate tests the fingerprint. The unit tests beside `mcp/mod.rs` cover the
 dropped-caller rule (fresh and deferred), the heartbeat, the screenshot size clamp,
@@ -346,7 +416,80 @@ and reported as `call`, the environment note and an explicit region, each refusa
 that the revision does not move. All run in CI on the same job as the rest of
 the workspace.
 
-## 5. Open ideas
+## 5. Remote access and sign-in (round 4, TF-001)
+
+A cloud agent session (claude.ai, Claude Code on the web) can only use MCP servers it
+reaches over the internet, added as custom connectors, and connectors authenticate with
+OAuth; the connector form takes no arbitrary header. So the server can be published
+through a tunnel and signs clients in itself.
+
+**Listening and Host checks.** `McpSettings::bind` (default `127.0.0.1`; `--bind`) is
+the listen address, and `public_url` (`--public-url`) the HTTPS origin a tunnel publishes
+it under. rmcp's Streamable HTTP service refuses any `Host` header outside its
+`allowed_hosts` to stop DNS rebinding; `ServeOptions::allowed_hosts` keeps the loopback
+names and adds the public URL's host (and the bind address when it is one specific
+outside address). An axum layer applies the same list to every route, the OAuth pages
+included, so a page on another site cannot rebind a name to 127.0.0.1 and drive the
+sign-in. cloudflared and Tailscale Funnel forward the public `Host`, which is why the
+public URL has to be configured rather than inferred.
+
+**Authorization server** (`mcp/oauth.rs`, mounted only when `oauth` is on; `--oauth`):
+
+| Endpoint | What |
+|---|---|
+| `GET /.well-known/oauth-protected-resource[/mcp]` | RFC 9728: `resource` `<base>/mcp`, `authorization_servers` `[<base>]`, scope `mcp` |
+| `GET /.well-known/oauth-authorization-server` (also `openid-configuration`, and `/mcp`-suffixed) | RFC 8414 metadata: the endpoints below, `code` only, PKCE `S256` only, auth methods `none` / `client_secret_post` / `client_secret_basic`, `authorization_response_iss_parameter_supported` |
+| `POST /register` | RFC 7591 dynamic registration. Redirect URIs must be HTTPS, or HTTP to a loopback host (any port, RFC 8252). A client that asks for a secret gets one (its hash is kept). At most 50 clients; the oldest never authorized go first |
+| `GET /authorize` | Checks client, redirect URI, `response_type=code`, an S256 `code_challenge` and, if given, `resource` (RFC 8707: must be this server's `/mcp`), then parks a sign-in request (at most five waiting, ten minutes each) and redirects the browser to `/authorize/wait` |
+| `GET` / `POST /authorize/wait` | The waiting page. Window app: shows a six-character code and refreshes itself until the user answers the app's prompt. `--serve`: a form for the eight-character one-time code printed on stdout; five wrong tries end the request. Allowed: a single-use authorization code (five minutes) goes back to the client with `state` and `iss`; denied: `error=access_denied` |
+| `POST /token` | `authorization_code` (PKCE verified, the code burnt on first use, right or wrong) and `refresh_token` (rotated: the token presented stops working). Access tokens last an hour, refresh tokens thirty days from their last use. `Cache-Control: no-store` |
+| `POST /revoke` | RFC 7009: an access token ends itself, a refresh token ends its whole grant |
+
+`/mcp` accepts the bearer token or a live access token. Without either it answers 401
+with `WWW-Authenticate: Bearer resource_metadata="<base>/.well-known/oauth-protected-resource/mcp", scope="mcp"`
+(plus `error="invalid_token"` when a token was sent), which is how a connector discovers
+the sign-in. `<base>` follows the request: the public URL for requests under its host,
+`http://<Host>` otherwise, so the same server signs in local and tunnelled clients with
+consistent issuer and resource URLs.
+
+**Consent.** In the window app a sign-in shows "Allow <client> to edit this project?"
+(`TtgApp::oauth_consent_window`) with the client's redirect host and a code; the browser
+page shows the same code, so a sign-in someone else started (anyone can reach
+`/authorize` through the tunnel) is told apart from one's own. Headless, there is nobody
+to click: `--serve` prints `[oauth] "<client>" asks to use this server … One-time code:
+XXXX-XXXX`, and the user types it into the page. Client names are cut to 60 printable
+characters and escaped in the page.
+
+**Storage.** Only SHA-256 hashes of client secrets, codes and tokens are kept. Clients and
+grants (client, created, last used, refresh-token hash and expiry) persist: with the
+other MCP settings in eframe storage for the window app, in `--grants FILE` (rewritten
+on every change) for `--serve`, and only in memory otherwise. Access tokens, codes and
+sign-in requests are memory-only, so a restart costs a client one refresh. Agent ▸
+Settings & activity ▸ Remote access lists the grants with Revoke and Revoke all;
+revoking drops the grant and its access tokens at once.
+
+**What rmcp provided.** The Streamable HTTP transport, sessions and the Host / Origin
+checks. rmcp 3.2's `auth` feature is client-side only (an OAuth client, discovery and a
+credential store, on reqwest), so the authorization server, the token check in front of
+`/mcp` and the consent flow are this crate's, on axum, with `sha2`, `rand` (OS-seeded
+CSPRNG) and `base64`.
+
+**Security trade-offs**, spelled out to users in the README:
+
+- A tunnel makes the server reachable by anyone who learns the URL. Nothing is served
+  without the bearer token or an access token, every grant needs the user's approval,
+  registration alone grants nothing, and waiting sign-ins are capped.
+- A grant is as powerful as the token: read and change the diagram, and save, open and
+  export by path, which writes files wherever the user can. The window app's "Ask
+  before" settings still apply to OAuth clients; `--serve` never asks, so a public
+  headless server should run as a restricted user or in a container.
+- The bearer token is accepted through the tunnel too (it is 128 random bits); regenerate
+  it if it leaks. Revoke grants that are no longer used, and stop the tunnel when done.
+- An identity-aware proxy in front (Cloudflare Access) cannot cover `/mcp` or `/token`,
+  which claude.ai's servers call without a browser; it can cover `/authorize*`, which
+  only the user's browser loads.
+
+## 6. Open ideas
 
 - Prompts (`prompts/list`): canned "review this diagram" / "make it Azure-ready" starters.
 - Progress notifications for long `export_run --validate` calls.

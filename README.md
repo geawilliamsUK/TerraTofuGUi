@@ -341,11 +341,12 @@ watch it happen. It is off until you switch it on:
    shows what the agent did. Saving to disk only happens when a tool is explicitly asked
    to, and opening another file goes through the same unsaved-changes prompt as the menu.
 
-The 52 tools cover reading (project, catalog, catalog relations, diagnostics,
+The 54 tools cover reading (project, catalog, catalog relations, diagnostics,
 reachability, export preview, one entity's HCL with `entity_preview`, export diff,
-`view_get`, `view_export`, screenshot) and editing (add/update/move/resize/
+`view_get`, `view_export`, screenshot, `approval_status`) and editing (add/update/move/resize/
 reparent/delete entities, links, selection, views, tidy/align/distribute, settings,
-save/open/new, export with optional validate, undo/redo). An agent documents a view the
+save/open/new, `project_import` of a `.ttg.json` given as JSON, export with optional
+validate, undo/redo). An agent documents a view the
 way you would: `view_group_add`, `view_flow_add` (with `step` and `color`),
 `view_note_add`, `view_logical_add` and `view_annotation_remove` all take an optional
 `view`, so a whole map can be drawn in one `project_apply` without switching tabs, and
@@ -374,21 +375,108 @@ resources (`ttg://project`, `ttg://catalog/<type>`, `ttg://docs/mapping-format`,
 In *Agent ▸ Settings & activity* you choose which actions must be approved first: by
 default saving, opening, starting a new project and writing an export pop an
 Allow / Deny prompt; deleting entities or links can be added (removing an annotation
-never needs approval - groups and flows are never exported). A prompt does not stall the
-agent: reads keep answering while one is open, and further writes queue up behind it in
-order rather than jumping ahead. Nothing is ever applied twice: a call that comes back
-"the app is busy" was never queued, and a call that times out has its command dropped
-rather than applied minutes later, so a retry is always safe. Long jobs stay off the UI
+never needs approval - groups and flows are never exported). Such a call does not wait
+for you: it answers within seconds with `{status: "pending_approval", ticket, what,
+applied: false}`, the agent tells you and polls `approval_status { ticket }`, and the
+write runs only when you press Allow (the ticket then says `applied`, with the result,
+or `denied`, `failed`, or `expired` if nobody answered within the time set in the
+settings, ten minutes by default). Everything else keeps working while a prompt is open.
+Every reply says whether anything was applied, and nothing is ever applied twice: a call
+that comes back "the app is busy" was never queued, and one that times out (after 45 s at
+most) was withdrawn before it ran, so a retry is always safe. Long jobs stay off the UI
 thread - `Run validate` in the export panel shows "validating…" per provider while
-`init` runs in the background. Only localhost can connect and every request needs the
-bearer token. `terratofu-gui --serve --port N --token T [project]` runs the same server
-without a window (no screenshots, no prompts) for CI and scripted editing; the headless
-integration test in `crates/ttg-app/tests` drives it that way. The feature is the `mcp`
+`init` runs in the background. Unless you publish it (next section), only this machine
+can connect, and every request needs the bearer token or an OAuth sign-in.
+`terratofu-gui --serve --port N --token T [project]` runs the same server without a
+window (no screenshots, no prompts) for CI and scripted editing; the headless integration
+test in `crates/ttg-app/tests` drives it that way. The feature is the `mcp`
 cargo feature of `ttg-app` (on by default; build with `--no-default-features` to leave it
 out). Windows note: ports in the 6xxx-7xxx block are often reserved by Hyper-V, which is
 why the default is 9337.
 
 ![An agent session: a queue added, linked and the diagram tidied over MCP, with the orange flash on the touched entities and the activity in the status bar](docs/screenshot-mcp.png)
+
+## Use TerraTofu from a cloud session
+
+A cloud agent session (claude.ai, Claude Code on the web) runs on Anthropic's servers,
+not on your machine, so it cannot see a server on `127.0.0.1`. There are two ways round
+that.
+
+### Without a server: hand over the file
+
+The `.ttg.json` project file is a documented, versioned format with a published JSON
+Schema ([docs/FILE_FORMAT.md](docs/FILE_FORMAT.md)). An agent with no route to your
+machine writes the file (starting from `examples/minimal.ttg.json`), checks it with
+`ttg check project.ttg.json --schema` if it can run commands (every schema problem and
+diagnostic comes with its line), and hands it over; you open it in the app, or run
+`ttg export project.ttg.json --out ./out/aws` yourself. With the app running and a local
+agent connected, `project_import` loads the same JSON straight into the window as one
+undo step.
+
+### With the server: publish it through an HTTPS tunnel
+
+claude.ai reaches MCP servers as **custom connectors**, which must be on the public
+internet over HTTPS and sign in with OAuth. TerraTofu can do both: put it behind a tunnel
+and switch on its built-in OAuth sign-in. You approve every client that signs in.
+
+1. **Start a tunnel to the server's port** (9337 by default) and note the HTTPS address
+   it prints. Either:
+   - Cloudflare, no account needed (a new random address every run):
+     `cloudflared tunnel --url http://127.0.0.1:9337` prints
+     `https://<random-words>.trycloudflare.com`. For an address that stays the same, use
+     a named tunnel on a domain you have in Cloudflare:
+     `cloudflared tunnel login`, `cloudflared tunnel create terratofu`,
+     `cloudflared tunnel route dns terratofu ttg.example.com`, then
+     `cloudflared tunnel run --url http://127.0.0.1:9337 terratofu`.
+   - Tailscale Funnel (stable `https://<machine>.<tailnet>.ts.net`; Funnel has to be
+     allowed in your tailnet's policy): `tailscale funnel 9337`. Plain `tailscale serve`
+     is not enough: claude.ai connects from the internet, not from your tailnet.
+2. **Point TerraTofu at it.** Agent ▸ Settings & activity ▸ Remote access: stop the
+   server, paste the tunnel's address into *Public URL* (the origin only, e.g.
+   `https://ttg.example.com`), tick *Allow OAuth sign-in*, leave *Listen on* at
+   `127.0.0.1`, and start the server again. The window shows the **connector URL**,
+   `<public URL>/mcp`. Headless, the same is
+   `terratofu-gui --serve --oauth --public-url https://ttg.example.com --grants grants.json project.ttg.json`.
+3. **Add the connector in claude.ai**: Settings ▸ Connectors ▸ *Add custom connector*
+   (on a Team or Enterprise plan an owner adds it under the organisation's settings):
+   - **Name**: `TerraTofu`
+   - **Remote MCP server URL**: the connector URL, `https://ttg.example.com/mcp`
+   - **Advanced settings ▸ OAuth Client ID / Client Secret**: leave both empty; the
+     connector registers itself.
+
+   Press *Add*, then *Connect*.
+4. **Approve the sign-in.** A browser tab opens on TerraTofu's sign-in page showing a
+   short code. The app shows "Allow <client> to edit this project?", naming the client
+   as it registered itself, with the same code:
+   press Allow if the codes match (Deny otherwise, or if you did not just connect). With
+   `--serve`, the terminal prints a one-time code instead; type it into the page. The
+   tab returns to claude.ai and the connector is connected; enable it in the chat's or
+   session's tools.
+
+The connector keeps working until you revoke it (Remote access lists each signed-in
+client with *Revoke*) or it goes unused for thirty days; access tokens last an hour and
+renew themselves. With a quick tunnel the address changes every time it starts, so the
+public URL and the connector URL have to be updated (and the connector re-added); a
+named tunnel or Funnel avoids that.
+
+**What publishing means.** Anyone who learns the URL can reach the server, so:
+
+- Nothing works without the bearer token or an OAuth grant, every grant needs your
+  approval in the app (or the one-time code), and only five sign-ins can wait at once.
+  Check the code before pressing Allow: anyone can *start* a sign-in.
+- A connected client can do what a local agent can: change the diagram, and save, open
+  and export files by path, i.e. write wherever your user account can. Keep *Ask before
+  the agent saves, opens… or writes an export* on (it applies to connectors too). A
+  headless `--serve` never asks, so publish one only as a restricted user or in a
+  container.
+- The bearer token also works through the tunnel; regenerate it if it leaks. Revoke
+  clients you no longer use, and stop the tunnel when you are done.
+- The server only answers to `localhost`, `127.0.0.1` and the public URL's host, so a
+  web page cannot use DNS rebinding to reach it. Cloudflare Access (or another login
+  proxy) can be put in front of `/authorize*`, which only your browser loads, but not in
+  front of `/mcp` or `/token`, which claude.ai's servers call.
+
+The design is in [docs/MCP_PLAN.md](docs/MCP_PLAN.md) §5.
 
 ## Contributing
 
@@ -397,7 +485,8 @@ why the default is 9337.
 with an example) and what CI checks. `ttg catalog --strict` reports dead abstract fields,
 outputs that name attributes the provider does not have and relations no mapping
 consumes; `schemas/project.schema.json` (`ttg schema project`) describes the project
-file for editors and external tools, and a test keeps it current. Release builds are not
+file for editors and external tools, and a test keeps it current
+([docs/FILE_FORMAT.md](docs/FILE_FORMAT.md) explains the format). Release builds are not
 automated yet; [docs/RELEASING.md](docs/RELEASING.md) explains how to set them up with
 GitHub Actions.
 
@@ -413,7 +502,7 @@ crates/ttg-cli        headless `ttg` command
 crates/ttg-app        egui/eframe desktop application
 examples/             sample projects (every one exports and validates on every provider)
 schemas/              JSON Schema of the .ttg.json project file (generated: `ttg schema project`)
-docs/                 ARCHITECTURE.md, MAPPING_FORMAT.md, PHASE2_PLAN.md, MCP_PLAN.md, PRICES.md, RELEASING.md
+docs/                 ARCHITECTURE.md, MAPPING_FORMAT.md, FILE_FORMAT.md, PHASE2_PLAN.md, MCP_PLAN.md, PRICES.md, RELEASING.md
 CONTRIBUTING.md       how to add a definition, verify it, and what CI expects
 ```
 

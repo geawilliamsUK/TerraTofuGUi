@@ -809,6 +809,45 @@ resources hold personal data, why a resource exists or who owns it.
   `project_summary` reports them. `examples/job-pipeline.ttg.json` gives its resource
   group and network an owner and a description, so the validate suite exercises the tags.
 
+## Round 4: remote and file-based access (zipOS feedback TF-001, TF-019, TF-020, TF-022)
+
+A Claude Code cloud session building zipOS could not use TerraTofu at all: the MCP
+server only listened on the user's machine (TF-001). The fallback, writing a
+`.ttg.json` for the user to open, was not documented as possible (TF-019). And locally,
+writes behind the approval prompt timed out in the client while the server still held
+them, so the caller could not tell whether a save or an export would happen (TF-020, and
+the timeout bullet of TF-022).
+
+- **Reachable from a cloud session** — the server can listen on another address
+  (`bind`, default `127.0.0.1`) and accepts one public host name besides this machine's
+  (`public_url`; rmcp's DNS-rebinding check stays on, now with that host allowed, and
+  the OAuth pages use the same rule). Behind an HTTPS tunnel (cloudflared, Tailscale
+  Funnel) it becomes a claude.ai custom connector. Connectors sign in with OAuth, so the
+  app hosts a small OAuth 2.1 authorization server (`mcp/oauth.rs`): protected-resource
+  and authorization-server metadata, dynamic client registration, authorization code
+  with PKCE S256, rotating refresh tokens, revocation, and a 401 that points at the
+  metadata. Each sign-in needs the user: a prompt in the window app ("Allow <client> to
+  edit this project?", with a code the browser page also shows), or a one-time code that
+  `--serve` prints and the user types into the page. Grants are stored hashed with the
+  app's settings (or in `--grants FILE`), listed and revoked under Agent ▸ Settings &
+  activity, and the bearer token keeps working for local clients. Design and security
+  notes in MCP_PLAN.md §5; the connector steps in the README.
+- **Approval-gated writes answer at once** — a write that needs Allow / Deny replies
+  within seconds with `{status: "pending_approval", ticket, what, applied: false}` and
+  runs only when allowed, against the project as it is then; `approval_status { ticket }`
+  reports pending, applied (with the result), failed, denied or expired, and a ticket
+  expires unapplied after a configurable time (default ten minutes). Other calls keep
+  running while a prompt is open. Every call is answered within 45 s, and one that times
+  out is withdrawn before the UI can start it (or waited for, if it already had), so the
+  reply always says whether anything was applied.
+- **The file as an interchange format** — docs/FILE_FORMAT.md documents the format, its
+  versioning and the hand-over workflow; `examples/minimal.ttg.json` is the smallest file
+  that exports cleanly; the schema carries an `$id` (the raw GitHub URL on master);
+  `ttg check --schema` reports every schema problem with its line before the catalog
+  diagnostics; and `project_import { json, replace }` loads a project from JSON as one
+  undo step, refusing to replace a non-empty project without `replace` and asking the
+  user first when it would discard unsaved changes.
+
 ## Explicitly still out of scope
 
 Running `plan`/`apply`, live-account access, multi-user collaboration, drift detection
