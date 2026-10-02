@@ -138,3 +138,41 @@ ideas last. Three waves; packages in a wave touch disjoint parts of the tree.
 Acceptance is the report's own: the CallScope design, with its cluster given a security
 group, audits clean, exports with no Deployment manual steps, plans by entity, estimates
 inside its budget, and plans for both a pilot and a prod environment.
+
+## Round 4 (zipOS feedback of 2026-10-02)
+
+A second project, zipOS (an ECS on Fargate web app behind CloudFront, with a worker and a
+migration task), was built through the MCP and logged 23 findings in its own
+`TERRATOFU_FEEDBACK.md` (TF-001 to TF-023). It was tested against the 2026-09-17 release
+binary, so part of it was already fixed on `master` by round 3 before it was written.
+
+### Already on master
+
+| Item | Where |
+|---|---|
+| TF-013 backend block, S3 `use_lockfile`, AWS provider 6, `settings_set { backend, state_encryption }` | round 3 state and versions |
+| TF-018 cost hints per node and per graph | round 3 cost estimate |
+| TF-019 a published schema and a CLI that exports without the GUI | `schemas/project.schema.json`, `ttg export` (documented as an interchange format in WP26) |
+| TF-020 a write whose caller has gone is never applied | round 2 (WP7); the approval-prompt timeout itself is WP26 |
+| TF-022 ECR `force_delete` defaults to false | round 3 cluster networking and safe defaults |
+| TF-023 flow layout, hidden structural links, sized screenshots | round 3 views; the tier-aware layout is WP27 |
+
+### Wave 1
+
+| Package | Scope | Items |
+|---|---|---|
+| **WP22 Containers** | `container_app` app config (env, secrets from a Secret with a JSON key, health check, stop timeout, CPU architecture, image from a registry repository); a shared container environment (ECS cluster with Container Insights, Container Apps environment) that apps sit in; separate execution and task roles, the execution policy only on the execution role; `uses` / `reads` links with least-privilege policies; load balancer forwards to a container app; a background-worker flag; a `container_job` type (ECS task definition, Container Apps Job, Cloud Run Job); alarms follow the shared cluster | TF-005–TF-008, TF-016 (1–4), TF-021 (5) |
+| **WP23 References and export hygiene** | native data sources addressable from `$ref`; a managed-prefix-list source on security group rules; ports optional for `all` / `icmp`; `$raw` addresses parsed into graph dependencies and diagnostics; `$ref` to a repeated block by key; key-addressed `for_each` with `moved` blocks; `extra: { arg: null }` removes a mapping argument; `fmt`-clean output checked in the validate suite; lock-file platforms | TF-003 (1), TF-004, TF-013, TF-015 |
+| **WP24 Secrets, databases, alarms and defaults** | a secret whose value is managed outside OpenTofu; an AWS-managed RDS master password; plan-time argument conflicts caught before export; alarm dimensions, percent storage, percentiles, rates, float thresholds, units; free-form database storage with autoscaling; provider-valid log retention; subnet CIDRs that do not collide; tagged-image lifecycle; numeric `extra` coercion; project rename over MCP; a terse reply mode | TF-014, TF-021 (1–4), TF-022 |
+| **WP25 Edge** | the regional Web ACL only when a load balancer is protected; CDN methods, path behaviours with managed policies, origin timeout and a secret origin header; an origin name the certificate covers; WAF rate rules scoped by path; AAAA records; Azure Front Door for `cdn` + `web_application_firewall` | TF-009–TF-011, TF-016 (5) |
+| **WP26 Remote and file-based access** | the MCP server reachable from a cloud session (a public bind behind a tunnel, OAuth for claude.ai custom connectors); approval-gated calls answer at once; the `.ttg.json` file documented as an interchange format, with `project_import` and a CLI check | TF-001, TF-019, TF-020, TF-022 (timeouts) |
+| **WP18 Environments and plan** (resumed from round 3) | named environments with per-entity overrides and a tfvars each; a name prefix; project variables usable in fields; availability zones from the region; `plan_run` | R3.11, R3.13, TF-012 |
+
+### Wave 2
+
+| Package | Scope | Items |
+|---|---|---|
+| **WP14 Reachability audit** (round 3) | file systems, endpoints, load balancer to cluster and to container app, the internet as a source, `reach_audit`, posture rules | R3.5–R3.9 |
+| **WP27 Canvas** | subnets as optional containers, a region frame, security group rules drawn as edges, a tier-aware layout and a toggle for monitoring links | TF-002, TF-003 (2), TF-023 |
+| **WP20 Diff, patterns, adoption and import** (round 3) | `project_diff`, checkpoints, patterns, `import {}` blocks, and import of a TerraTofu-generated directory back into the graph | R3.28–R3.30, TF-017 |
+| **WP21 Outputs and modules** (round 3) | outputs only for what is marked; modules behind a thin root with `envs/` | R3.31, R3.32, TF-013 (modules) |
