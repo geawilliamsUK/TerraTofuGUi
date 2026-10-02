@@ -1,4 +1,5 @@
 {
+  "$id": "https://raw.githubusercontent.com/geawilliamsUK/TerraTofuGUi/master/schemas/project.schema.json",
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "title": "TerraTofu GUI project (.ttg.json)",
   "description": "A cloud-architecture diagram: settings, containers, nodes, edges and views. Written by TerraTofu GUI; readable by `ttg` and any MCP client.",

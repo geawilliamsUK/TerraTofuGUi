@@ -1,7 +1,7 @@
 //! `ttg` — headless companion to the GUI. Used in CI and by definition contributors.
 //!
 //! ```text
-//! ttg check      <project.ttg.json> [--provider aws]
+//! ttg check      <project.ttg.json> [--provider aws] [--schema]
 //! ttg export     <project.ttg.json> --provider aws --tool opentofu --out ./out/aws [--validate] [--k8s]
 //! ttg export-all <project.ttg.json> --tool opentofu --out ./out [--zip] [--validate] [--k8s]
 //! ttg catalog    [--definitions ./definitions]
@@ -50,6 +50,11 @@ enum Cmd {
         project: PathBuf,
         #[arg(long)]
         provider: Option<String>,
+        /// First check the file against the project JSON Schema, reporting every
+        /// problem with its line, and prefix each diagnostic with its entity's line.
+        /// Meant for files written by hand or by an agent.
+        #[arg(long)]
+        schema: bool,
     },
     /// Export a single-provider project directory.
     Export {
@@ -234,6 +239,39 @@ fn load_catalog(dir: &Option<PathBuf>) -> Result<Catalog> {
         Some(d) => Catalog::load_dir(d).with_context(|| format!("loading definitions from {}", d.display())),
         None => Ok(Catalog::builtin()),
     }
+}
+
+/// `ttg check --schema`: print every schema problem in the file with its line, exit 1 when
+/// any is an error (unknown fields are only warnings: the app ignores them), and hand back
+/// the line index for the diagnostics that follow.
+fn check_schema(path: &std::path::Path) -> Result<std::collections::HashMap<String, usize>> {
+    let text = std::fs::read_to_string(path).with_context(|| format!("reading {}", path.display()))?;
+    let problems = match ttg_core::schema_check::check_project_text(&text) {
+        Ok(p) => p,
+        Err(p) => {
+            println!("{}:{}: error: {}", path.display(), p.line, p.message);
+            std::process::exit(1);
+        }
+    };
+    for p in &problems {
+        let sev = if p.warning { "warning" } else { "error" };
+        let at = if p.pointer.is_empty() {
+            "(root)"
+        } else {
+            &p.pointer
+        };
+        println!("{}:{}: {sev}: {at}: {}", path.display(), p.line, p.message);
+    }
+    let errors = problems.iter().filter(|p| !p.warning).count();
+    println!(
+        "schema: {} problem(s), {errors} error(s) ({})",
+        problems.len(),
+        ttg_core::json_schema::SCHEMA_ID
+    );
+    if errors > 0 {
+        std::process::exit(1);
+    }
+    Ok(ttg_core::schema_check::line_index(&text))
 }
 
 fn main() -> Result<()> {
@@ -569,19 +607,46 @@ fn main() -> Result<()> {
                 }
             }
         }
-        Cmd::Check { project, provider } => {
-            let p = ttg_core::project::load(&project)?;
+        Cmd::Check {
+            project,
+            provider,
+            schema,
+        } => {
+            // With --schema: every schema problem first (all of them, with lines), and
+            // the entity diagnostics below carry the line their entity starts on.
+            let lines = if schema {
+                Some(check_schema(&project)?)
+            } else {
+                None
+            };
+            let p = ttg_core::project::load(&project).with_context(|| format!("{}", project.display()))?;
             cat.ensure_native_types(&p);
             let provider = provider.unwrap_or(p.settings.target_provider.clone());
+            let at = |d: &ttg_codegen::diagnostics::Diagnostic| -> String {
+                let (Some(lines), Some(id)) = (&lines, &d.entity) else {
+                    return String::new();
+                };
+                let token = ttg_core::schema_check::pointer_token(id);
+                let ptr = if p.containers.contains_key(id) {
+                    format!("/containers/{token}")
+                } else {
+                    format!("/nodes/{token}")
+                };
+                format!(
+                    "{}:{}: ",
+                    project.display(),
+                    ttg_core::schema_check::line_of(lines, &ptr)
+                )
+            };
             let diags = ttg_codegen::diagnostics::run(&p, &cat, &provider);
             for d in &diags {
-                println!("{d}");
+                println!("{}{d}", at(d));
             }
             // What the other providers would refuse. These never block this export; they
             // carry their provider in the message, so they read as a separate list.
             let others = ttg_codegen::diagnostics::other_providers(&p, &cat, &provider);
             for d in &others {
-                println!("{d}");
+                println!("{}{d}", at(d));
             }
             let errors = diags.iter().filter(|d| d.severity == Severity::Error).count();
             println!("{} diagnostics, {errors} error(s)", diags.len());

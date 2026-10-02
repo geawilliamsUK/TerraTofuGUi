@@ -4,10 +4,19 @@
 
 use crate::Project;
 
+/// Where the schema is published: the checked-in copy on `master`, served raw by GitHub.
+/// Editors that follow `$schema` in a project file fetch it from here.
+pub const SCHEMA_ID: &str =
+    "https://raw.githubusercontent.com/geawilliamsUK/TerraTofuGUi/master/schemas/project.schema.json";
+
 /// The schema as pretty-printed JSON (draft 2020-12, as produced by `schemars`).
 pub fn project_schema_json() -> String {
     let mut schema = schemars::schema_for!(Project);
     if let Some(obj) = schema.as_object_mut() {
+        // `$id` first, where readers look for it.
+        let rest = std::mem::take(obj);
+        obj.insert("$id".into(), SCHEMA_ID.into());
+        obj.extend(rest);
         obj.insert("title".into(), "TerraTofu GUI project (.ttg.json)".into());
         obj.insert(
             "description".into(),

@@ -1,0 +1,51 @@
+{
+  "schema_version": 1,
+  "name": "minimal",
+  "settings": {
+    "tool": "opentofu",
+    "target_provider": "aws",
+    "provider_settings": { "aws": { "region": "eu-west-2" } }
+  },
+  "containers": {
+    "net": {
+      "id": "net",
+      "name": "main",
+      "container_type": "virtual_network",
+      "config": { "cidr_block": "10.0.0.0/16" },
+      "position": { "x": 40, "y": 40 },
+      "size": { "w": 320, "h": 240 }
+    }
+  },
+  "nodes": {
+    "app-subnet": {
+      "id": "app-subnet",
+      "name": "app",
+      "resource_type": "subnet",
+      "parent": "net",
+      "config": { "cidr_block": "10.0.1.0/24" },
+      "position": { "x": 80, "y": 120 }
+    },
+    "worker": {
+      "id": "worker",
+      "name": "worker",
+      "resource_type": "function",
+      "config": {
+        "runtime": "python3.12",
+        "handler": "app.handler",
+        "memory_mb": 128,
+        "timeout_seconds": 30
+      },
+      "position": { "x": 440, "y": 80 }
+    },
+    "worker-role": {
+      "id": "worker-role",
+      "name": "worker role",
+      "resource_type": "iam_role",
+      "config": { "trusted_service": "serverless", "permissions": "none" },
+      "position": { "x": 440, "y": 240 }
+    }
+  },
+  "edges": [
+    { "source": "worker", "target": "worker-role", "relation": "iam_binding" }
+  ]
+}

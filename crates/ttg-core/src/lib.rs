@@ -13,6 +13,8 @@ pub mod ir;
 pub mod json_schema;
 pub mod layout;
 pub mod project;
+#[cfg(feature = "schema")]
+pub mod schema_check;
 pub mod validate;
 pub mod value;
 pub mod view;
