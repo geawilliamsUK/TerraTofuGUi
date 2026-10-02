@@ -341,7 +341,7 @@ watch it happen. It is off until you switch it on:
    shows what the agent did. Saving to disk only happens when a tool is explicitly asked
    to, and opening another file goes through the same unsaved-changes prompt as the menu.
 
-The 51 tools cover reading (project, catalog, catalog relations, diagnostics,
+The 52 tools cover reading (project, catalog, catalog relations, diagnostics,
 reachability, export preview, one entity's HCL with `entity_preview`, export diff,
 `view_get`, `view_export`, screenshot) and editing (add/update/move/resize/
 reparent/delete entities, links, selection, views, tidy/align/distribute, settings,

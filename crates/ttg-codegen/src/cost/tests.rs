@@ -27,6 +27,9 @@ fn one_of_everything(cat: &Catalog) -> Project {
                     manual: false,
                     providers: Vec::new(),
                     extra: Default::default(),
+                    classification: None,
+                    description: String::new(),
+                    owner: String::new(),
                 },
             );
         } else {
@@ -47,6 +50,9 @@ fn one_of_everything(cat: &Catalog) -> Project {
                     manual: false,
                     providers: Vec::new(),
                     extra: Default::default(),
+                    classification: None,
+                    description: String::new(),
+                    owner: String::new(),
                 },
             );
         }
