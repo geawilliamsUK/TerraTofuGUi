@@ -141,6 +141,10 @@ pub struct FieldDef {
     /// or not). Abstract fields only.
     #[serde(default)]
     pub moved_from: Option<MovedFrom>,
+    /// On a `struct_list` item that is `required`: the requirement lapses in a row whose
+    /// other item has one of these values (a rule's ports when its protocol is `all`).
+    #[serde(default)]
+    pub required_unless_item: Option<RequiredUnlessItem>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -162,6 +166,24 @@ pub struct MovedFrom {
     /// Old values not carried over.
     #[serde(default)]
     pub skip: Vec<String>,
+}
+
+/// `required_unless_item = { item = "protocol", in = ["all", "icmp"] }`.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RequiredUnlessItem {
+    pub item: String,
+    #[serde(rename = "in")]
+    pub values: Vec<String>,
+}
+
+impl RequiredUnlessItem {
+    /// Does the requirement lapse in this row?
+    pub fn lapses(&self, row: &ttg_core::Record) -> bool {
+        row.get(&self.item)
+            .map(|v| v.display())
+            .is_some_and(|v| self.values.contains(&v))
+    }
 }
 
 impl FieldDef {
@@ -346,6 +368,11 @@ pub struct BlockDef {
     /// (schema_version 2). Sources inside may use `{ item = "..." }`.
     #[serde(default)]
     pub for_each_field: Option<String>,
+    /// The row item whose value names each instance of a `for_each_field` block (its
+    /// address is `<slug>_<key>_<value>`). Defaults to the row's `name` item, or the
+    /// entry itself for a `string_list`; without either the row index is used.
+    #[serde(default)]
+    pub for_each_key: Option<String>,
     /// Emit one block per target of this relation (schema_version 2). Sources inside may
     /// use `{ target = "<attr>" }`; `for_each_target_type` narrows the targets.
     #[serde(default)]
@@ -356,6 +383,30 @@ pub struct BlockDef {
     pub args: IndexMap<String, ArgSource>,
     #[serde(default)]
     pub nested: Vec<NestedBlockDef>,
+}
+
+impl BlockDef {
+    /// A block with no conditions, rows or arguments: what a native resource or data
+    /// source is made of.
+    pub fn plain(key: &str, resource: &str) -> BlockDef {
+        BlockDef {
+            key: key.to_string(),
+            resource: resource.to_string(),
+            when: None,
+            provider_alias: None,
+            for_each_field: None,
+            for_each_key: None,
+            for_each_relation: None,
+            for_each_target_type: None,
+            args: IndexMap::new(),
+            nested: Vec::new(),
+        }
+    }
+
+    /// One block per row or per target rather than a single block.
+    pub fn repeated(&self) -> bool {
+        self.for_each_field.is_some() || self.for_each_relation.is_some()
+    }
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -1008,6 +1059,10 @@ pub struct SrcSelfData {
     pub attr: String,
     #[serde(default)]
     pub wrap: Option<Wrap>,
+    /// For a repeated data block: the instance whose key equals this item of the current
+    /// row (a security group rule's `prefix_list` names the lookup it uses).
+    #[serde(default)]
+    pub key_item: Option<String>,
 }
 #[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]

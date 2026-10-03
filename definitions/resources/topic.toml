@@ -140,6 +140,7 @@ source_arn    = { self_block = "main", attr = "arn" }
 key = "sub_endpoint"
 resource = "aws_sns_topic_subscription"
 for_each_field = "subscriptions"
+for_each_key = "endpoint"
 
 [providers.aws.blocks.args]
 topic_arn = { self_block = "main", attr = "arn" }
@@ -331,6 +332,7 @@ topic = { self_block = "main", attr = "id" }
 key = "sub_push"
 resource = "google_pubsub_subscription"
 for_each_field = "subscriptions"
+for_each_key = "endpoint"
 when = { item = "protocol", equals = "https" }
 
 [providers.gcp.blocks.args]

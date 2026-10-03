@@ -400,9 +400,11 @@ pub fn native_parts(type_id: &str) -> Option<(&str, &str)> {
 
 impl Catalog {
     /// Make sure a synthetic definition exists for a native provider resource type
-    /// (`native:aws:aws_s3_bucket_policy`). The definition emits exactly one block whose
-    /// arguments all come from the entity's extra arguments, scoped to that provider.
-    /// Returns false when the id is malformed or the provider is unknown.
+    /// (`native:aws:aws_s3_bucket_policy`) or data source (`native:aws:data.aws_vpc`).
+    /// The definition emits exactly one block — a `resource`, or a `data` block for a
+    /// data source — whose arguments all come from the entity's extra arguments, scoped
+    /// to that provider. Returns false when the id is malformed or the provider is
+    /// unknown.
     pub fn ensure_native(&mut self, type_id: &str) -> bool {
         if self.resources.contains_key(type_id) {
             return true;
@@ -419,29 +421,29 @@ impl Catalog {
             .filter(|r| r.resource.kind == ResourceKind::Container)
             .map(|r| r.resource.type_id.clone())
             .collect();
+        let data_source = native_data_type(tf_type);
+        let (blocks, data) = match data_source {
+            Some(t) => (Vec::new(), vec![BlockDef::plain("main", t)]),
+            None => (vec![BlockDef::plain("main", tf_type)], Vec::new()),
+        };
         let mut providers = IndexMap::new();
         providers.insert(
             provider.to_string(),
             ProviderMapping {
                 status: MappingStatus::Full,
                 file: Some("native".into()),
-                notes: format!(
-                    "Native {tf_type}: every argument is set in the Arguments section below and checked against the provider schema."
-                ),
+                notes: match data_source {
+                    Some(t) => format!(
+                        "Native data source {t}: a read-only lookup of something that already exists. Every argument is set in the Arguments section below and checked against the provider schema; reference it with {{\"$ref\": {{\"entity\": …, \"attr\": …}}}}."
+                    ),
+                    None => format!(
+                        "Native {tf_type}: every argument is set in the Arguments section below and checked against the provider schema."
+                    ),
+                },
                 fields: Vec::new(),
                 variables: Vec::new(),
-                blocks: vec![BlockDef {
-                    key: "main".into(),
-                    resource: tf_type.to_string(),
-                    when: None,
-                    provider_alias: None,
-                    for_each_field: None,
-                    for_each_relation: None,
-                    for_each_target_type: None,
-                    args: IndexMap::new(),
-                    nested: Vec::new(),
-                }],
-                data: Vec::new(),
+                blocks,
+                data,
                 outputs: IndexMap::new(),
                 manual_steps: Vec::new(),
                 checks: Vec::new(),
@@ -454,12 +456,17 @@ impl Catalog {
                 type_id: type_id.to_string(),
                 category: "native".into(),
                 display_name: tf_type.to_string(),
-                description: format!(
-                    "Native {tf_type} resource. Not portable: it exists only on {provider}. Arguments come straight from the provider schema."
-                ),
+                description: match data_source {
+                    Some(t) => format!(
+                        "Native {t} data source: looks up something that already exists, creates nothing. Not portable: it exists only on {provider}. Arguments come straight from the provider schema."
+                    ),
+                    None => format!(
+                        "Native {tf_type} resource. Not portable: it exists only on {provider}. Arguments come straight from the provider schema."
+                    ),
+                },
                 kind: ResourceKind::Node,
                 allowed_parents: containers,
-                icon: "TF".into(),
+                icon: if data_source.is_some() { "DATA".into() } else { "TF".into() },
                 expects_incoming: false,
                 network_agnostic: false,
                 providers: vec![provider.to_string()],
@@ -544,6 +551,16 @@ impl Catalog {
         }
         changed
     }
+
+    /// A native data source type (`native:aws:data.aws_vpc`): a lookup, not a resource.
+    pub fn is_native_data(type_id: &str) -> bool {
+        native_parts(type_id).is_some_and(|(_, t)| native_data_type(t).is_some())
+    }
+}
+
+/// `data.aws_vpc` -> `aws_vpc`: the data source a native type id names, if it names one.
+pub fn native_data_type(tf_type: &str) -> Option<&str> {
+    tf_type.strip_prefix("data.")
 }
 
 #[cfg(test)]
@@ -582,5 +599,22 @@ mod tests {
         assert_ne!(fingerprint_of(["a", "b"]), fingerprint_of(["a", "c"]));
         // A definition edit changes it; so does splitting one text in two.
         assert_ne!(fingerprint_of(["ab"]), fingerprint_of(["a", "b"]));
+    }
+
+    #[test]
+    fn a_native_data_source_is_one_data_block() {
+        let mut c = Catalog::builtin();
+        let id = "native:aws:data.aws_ec2_managed_prefix_list";
+        assert!(c.ensure_native(id));
+        assert!(Catalog::is_native_data(id));
+        assert!(!Catalog::is_native_data("native:aws:aws_vpc"));
+        let m = c.mapping(id, "aws").unwrap();
+        assert!(m.blocks.is_empty());
+        assert_eq!(m.data.len(), 1);
+        assert_eq!(m.data[0].key, "main");
+        assert_eq!(m.data[0].resource, "aws_ec2_managed_prefix_list");
+        let def = c.resource(id).unwrap();
+        assert_eq!(def.resource.display_name, "data.aws_ec2_managed_prefix_list");
+        assert_eq!(def.resource.providers, vec!["aws".to_string()]);
     }
 }

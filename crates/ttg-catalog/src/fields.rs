@@ -75,7 +75,13 @@ pub fn check_value(def: &FieldDef, value: Option<&Value>) -> Result<(), String> 
             let rows = v.as_records().ok_or("expected a list of rows")?;
             for (n, row) in rows.iter().enumerate() {
                 for sub in &def.items {
-                    if let Err(msg) = check_value(sub, row.get(&sub.name)) {
+                    let lapsed = sub.required_unless_item.as_ref().is_some_and(|u| u.lapses(row));
+                    let result = if lapsed && row.get(&sub.name).is_none_or(|v| v.is_empty()) {
+                        Ok(())
+                    } else {
+                        check_value(sub, row.get(&sub.name))
+                    };
+                    if let Err(msg) = result {
                         return Err(format!("row {}: {}: {msg}", n + 1, sub.label()));
                     }
                 }

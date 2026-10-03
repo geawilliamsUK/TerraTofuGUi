@@ -14,6 +14,15 @@
 # security group EKS creates for the cluster (every node carries it), the address ranges
 # of the cluster's node subnets on Azure, and the network tag GKE nodes carry on Google
 # Cloud. The rules tell the two apart with `{ item = "source_group", ref_type = … }`.
+#
+# On AWS a rule may instead admit a managed prefix list: `prefix_list` names an
+# AWS-managed list (`com.amazonaws.global.cloudfront.origin-facing`), which the mapping
+# looks up itself with one `data "aws_ec2_managed_prefix_list"` per distinct name, and
+# `source_prefix_list` points at a native prefix-list data source or resource drawn on the
+# canvas. Azure and Google Cloud have no prefix lists, so those rows are left out there.
+#
+# Rule resources are named after the row's `name` (`<group>_ingress_<name>`), so
+# reordering the table does not replace them.
 
 schema_version = 2
 
@@ -31,7 +40,7 @@ name = "rules"
 label = "Rules"
 type = "struct_list"
 required = true
-description = "One row per rule. Give each rule a CIDR or a source security group. Ports are ignored for icmp / all."
+description = "One row per rule. Give each rule a CIDR, a source security group or (AWS) a prefix list. Ports are not needed for all; for icmp they are the ICMP type and code, and every type when left empty."
 
 [[fields.items]]
 name = "name"
@@ -63,6 +72,7 @@ name = "from_port"
 label = "From port"
 type = "int"
 required = true
+required_unless_item = { item = "protocol", in = ["all", "icmp"] }
 default = 0
 
 [[fields.items]]
@@ -70,6 +80,7 @@ name = "to_port"
 label = "To port"
 type = "int"
 required = true
+required_unless_item = { item = "protocol", in = ["all", "icmp"] }
 default = 0
 
 [[fields.items]]
@@ -85,6 +96,21 @@ label = "From security group"
 type = "entity_ref"
 targets = ["security_group", "kubernetes_cluster"]
 description = "Allow traffic from members of another security group instead of a CIDR (AWS: referenced directly; Azure: VirtualNetwork tag). A Kubernetes cluster here means its nodes: the cluster security group on AWS, the node subnets on Azure, the node network tag on Google Cloud."
+
+[[fields.items]]
+name = "prefix_list"
+label = "AWS-managed prefix list"
+type = "string"
+pattern = "^[a-z0-9.-]+$"
+pattern_hint = "an AWS-managed prefix list name, e.g. com.amazonaws.global.cloudfront.origin-facing"
+description = "AWS only: admit (or, egress, allow to) the addresses of an AWS-managed prefix list by name, e.g. com.amazonaws.global.cloudfront.origin-facing for CloudFront's origin-facing servers. The export looks the list up itself. Leave the CIDR empty."
+
+[[fields.items]]
+name = "source_prefix_list"
+label = "Prefix list on the canvas"
+type = "entity_ref"
+targets = ["native:aws:data.aws_ec2_managed_prefix_list", "native:aws:aws_ec2_managed_prefix_list"]
+description = "AWS only: a prefix list drawn on the canvas, as a native aws_ec2_managed_prefix_list data source (an existing list) or resource (one you manage). Leave the CIDR empty."
 
 [[fields.items]]
 name = "description"
@@ -104,9 +130,9 @@ status = "full"
 
 [[providers.aws.checks]]
 for_each_field = "rules"
-when = { all = [ { item = "cidr", equals = "" }, { item = "source_group", equals = "" } ] }
+when = { all = [ { item = "cidr", equals = "" }, { item = "source_group", equals = "" }, { item = "prefix_list", equals = "" }, { item = "source_prefix_list", equals = "" } ] }
 severity = "error"
-message = "rule '{item.name}' needs a CIDR or a source security group"
+message = "rule '{item.name}' needs a CIDR, a source security group or a prefix list"
 
 [[providers.aws.checks]]
 for_each_field = "rules"
@@ -117,6 +143,23 @@ message = "rule '{item.name}' opens port {item.from_port} to the whole internet"
 when = { field = "name", transform = "kebab", starts_with = "sg-" }
 severity = "error"
 message = "\"{name}\": AWS rejects security group names beginning with sg-; rename it (for example web-sg)"
+
+[[providers.aws.checks]]
+for_each_field = "rules"
+when = { any = [ { all = [ { item = "cidr", not_equals = "" }, { any = [ { item = "prefix_list", not_equals = "" }, { item = "source_prefix_list", not_equals = "" } ] } ] }, { all = [ { item = "prefix_list", not_equals = "" }, { item = "source_prefix_list", not_equals = "" } ] } ] }
+message = "rule '{item.name}' names a prefix list and another source; the prefix list wins and the rest of the source is not generated"
+
+# An AWS-managed prefix list named in a rule, looked up once per distinct name: the
+# instances are keyed by the list's name, so rows naming the same list share one lookup.
+[[providers.aws.data]]
+key = "prefix_list"
+resource = "aws_ec2_managed_prefix_list"
+for_each_field = "rules"
+for_each_key = "prefix_list"
+when = { item = "prefix_list", not_equals = "" }
+
+[providers.aws.data.args]
+name = { item = "prefix_list" }
 
 [[providers.aws.blocks]]
 key = "main"
@@ -142,10 +185,11 @@ when = { item = "direction", equals = "ingress" }
 security_group_id            = { self_block = "main", attr = "id" }
 description                  = { item = "description", optional = true }
 ip_protocol                  = { map = "protocol", table = { tcp = "tcp", udp = "udp", icmp = "icmp", all = "-1" } }
-from_port                    = { if = { item = "protocol", not_equals = "all" }, then = { item = "from_port" } }
-to_port                      = { if = { item = "protocol", not_equals = "all" }, then = { item = "to_port" } }
-cidr_ipv4                    = { item = "cidr", optional = true }
-referenced_security_group_id = { if = { item = "source_group", ref_type = "kubernetes_cluster" }, then = { item_ref = "source_group", attr = "vpc_config.0.cluster_security_group_id" }, else = { item_ref = "source_group", attr = "id" } }
+from_port                    = { if = { item = "protocol", not_equals = "all" }, then = { if = { all = [ { item = "protocol", equals = "icmp" }, { item = "from_port", equals = "" } ] }, then = { value = -1 }, else = { item = "from_port" } } }
+to_port                      = { if = { item = "protocol", not_equals = "all" }, then = { if = { all = [ { item = "protocol", equals = "icmp" }, { item = "to_port", equals = "" } ] }, then = { value = -1 }, else = { item = "to_port" } } }
+cidr_ipv4                    = { if = { all = [ { item = "prefix_list", equals = "" }, { item = "source_prefix_list", equals = "" } ] }, then = { item = "cidr", optional = true } }
+prefix_list_id               = { if = { item = "prefix_list", not_equals = "" }, then = { self_data = "prefix_list", key_item = "prefix_list", attr = "id" }, else = { item_ref = "source_prefix_list", attr = "id" } }
+referenced_security_group_id = { if = { all = [ { item = "prefix_list", equals = "" }, { item = "source_prefix_list", equals = "" } ] }, then = { if = { item = "source_group", ref_type = "kubernetes_cluster" }, then = { item_ref = "source_group", attr = "vpc_config.0.cluster_security_group_id" }, else = { item_ref = "source_group", attr = "id" } } }
 tags                         = { object = { Name = { item = "name" } } }
 
 [[providers.aws.blocks]]
@@ -158,10 +202,11 @@ when = { item = "direction", equals = "egress" }
 security_group_id            = { self_block = "main", attr = "id" }
 description                  = { item = "description", optional = true }
 ip_protocol                  = { map = "protocol", table = { tcp = "tcp", udp = "udp", icmp = "icmp", all = "-1" } }
-from_port                    = { if = { item = "protocol", not_equals = "all" }, then = { item = "from_port" } }
-to_port                      = { if = { item = "protocol", not_equals = "all" }, then = { item = "to_port" } }
-cidr_ipv4                    = { item = "cidr", optional = true }
-referenced_security_group_id = { if = { item = "source_group", ref_type = "kubernetes_cluster" }, then = { item_ref = "source_group", attr = "vpc_config.0.cluster_security_group_id" }, else = { item_ref = "source_group", attr = "id" } }
+from_port                    = { if = { item = "protocol", not_equals = "all" }, then = { if = { all = [ { item = "protocol", equals = "icmp" }, { item = "from_port", equals = "" } ] }, then = { value = -1 }, else = { item = "from_port" } } }
+to_port                      = { if = { item = "protocol", not_equals = "all" }, then = { if = { all = [ { item = "protocol", equals = "icmp" }, { item = "to_port", equals = "" } ] }, then = { value = -1 }, else = { item = "to_port" } } }
+cidr_ipv4                    = { if = { all = [ { item = "prefix_list", equals = "" }, { item = "source_prefix_list", equals = "" } ] }, then = { item = "cidr", optional = true } }
+prefix_list_id               = { if = { item = "prefix_list", not_equals = "" }, then = { self_data = "prefix_list", key_item = "prefix_list", attr = "id" }, else = { item_ref = "source_prefix_list", attr = "id" } }
+referenced_security_group_id = { if = { all = [ { item = "prefix_list", equals = "" }, { item = "source_prefix_list", equals = "" } ] }, then = { if = { item = "source_group", ref_type = "kubernetes_cluster" }, then = { item_ref = "source_group", attr = "vpc_config.0.cluster_security_group_id" }, else = { item_ref = "source_group", attr = "id" } } }
 tags                         = { object = { Name = { item = "name" } } }
 
 [providers.aws.outputs]
@@ -174,9 +219,9 @@ notes = "Rules whose source is another security group use the VirtualNetwork ser
 
 [[providers.azure.checks]]
 for_each_field = "rules"
-when = { all = [ { item = "cidr", equals = "" }, { item = "source_group", equals = "" } ] }
+when = { all = [ { item = "cidr", equals = "" }, { item = "source_group", equals = "" }, { item = "prefix_list", equals = "" }, { item = "source_prefix_list", equals = "" } ] }
 severity = "error"
-message = "rule '{item.name}' needs a CIDR or a source security group"
+message = "rule '{item.name}' needs a CIDR, a source security group or a prefix list"
 
 [[providers.azure.checks]]
 for_each_field = "rules"
@@ -192,10 +237,16 @@ name                = { field = "name", transform = "kebab" }
 location            = { var = "location" }
 resource_group_name = { ancestor = "resource_group", attr = "name" }
 
+[[providers.azure.checks]]
+for_each_field = "rules"
+when = { any = [ { item = "prefix_list", not_equals = "" }, { item = "source_prefix_list", not_equals = "" } ] }
+message = "rule '{item.name}': prefix lists are AWS-only; the rule is left out of the Azure export"
+
 [[providers.azure.blocks]]
 key = "rule"
 resource = "azurerm_network_security_rule"
 for_each_field = "rules"
+when = { all = [ { item = "prefix_list", equals = "" }, { item = "source_prefix_list", equals = "" } ] }
 
 [providers.azure.blocks.args]
 name                        = { item = "name", transform = "kebab" }
@@ -208,7 +259,7 @@ resource_group_name         = { ancestor = "resource_group", attr = "name" }
 network_security_group_name = { self_block = "main", attr = "name" }
 
 [providers.azure.blocks.args.destination_port_range]
-if = { item = "protocol", equals = "all" }
+if = { any = [ { item = "protocol", equals = "all" }, { item = "protocol", equals = "icmp" } ] }
 then = { value = "*" }
 
 [providers.azure.blocks.args.destination_port_range.else]
@@ -247,9 +298,9 @@ notes = "Firewall rules are network-level. Membership is a network tag: instance
 
 [[providers.gcp.checks]]
 for_each_field = "rules"
-when = { all = [ { item = "cidr", equals = "" }, { item = "source_group", equals = "" } ] }
+when = { all = [ { item = "cidr", equals = "" }, { item = "source_group", equals = "" }, { item = "prefix_list", equals = "" }, { item = "source_prefix_list", equals = "" } ] }
 severity = "error"
-message = "rule '{item.name}' needs a CIDR or a source security group"
+message = "rule '{item.name}' needs a CIDR, a source security group or a prefix list"
 
 [[providers.gcp.checks]]
 for_each_field = "rules"
@@ -269,10 +320,16 @@ resource = "terraform_data"
 [providers.gcp.blocks.args]
 input = { field = "name", transform = "kebab" }
 
+[[providers.gcp.checks]]
+for_each_field = "rules"
+when = { any = [ { item = "prefix_list", not_equals = "" }, { item = "source_prefix_list", not_equals = "" } ] }
+message = "rule '{item.name}': prefix lists are AWS-only; the rule is left out of the Google Cloud export"
+
 [[providers.gcp.blocks]]
 key = "rule"
 resource = "google_compute_firewall"
 for_each_field = "rules"
+when = { all = [ { item = "prefix_list", equals = "" }, { item = "source_prefix_list", equals = "" } ] }
 
 [providers.gcp.blocks.args]
 name               = { func = "replace", args = [ { func = "lower", args = [ { func = "format", args = [ { value = "%s-%s" }, { field = "name", transform = "kebab" }, { item = "name" } ] } ] }, { value = "_" }, { value = "-" } ] }

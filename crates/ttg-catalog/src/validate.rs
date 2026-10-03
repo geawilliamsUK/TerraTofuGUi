@@ -66,6 +66,7 @@ pub fn catalog(cat: &Catalog) -> Vec<String> {
             relations: &[],
             blocks: &[],
             data: &[],
+            repeated_data: &[],
             vars: &vars,
             aliases: &[],
             item_fields: None,
@@ -326,6 +327,12 @@ pub fn catalog(cat: &Catalog) -> Vec<String> {
             }
             let block_keys: Vec<&str> = m.blocks.iter().map(|b| b.key.as_str()).collect();
             let data_keys: Vec<&str> = m.data.iter().map(|b| b.key.as_str()).collect();
+            let repeated_data: Vec<&str> = m
+                .data
+                .iter()
+                .filter(|b| b.for_each_field.is_some())
+                .map(|b| b.key.as_str())
+                .collect();
             let mut vars: Vec<&str> = pdef.variables.iter().map(|v| v.name.as_str()).collect();
             vars.extend(m.variables.iter().map(|v| v.name.as_str()));
             let aliases: Vec<&str> = pdef.aliases.iter().map(|a| a.name.as_str()).collect();
@@ -336,6 +343,7 @@ pub fn catalog(cat: &Catalog) -> Vec<String> {
                 relations: &def.relations,
                 blocks: &block_keys,
                 data: &data_keys,
+                repeated_data: &repeated_data,
                 vars: &vars,
                 aliases: &aliases,
                 item_fields: None,
@@ -427,7 +435,13 @@ fn check_field(cat: &Catalog, where_: &str, f: &FieldDef, errs: &mut Vec<String>
             errs.push(format!("{where_}: entity_ref field declares no targets"));
         }
         for t in &f.targets {
-            if !cat.resources.contains_key(t) {
+            // A native type (`native:aws:data.aws_ec2_managed_prefix_list`) is created on
+            // demand, so it is checked by shape: a known provider and a type name.
+            let known = match crate::load::native_parts(t) {
+                Some((provider, tf)) => cat.providers.contains_key(provider) && !tf.is_empty(),
+                None => cat.resources.contains_key(t),
+            };
+            if !known {
                 errs.push(format!("{where_}: entity_ref target '{t}' is not a known type"));
             }
         }
@@ -466,6 +480,26 @@ fn check_field(cat: &Catalog, where_: &str, f: &FieldDef, errs: &mut Vec<String>
             if !seen.insert(&sub.name) {
                 errs.push(format!("{where_}: duplicate item '{}'", sub.name));
             }
+            if let Some(u) = &sub.required_unless_item {
+                if !sub.required {
+                    errs.push(format!(
+                        "{where_}: item '{}': required_unless_item only applies to a required item",
+                        sub.name
+                    ));
+                }
+                if u.item == sub.name || !f.items.iter().any(|i| i.name == u.item) {
+                    errs.push(format!(
+                        "{where_}: item '{}': required_unless_item names '{}', which is not another item of the row",
+                        sub.name, u.item
+                    ));
+                }
+                if u.values.is_empty() {
+                    errs.push(format!(
+                        "{where_}: item '{}': required_unless_item needs at least one value in `in`",
+                        sub.name
+                    ));
+                }
+            }
             if sub.field_type == FieldType::StructList {
                 errs.push(format!("{where_}: item '{}' — struct_list cannot nest", sub.name));
             }
@@ -479,6 +513,11 @@ fn check_field(cat: &Catalog, where_: &str, f: &FieldDef, errs: &mut Vec<String>
         }
     } else if !f.items.is_empty() {
         errs.push(format!("{where_}: only struct_list fields may declare items"));
+    }
+    if f.required_unless_item.is_some() && f.field_type == FieldType::StructList {
+        errs.push(format!(
+            "{where_}: required_unless_item belongs on an item of a struct_list, not on the table"
+        ));
     }
     if let Some(d) = &f.default {
         if let Err(e) = crate::fields::check_value_toml(f, d) {
@@ -495,6 +534,8 @@ struct SourceCtx<'a> {
     relations: &'a [RelationDef],
     blocks: &'a [&'a str],
     data: &'a [&'a str],
+    /// Data keys with `for_each_field`, the ones a `key_item` can pick an instance of.
+    repeated_data: &'a [&'a str],
     vars: &'a [&'a str],
     /// Provider aliases a block may send itself to with `provider_alias`.
     aliases: &'a [&'a str],
@@ -559,6 +600,21 @@ fn check_block(ctx: &mut SourceCtx, b: &BlockDef, errs: &mut Vec<String>) {
         match for_each_items(ctx, field) {
             Ok(items) => ctx.item_fields = Some(items),
             Err(e) => errs.push(format!("{}block '{}': for_each_field: {e}", ctx.what, b.key)),
+        }
+    }
+    if let Some(key) = &b.for_each_key {
+        match (&b.for_each_field, &ctx.item_fields) {
+            (None, _) => errs.push(format!(
+                "{}block '{}': for_each_key only applies to a for_each_field block",
+                ctx.what, b.key
+            )),
+            (Some(_), Some(items)) if !items.iter().any(|i| i == key) => errs.push(format!(
+                "{}block '{}': for_each_key '{key}' is not an item of the row (available: {})",
+                ctx.what,
+                b.key,
+                items.join(", ")
+            )),
+            _ => {}
         }
     }
     if let Some(c) = &b.when {
@@ -807,6 +863,7 @@ fn check_where(ctx: &mut SourceCtx, target_type: Option<&str>, w: &Condition, er
         relations: &other.relations,
         blocks: &[],
         data: &[],
+        repeated_data: &[],
         vars: &[],
         aliases: &[],
         item_fields: None,
@@ -1305,6 +1362,15 @@ fn check_source(ctx: &mut SourceCtx, at: &str, src: &ArgSource, errs: &mut Vec<S
             check_no_map_wrap(ctx, at, s.wrap, errs);
             if !ctx.data.contains(&s.self_data.as_str()) {
                 errs.push(e(format!("self_data '{}' does not exist", s.self_data)));
+            }
+            if let Some(item) = &s.key_item {
+                check_item_ref(ctx, at, item, errs);
+                if !ctx.repeated_data.contains(&s.self_data.as_str()) {
+                    errs.push(e(format!(
+                        "self_data '{}': key_item needs a data block with for_each_field",
+                        s.self_data
+                    )));
+                }
             }
         }
         ArgSource::Item(i) => {
