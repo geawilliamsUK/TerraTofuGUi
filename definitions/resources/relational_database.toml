@@ -2,8 +2,9 @@
 #
 # A managed PostgreSQL or MySQL server with one database.
 # AWS: aws_db_subnet_group (link two subnets in different AZs) + aws_db_instance in a
-#      linked Security Group. The password comes from a linked Secret ('Password from')
-#      or, failing that, the `db_password` input variable.
+#      linked Security Group, plus an aws_db_parameter_group when parameters are set. The
+#      password comes from a linked Secret ('Password from'), the `db_password` input
+#      variable, or RDS itself (Master password 'managed': no password argument at all).
 # Azure: azurerm_postgresql_flexible_server / azurerm_mysql_flexible_server chosen by the
 #      `engine` field. With a linked subnet the server is VNet-integrated (delegated
 #      subnet + private DNS zone + zone link, public access off); without one it is
@@ -36,14 +37,22 @@ type = "enum"
 required = true
 options = ["small", "medium", "large"]
 default = "small"
+description = "Picks the instance class / SKU / tier from a table per provider. Ignored where the provider's own override is set: the AWS instance class, the Azure SKU or the Google Cloud tier."
 
 [[fields]]
 name = "storage"
 label = "Storage (GB)"
-type = "enum"
+type = "int"
 required = true
-options = ["32", "64", "128", "256", "512"]
-default = "32"
+default = 32
+description = "Allocated storage in GB. Minimums: AWS 20 GB of gp2 / gp3 (100 GB of io1 / io2), Azure MySQL 20 GB, Cloud SQL 10 GB. An Azure PostgreSQL flexible server only comes in 32, 64, 128, 256 and 512 GB and 1-32 TB, so other figures are rounded up to the next of those."
+
+[[fields]]
+name = "max_storage_gb"
+label = "Grow storage up to (GB)"
+type = "int"
+default = 0
+description = "Let the server add storage by itself as it fills, up to this many GB: RDS storage autoscaling (`max_allocated_storage`), Cloud SQL automatic storage increase with a limit, Azure auto-grow (which has no upper limit). 0 keeps the size fixed; Cloud SQL and Azure MySQL grow by default, and 0 turns that off."
 
 [[fields]]
 name = "database_name"
@@ -98,6 +107,31 @@ type = "bool"
 default = false
 description = "Let a cloud identity connect without a password: RDS IAM database authentication, Microsoft Entra on a PostgreSQL flexible server, Cloud SQL IAM authentication. A workload linked with 'Uses' then gets a connect grant instead of a password. The database user still has to be created inside the server and mapped to the identity."
 
+[[fields]]
+name = "parameters"
+label = "Server parameters"
+type = "struct_list"
+description = "Engine settings for the server, e.g. `log_min_duration_statement` = `1000`. AWS puts them in a parameter group of the engine's family, Azure sets each as a server configuration, Google Cloud as a database flag. The names are each cloud's own: `rds.force_ssl` is AWS only, Azure PostgreSQL calls it `require_secure_transport`, and Cloud SQL enforces TLS through its SSL mode rather than a flag."
+
+[[fields.items]]
+name = "name"
+label = "Parameter"
+type = "string"
+required = true
+
+[[fields.items]]
+name = "value"
+label = "Value"
+type = "string"
+required = true
+
+[[fields.items]]
+name = "after_reboot"
+label = "Static (after reboot)"
+type = "bool"
+default = false
+description = "AWS: a static parameter such as `shared_preload_libraries` only takes effect at the next reboot, and RDS refuses to apply it immediately; tick it so the parameter group applies it at the next reboot (`pending-reboot`)."
+
 [[relations]]
 kind = "encrypted_with"
 label = "Encrypted with"
@@ -150,6 +184,35 @@ message = "\"{name}\" enables Performance Insights on a .micro instance class ov
 when = { field = "backup_retention_days", equals = "0" }
 message = "\"{name}\" has automated backups turned off (retention 0): a deleted or corrupted database cannot be restored"
 
+[[providers.aws.checks]]
+severity = "error"
+when = { all = [ { provider_field = "storage_type", one_of = ["gp2", "gp3"] }, { field = "storage", less_than = 20 } ] }
+message = "\"{name}\" asks for less than 20 GB of storage, the smallest gp2 / gp3 volume RDS creates"
+
+[[providers.aws.checks]]
+severity = "error"
+when = { all = [ { provider_field = "storage_type", one_of = ["io1", "io2"] }, { field = "storage", less_than = 100 } ] }
+message = "\"{name}\" asks for less than 100 GB of provisioned-IOPS storage, the smallest io1 / io2 volume RDS creates"
+
+[[providers.aws.checks]]
+severity = "error"
+when = { all = [ { field = "max_storage_gb" }, { field = "max_storage_gb", at_most = { field = "storage" } } ] }
+message = "\"{name}\": 'Grow storage up to' must be larger than the storage it starts with (or 0 to keep the size fixed)"
+
+[[providers.aws.checks]]
+severity = "error"
+when = { all = [ { provider_field = "master_password", equals = "secret" }, { relation = "reads", absent = true } ] }
+message = "\"{name}\" takes its master password from a Secret, but no Secret is linked with 'Password from secret'"
+
+[[providers.aws.checks]]
+when = { all = [ { relation = "reads" }, { any = [ { provider_field = "master_password", equals = "managed" }, { provider_field = "master_password", equals = "variable" } ] } ] }
+message = "\"{name}\" is linked to a Secret with 'Password from secret', which its Master password setting does not use"
+
+[[providers.aws.checks]]
+severity = "error"
+when = { all = [ { relation = "reads", target_field = "value_outside", equals = "true" }, { any = [ { provider_field = "master_password", equals = "secret" }, { provider_field = "master_password", absent = true } ] } ] }
+message = "\"{name}\" takes its password from a Secret whose value is managed outside OpenTofu, so there is no value to give RDS; choose the RDS-managed master password, or let OpenTofu hold the secret's value"
+
 [[providers.aws.fields]]
 name = "engine_version"
 label = "Engine version"
@@ -170,6 +233,13 @@ label = "Performance Insights"
 type = "bool"
 default = false
 description = "Collect query-level performance data (not available on the db.t3.micro that 'small' selects)."
+
+[[providers.aws.fields]]
+name = "master_password"
+label = "Master password"
+type = "enum"
+options = ["managed", "secret", "variable"]
+description = "Where the admin password comes from. 'managed': RDS generates it and keeps it in a Secrets Manager secret of its own (`manage_master_user_password`), so it never reaches the OpenTofu state; workloads read that secret through the `master_user_secret_arn` output or the MASTER_SECRET_ARN connection value, and a linked Encryption Key encrypts it. 'secret': the Secret linked with 'Password from secret'. 'variable': the `db_password` input variable. Unset: the linked Secret when there is one, the variable otherwise. Azure and Google Cloud have no service-managed admin password; their nearest equivalent is IAM / directory authentication."
 
 [[providers.aws.fields]]
 name = "storage_type"
@@ -198,6 +268,27 @@ name       = { template = "{name}-subnets", transform = "kebab" }
 subnet_ids = { relation = "network_membership", attr = "id", wrap = "list" }
 tags       = { object = { Name = { field = "name" } } }
 
+# Server parameters: a parameter group of the engine's family (`postgres16`, `mysql8.0`),
+# taken from the pinned engine version when there is one.
+[[providers.aws.blocks]]
+key = "params"
+resource = "aws_db_parameter_group"
+when = { field = "parameters" }
+
+[providers.aws.blocks.args]
+name   = { template = "{name}-params", transform = "kebab" }
+family = { if = { provider_field = "engine_version", absent = true }, then = { map = "engine", table = { postgres = "postgres16", mysql = "mysql8.0" } }, else = { if = { field = "engine", equals = "postgres" }, then = { raw = "format(\"postgres%s\", split(\".\", @version@)[0])", refs = { version = { provider_field = "engine_version" } } }, else = { raw = "format(\"mysql%s\", join(\".\", slice(split(\".\", @version@), 0, 2)))", refs = { version = { provider_field = "engine_version" } } } } }
+tags   = { object = { Name = { field = "name" } } }
+
+[[providers.aws.blocks.nested]]
+block = "parameter"
+for_each_field = "parameters"
+
+[providers.aws.blocks.nested.args]
+name         = { item = "name" }
+value        = { item = "value" }
+apply_method = { if = { item = "after_reboot" }, then = { value = "pending-reboot" }, else = { value = "immediate" } }
+
 [[providers.aws.blocks]]
 key = "main"
 resource = "aws_db_instance"
@@ -207,11 +298,16 @@ identifier                   = { field = "name", transform = "kebab" }
 engine                       = { map = "engine", table = { postgres = "postgres", mysql = "mysql" } }
 engine_version               = { provider_field = "engine_version", fallback = { map = "engine", table = { postgres = "16", mysql = "8.0" } } }
 instance_class               = { provider_field = "instance_class", fallback = { map = "size", table = { small = "db.t3.micro", medium = "db.t3.medium", large = "db.m5.large" } } }
-allocated_storage            = { map = "storage", table = { "32" = 32, "64" = 64, "128" = 128, "256" = 256, "512" = 512 } }
+allocated_storage            = { field = "storage" }
+max_allocated_storage        = { if = { field = "max_storage_gb" }, then = { field = "max_storage_gb" } }
 storage_type                 = { provider_field = "storage_type", fallback = { value = "gp3" } }
 db_name                      = { field = "database_name" }
 username                     = { field = "admin_username" }
-password                     = { if = { relation = "reads" }, then = { relation = "reads", block = "version", attr = "secret_string" }, else = { var = "db_password" } }
+# The password: the variable, the linked Secret, or none at all when RDS manages it.
+password                     = { if = { any = [ { provider_field = "master_password", equals = "variable" }, { all = [ { provider_field = "master_password", absent = true }, { relation = "reads", absent = true } ] } ] }, then = { var = "db_password" }, else = { if = { provider_field = "master_password", not_equals = "managed" }, then = { relation = "reads", block = "version", attr = "secret_string" } } }
+manage_master_user_password  = { if = { provider_field = "master_password", equals = "managed" }, then = { value = true } }
+master_user_secret_kms_key_id = { if = { provider_field = "master_password", equals = "managed" }, then = { relation = "encrypted_with", attr = "arn", optional = true } }
+parameter_group_name         = { self_block = "params", attr = "name" }
 db_subnet_group_name         = { self_block = "subnets", attr = "name" }
 vpc_security_group_ids       = { relation = "attribute_reference", target_type = "security_group", attr = "id", wrap = "list", optional = true }
 publicly_accessible          = { value = false }
@@ -233,10 +329,13 @@ tags                         = { object = { Name = { field = "name" } } }
 HOST = { self_block = "main", attr = "address" }
 PORT = { self_block = "main", attr = "port" }
 NAME = { field = "database_name" }
+# The secret RDS keeps the managed master password in (JSON with username and password).
+MASTER_SECRET_ARN = { if = { provider_field = "master_password", equals = "managed" }, then = { self_block = "main", attr = "master_user_secret.0.secret_arn" } }
 
 [providers.aws.outputs]
 endpoint = { attr = "endpoint", description = "Connection endpoint (host:port)" }
 address  = { attr = "address", description = "Host name" }
+master_user_secret_arn = { attr = "master_user_secret.0.secret_arn", description = "ARN of the Secrets Manager secret RDS keeps the master password in", when = { provider_field = "master_password", equals = "managed" } }
 
 # ---------------------------------------------------------------- Azure
 [providers.azure]
@@ -326,7 +425,9 @@ version                       = { provider_field = "engine_version", fallback = 
 administrator_login           = { field = "admin_username" }
 administrator_password        = { if = { relation = "reads" }, then = { relation = "reads", attr = "value" }, else = { var = "db_password" } }
 sku_name                      = { provider_field = "sku_name", fallback = { map = "size", table = { small = "B_Standard_B1ms", medium = "GP_Standard_D2s_v3", large = "GP_Standard_D4s_v3" } } }
-storage_mb                    = { map = "storage", table = { "32" = 32768, "64" = 65536, "128" = 131072, "256" = 262144, "512" = 524288 } }
+# A flexible server only comes in fixed sizes; anything else is rounded up to the next.
+storage_mb                    = { if = { field = "storage", one_of = ["32", "64", "128", "256", "512", "1024", "2048", "4096", "8192", "16384", "32767"] }, then = { map = "storage", table = { "32" = 32768, "64" = 65536, "128" = 131072, "256" = 262144, "512" = 524288, "1024" = 1048576, "2048" = 2097152, "4096" = 4194304, "8192" = 8388608, "16384" = 16777216, "32767" = 33553408 } }, else = { raw = "[for mb in [32768, 65536, 131072, 262144, 524288, 1048576, 2097152, 4194304, 8388608, 16777216, 33553408] : mb if mb >= @gb@ * 1024][0]", refs = { gb = { field = "storage" } } } }
+auto_grow_enabled             = { if = { field = "max_storage_gb" }, then = { value = true } }
 backup_retention_days         = { field = "backup_retention_days", fallback = { value = 7 } }
 delegated_subnet_id           = { relation = "network_membership", attr = "id", optional = true }
 private_dns_zone_id           = { self_block = "dns", attr = "id" }
@@ -384,7 +485,8 @@ depends_on             = { list = [ { self_block = "dns_link", attr = "" } ] }
 block = "storage"
 
 [providers.azure.blocks.nested.args]
-size_gb = { map = "storage", table = { "32" = 32, "64" = 64, "128" = 128, "256" = 256, "512" = 512 } }
+size_gb           = { field = "storage" }
+auto_grow_enabled = { if = { field = "max_storage_gb" }, then = { value = true }, else = { value = false } }
 
 [[providers.azure.blocks.nested]]
 block = "high_availability"
@@ -404,6 +506,30 @@ resource_group_name = { ancestor = "resource_group", attr = "name" }
 server_name         = { self_block = "my", attr = "name" }
 charset             = { value = "utf8mb4" }
 collation           = { value = "utf8mb4_unicode_ci" }
+
+# Server parameters, one configuration resource each.
+[[providers.azure.blocks]]
+key = "pgconf"
+resource = "azurerm_postgresql_flexible_server_configuration"
+for_each_field = "parameters"
+when = { field = "engine", equals = "postgres" }
+
+[providers.azure.blocks.args]
+name      = { item = "name" }
+server_id = { self_block = "pg", attr = "id" }
+value     = { item = "value" }
+
+[[providers.azure.blocks]]
+key = "myconf"
+resource = "azurerm_mysql_flexible_server_configuration"
+for_each_field = "parameters"
+when = { field = "engine", equals = "mysql" }
+
+[providers.azure.blocks.args]
+name                = { item = "name" }
+resource_group_name = { ancestor = "resource_group", attr = "name" }
+server_name         = { self_block = "my", attr = "name" }
+value               = { item = "value" }
 
 # Public servers: a firewall rule for the allowed range, when one is given.
 [[providers.azure.blocks]]
@@ -448,6 +574,29 @@ message = "\"{name}\" is linked to an Encryption Key, which the Azure mapping ca
 [[providers.azure.checks]]
 when = { all = [ { field = "engine", equals = "mysql" }, { field = "iam_authentication" } ] }
 message = "\"{name}\" asks for directory authentication, which a MySQL flexible server does not have as a server setting: it needs a user-assigned identity on the server plus an `azurerm_mysql_flexible_server_active_directory_administrator` resource. Only PostgreSQL is generated; wire MySQL by hand or keep the password login"
+
+[[providers.azure.checks]]
+when = { all = [ { field = "engine", equals = "postgres" }, { field = "storage", not_one_of = ["32", "64", "128", "256", "512", "1024", "2048", "4096", "8192", "16384", "32767"] }, { field = "storage", at_most = 32767 } ] }
+message = "\"{name}\": an Azure PostgreSQL flexible server only comes in 32, 64, 128, 256 or 512 GB or 1, 2, 4, 8, 16 or 32 TB, so its storage is rounded up to the next of those"
+
+[[providers.azure.checks]]
+severity = "error"
+when = { all = [ { field = "engine", equals = "postgres" }, { field = "storage", greater_than = 32767 } ] }
+message = "\"{name}\" asks for more storage than an Azure PostgreSQL flexible server has (32 TB)"
+
+[[providers.azure.checks]]
+severity = "error"
+when = { all = [ { field = "engine", equals = "mysql" }, { any = [ { field = "storage", less_than = 20 }, { field = "storage", greater_than = 16384 } ] } ] }
+message = "\"{name}\": an Azure MySQL flexible server takes 20 to 16,384 GB of storage"
+
+[[providers.azure.checks]]
+when = { field = "max_storage_gb" }
+message = "\"{name}\": Azure grows a flexible server's storage with no upper limit, so 'Grow storage up to' only switches auto-grow on"
+
+[[providers.azure.checks]]
+severity = "error"
+when = { relation = "reads", target_field = "value_outside", equals = "true" }
+message = "\"{name}\" takes its administrator password from a Secret whose value is managed outside OpenTofu, so there is no value to give the server; let OpenTofu hold the secret's value, or use the db_password variable"
 
 [[providers.azure.checks]]
 when = { field = "deletion_protection" }
@@ -511,6 +660,21 @@ type = "string"
 description = "Overrides the tier the size table picks, e.g. `db-custom-2-7680`. Regional (high-availability) instances cannot use the shared-core `db-f1-micro` that 'small' selects."
 
 [[providers.gcp.checks]]
+severity = "error"
+when = { relation = "reads", target_field = "value_outside", equals = "true" }
+message = "\"{name}\" takes its admin password from a Secret whose value is managed outside OpenTofu, so there is no value to give Cloud SQL; let OpenTofu hold the secret's value, or use the db_password variable"
+
+[[providers.gcp.checks]]
+severity = "error"
+when = { field = "storage", less_than = 10 }
+message = "\"{name}\" asks for less than 10 GB of storage, the smallest disk Cloud SQL creates"
+
+[[providers.gcp.checks]]
+severity = "error"
+when = { all = [ { field = "max_storage_gb" }, { field = "max_storage_gb", at_most = { field = "storage" } } ] }
+message = "\"{name}\": 'Grow storage up to' must be larger than the storage it starts with (or 0 to keep the size fixed)"
+
+[[providers.gcp.checks]]
 when = { all = [ { field = "high_availability" }, { field = "size", equals = "small" }, { provider_field = "tier", absent = true } ] }
 message = "\"{name}\" asks for high availability on the 'small' size, whose shared-core tier cannot be regional; choose a larger size or set the Google Cloud tier override"
 
@@ -559,7 +723,9 @@ block = "settings"
 
 [providers.gcp.blocks.nested.args]
 tier                     = { provider_field = "tier", fallback = { map = "size", table = { small = "db-f1-micro", medium = "db-custom-2-7680", large = "db-custom-4-15360" } } }
-disk_size                = { map = "storage", table = { "32" = 32, "64" = 64, "128" = 128, "256" = 256, "512" = 512 } }
+disk_size                = { field = "storage" }
+disk_autoresize          = { if = { field = "max_storage_gb" }, then = { value = true }, else = { value = false } }
+disk_autoresize_limit    = { if = { field = "max_storage_gb" }, then = { field = "max_storage_gb" } }
 availability_type        = { if = { field = "high_availability" }, then = { value = "REGIONAL" }, else = { value = "ZONAL" } }
 retain_backups_on_delete = { if = { field = "final_snapshot" }, then = { value = true }, else = { value = false } }
 
@@ -595,6 +761,14 @@ when = { field = "iam_authentication" }
 [providers.gcp.blocks.nested.nested.args]
 name  = { if = { field = "engine", equals = "postgres" }, then = { value = "cloudsql.iam_authentication" }, else = { value = "cloudsql_iam_authentication" } }
 value = { value = "on" }
+
+[[providers.gcp.blocks.nested.nested]]
+block = "database_flags"
+for_each_field = "parameters"
+
+[providers.gcp.blocks.nested.nested.args]
+name  = { item = "name" }
+value = { item = "value" }
 
 [[providers.gcp.blocks]]
 key = "db"
