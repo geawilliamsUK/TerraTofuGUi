@@ -56,6 +56,9 @@ pub enum Code {
     Version,
     /// The cost estimate exceeds a budget's limit (`cost::budget_diagnostics`).
     Cost,
+    /// Two arguments of one generated block that the provider refuses together at plan
+    /// time, though `validate` passes (`crate::conflicts`).
+    Conflict,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -714,6 +717,11 @@ pub fn run(full: &Project, cat: &Catalog, provider: &str) -> Vec<Diagnostic> {
             }
         }
     }
+    // Arguments the provider refuses together at plan time. The check emits the project,
+    // so it only runs once nothing else stops the export.
+    if !out.iter().any(|d| d.severity == Severity::Error) {
+        out.extend(crate::conflicts::check(full, cat, provider));
+    }
     out.sort_by_key(|a| std::cmp::Reverse(a.severity));
     out
 }
@@ -997,6 +1005,10 @@ pub fn condition_holds_for(
             if f.equals.is_some() || f.not_equals.is_some() {
                 return cond_value(v.as_ref(), &f.equals, &f.not_equals);
             }
+            let cmp = f.compare();
+            if !cmp.is_empty() {
+                return compare_holds(cat, provider, e, v.as_ref(), cmp);
+            }
             if let Some(p) = prefix {
                 let s = v.as_ref().map(|v| v.display()).unwrap_or_default();
                 return s.starts_with(p) == f.starts_with.is_some();
@@ -1014,6 +1026,10 @@ pub fn condition_holds_for(
                     .is_none_or(|v| v.is_empty());
             }
             let v = field_or_default(cat, provider, e, &f.provider_field, true);
+            let cmp = f.compare();
+            if f.equals.is_none() && f.not_equals.is_none() && !cmp.is_empty() {
+                return compare_holds(cat, provider, e, v.as_ref(), cmp);
+            }
             if f.equals.is_none() && f.not_equals.is_none() {
                 if let Some(p) = f.ends_with.as_deref().or(f.not_ends_with.as_deref()) {
                     let s = v.as_ref().map(|v| v.display()).unwrap_or_default();
@@ -1066,6 +1082,53 @@ pub fn condition_holds_for(
             .iter()
             .any(|c| condition_holds_for(p, cat, provider, e, c, item, target)),
     }
+}
+
+/// `one_of` / `not_one_of` and the numeric comparisons of a field condition, all of
+/// which must hold. A bound naming another field reads that field (or its default); a
+/// value or bound that is not a number fails every comparison.
+fn compare_holds(
+    cat: &Catalog,
+    provider: &str,
+    e: &EntityRef,
+    v: Option<&Value>,
+    cmp: ttg_catalog::Compare<'_>,
+) -> bool {
+    use ttg_catalog::fields::number;
+    let text = v.map(|v| v.display());
+    if !cmp.one_of.is_empty() && !text.as_ref().is_some_and(|t| cmp.one_of.contains(t)) {
+        return false;
+    }
+    if text.as_ref().is_some_and(|t| cmp.not_one_of.contains(t)) {
+        return false;
+    }
+    let bounds = cmp.bounds();
+    if bounds.is_empty() {
+        return true;
+    }
+    let Some(x) = v.and_then(number) else {
+        return false;
+    };
+    bounds.iter().all(|(op, b)| {
+        let y = match b {
+            ttg_catalog::Bound::Number(n) => Some(*n),
+            ttg_catalog::Bound::Field(f) => field_or_default(cat, provider, e, &f.field, false)
+                .as_ref()
+                .and_then(number),
+            ttg_catalog::Bound::ProviderField(f) => {
+                field_or_default(cat, provider, e, &f.provider_field, true)
+                    .as_ref()
+                    .and_then(number)
+            }
+        };
+        let Some(y) = y else { return false };
+        match *op {
+            "less_than" => x < y,
+            "at_most" => x <= y,
+            "greater_than" => x > y,
+            _ => x >= y,
+        }
+    })
 }
 
 /// The value of a project setting a `{ setting = "…" }` condition may test (the list is

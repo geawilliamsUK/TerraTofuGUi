@@ -28,7 +28,8 @@ pub fn omitted(p: &Project, cat: &Catalog, provider: &str) -> Vec<(Id, String)> 
     if !possible {
         return Vec::new();
     }
-    let base = p.layer(provider, &|t| type_on(cat, t, provider));
+    let mut base = p.layer(provider, &|t| type_on(cat, t, provider));
+    cat.normalize_values(&mut base);
     crate::diagnostics::omit_checks(&base, cat, provider)
 }
 
@@ -41,9 +42,13 @@ pub fn project_for(p: &Project, cat: &Catalog, provider: &str) -> Project {
     project_for_omitting(p, cat, provider, &omitted_ids(&omitted(p, cat, provider)))
 }
 
-/// [`project_for`] with the omitted set already computed (see [`omitted`]).
+/// [`project_for`] with the omitted set already computed (see [`omitted`]). Field values
+/// are brought to their declared types on the way (`Catalog::normalize_values`), so a
+/// file saved before a field changed type exports the same as one saved after.
 pub fn project_for_omitting(p: &Project, cat: &Catalog, provider: &str, om: &BTreeSet<Id>) -> Project {
-    p.layer_omitting(provider, &|t| type_on(cat, t, provider), om)
+    let mut layer = p.layer_omitting(provider, &|t| type_on(cat, t, provider), om);
+    cat.normalize_values(&mut layer);
+    layer
 }
 
 /// Ids of the entities on the layer.

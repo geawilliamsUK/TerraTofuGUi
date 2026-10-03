@@ -145,9 +145,29 @@ fn check_block(cat: &Catalog, provider: &str, b: &BlockDef, at: &str, errs: &mut
         }
     }
     for n in &b.nested {
+        // `lifecycle` is a meta-block every resource accepts.
+        if n.block == "lifecycle" {
+            for k in n.args.keys() {
+                if !LIFECYCLE.contains(&k.as_str()) {
+                    errs.push(format!(
+                        "{at} ({}).lifecycle: argument '{k}' does not exist",
+                        b.resource
+                    ));
+                }
+            }
+            continue;
+        }
         check_nested(schema, n, &format!("{at} ({})", b.resource), errs);
     }
 }
+
+/// Arguments of the `lifecycle` meta-block.
+const LIFECYCLE: &[&str] = &[
+    "create_before_destroy",
+    "prevent_destroy",
+    "ignore_changes",
+    "replace_triggered_by",
+];
 
 /// Where one curated mapping disagrees with the provider schema in use: resource types
 /// that do not exist, and static arguments / nested blocks the provider does not accept.

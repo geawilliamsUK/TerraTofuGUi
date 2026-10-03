@@ -639,10 +639,24 @@ fn field_editor(app: &mut TtgApp, ui: &mut Ui, id: &str, provider: Option<&str>,
         }
     };
     let check = ttg_catalog::fields::check_value(f, current.as_ref());
-    let label = if f.required {
-        format!("{} *", f.label())
-    } else {
-        f.label().to_string()
+    // The unit the value is in, picked by another field (an alarm threshold by its metric).
+    let unit = f.units.as_ref().and_then(|u| {
+        let e = app.project.entity(id)?;
+        let selector = e.field(&u.field).cloned().or_else(|| {
+            app.catalog
+                .resource(e.resource_type)?
+                .fields
+                .iter()
+                .find(|x| x.name == u.field)?
+                .default_value()
+        })?;
+        f.unit_for(&selector.display()).map(str::to_string)
+    });
+    let label = match (f.required, unit) {
+        (true, Some(u)) => format!("{} ({u}) *", f.label()),
+        (false, Some(u)) => format!("{} ({u})", f.label()),
+        (true, None) => format!("{} *", f.label()),
+        (false, None) => f.label().to_string(),
     };
     // Which providers consume this abstract field? Dim it when the target ignores it.
     let target = app.project.settings.target_provider.clone();
@@ -710,9 +724,26 @@ fn field_editor(app: &mut TtgApp, ui: &mut Ui, id: &str, provider: Option<&str>,
                 }
             }
             FieldType::Int => {
-                let mut i = current.as_ref().and_then(|v| v.as_int()).unwrap_or(0);
+                let mut i = current
+                    .as_ref()
+                    .and_then(ttg_catalog::fields::number)
+                    .map(|n| n as i64)
+                    .unwrap_or(0);
                 if ui.add(egui::DragValue::new(&mut i)).changed() {
                     new_value = Some(Value::Int(i));
+                }
+            }
+            FieldType::Number => {
+                let mut x = current
+                    .as_ref()
+                    .and_then(ttg_catalog::fields::number)
+                    .unwrap_or(0.0);
+                if ui.add(egui::DragValue::new(&mut x).speed(0.1)).changed() {
+                    new_value = Some(if x.fract() == 0.0 {
+                        Value::Int(x as i64)
+                    } else {
+                        Value::Float(x)
+                    });
                 }
             }
             FieldType::Enum => {
@@ -915,6 +946,18 @@ fn struct_list_editor(app: &mut TtgApp, ui: &mut Ui, id: &str, provider: Option<
                                     let mut i = cur.as_ref().and_then(|v| v.as_int()).unwrap_or(0);
                                     if ui.add(egui::DragValue::new(&mut i)).changed() {
                                         set = Some(Value::Int(i));
+                                        structural = true;
+                                    }
+                                }
+                                FieldType::Number => {
+                                    let mut x =
+                                        cur.as_ref().and_then(ttg_catalog::fields::number).unwrap_or(0.0);
+                                    if ui.add(egui::DragValue::new(&mut x).speed(0.1)).changed() {
+                                        set = Some(if x.fract() == 0.0 {
+                                            Value::Int(x as i64)
+                                        } else {
+                                            Value::Float(x)
+                                        });
                                         structural = true;
                                     }
                                 }

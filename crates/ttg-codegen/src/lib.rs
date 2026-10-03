@@ -11,6 +11,7 @@
 //! once per provider into sibling directories. The outputs share nothing.
 
 pub mod bundle;
+pub mod conflicts;
 pub mod cost;
 pub mod dataflow;
 pub mod diagnostics;

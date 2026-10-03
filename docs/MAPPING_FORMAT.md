@@ -42,7 +42,7 @@ Provider-neutral configuration the user edits in the inspector. The implicit fie
 [[fields]]
 name = "cidr_block"
 label = "CIDR block"          # optional; defaults to name
-type = "cidr"                 # string | bool | int | cidr | enum | string_list
+type = "cidr"                 # string | bool | int | number | cidr | enum | string_list
 required = true
 default = "10.0.1.0/24"       # optional; must itself pass validation
 description = "…"             # tooltip
@@ -59,6 +59,28 @@ counts as used by every provider: the inspector shows it in concrete mode and sa
 reads it, and `ttg catalog --strict` does not report it as unused. Only types the export
 reads may declare it (`ttg_catalog::MANIFEST_TYPES`: `kubernetes_workload`), and only on
 abstract fields.
+
+`type = "number"` (v2) is a decimal: an alarm threshold of `0.5` seconds. A whole number is
+stored as an integer, so a field that changes from `int` to `number` keeps what projects
+saved. A field may change type the other way too: an `enum` of numbers that becomes an
+`int` (a database's storage, a log group's retention). Values saved under the old type are
+brought to the new one when a project is opened and on every export
+(`Catalog::normalize_values`): `"32"` becomes `32`, `2.0` becomes `2`, and an `int` given
+to an `enum` of numbers becomes its text. The MCP `entity_update` converts the same way.
+
+```toml
+units = { field = "metric", values = { cpu = "percent", lb_latency = "seconds" } }   # v2
+moved_from = { provider = "aws", field = "statistic", skip = ["Average"] }           # v2
+```
+
+`units` names the unit a value is in when another field decides it: an alarm's threshold
+is a percentage for `cpu` and seconds for `lb_latency`. `field` must be an `enum` field of
+the same type and every key one of its options; the inspector shows the unit beside the
+label and `catalog_type` lists it. `moved_from` (abstract fields only) says where the
+field's values were stored before, so a project saved then still loads with them: when the
+entity has no value for the field, the old value moves here, except the values in `skip`
+(the old field's default, which every entity saved whether it meant it or not); the old
+entry is removed either way. The old field must no longer be declared.
 
 `state_secret` marks a switch whose `true` makes the configuration itself create a secret
 that Terraform keeps in its state — the Secret's *Generate the value* (`random_password`).
@@ -229,6 +251,14 @@ left is written as itself, so joining a table's rows to a few fixed entries does
 - `{ field = "versioning" }` — the field is truthy (true / non-zero / non-empty).
 - `{ field = "permissions", equals = "admin" }` / `not_equals = "none"`.
 - `{ provider_field = "…" }` with the same `equals` / `not_equals` options.
+- `{ field = "retention_days", not_one_of = ["1", "3", "5"] }` / `one_of = [...]` (v2) —
+  the value, as text, is (not) in the list; an unset field is in none. `{ field = "storage",
+  less_than = 20 }`, `at_most`, `greater_than`, `at_least` (v2) compare numerically, against
+  a number or another numeric field of the same entity (`at_most = { field = "storage" }`,
+  `{ provider_field = "…" }`); a value that is not a number satisfies none of them. Several
+  in one condition must all hold, so `at_least` with `at_most` is a range. The same keys
+  work on `provider_field` conditions. The catalog refuses a numeric comparison on a field
+  that is not `int` / `number`, and a bound naming a field that is not one.
 - `{ setting = "kubernetes_manifests" }` (v2) — a project setting is on;
   `equals = "false"` holds when it is off. Only the settings in
   `ttg_catalog::CONDITION_SETTINGS` may be named, and the catalog refuses any other. A
@@ -245,6 +275,14 @@ arn = { attr = "arn", block = "main" }
 [[providers.azure.manual_steps]]     # rendered into MANUAL_STEPS.md; required if status = "partial"
 title = "Check the role assignment scope"
 body  = """Markdown body…"""
+```
+
+An output may carry `when = <condition>` (v2) and is then only emitted when it holds: the
+ARN of the secret RDS keeps a managed master password in exists only when the database
+asks for one, and an output that indexes into an empty list would fail at `plan`:
+
+```toml
+master_user_secret_arn = { attr = "master_user_secret.0.secret_arn", when = { provider_field = "master_password", equals = "managed" } }
 ```
 
 An output whose `block` is a repeated one (`for_each_field` / `for_each_relation`) has no
@@ -522,7 +560,10 @@ name     = { raw = "each.value.resource_record_name" }
 ```
 
 `for_each`, `count`, `provider` and `lifecycle` are meta-arguments: the schema check accepts
-them on any block.
+them on any block. `lifecycle` may also be written as a nested block, with `ignore_changes`,
+`create_before_destroy`, `prevent_destroy` or `replace_triggered_by` (the schema check knows
+those four); a Key Vault secret whose value is set outside OpenTofu uses
+`ignore_changes = { raw = "[value]" }` so the next `apply` leaves that value alone.
 
 **Built-in resources.** A block may use `resource = "terraform_data"` (built into
 Terraform and OpenTofu) to hold a value other resources reference, e.g. the network tag

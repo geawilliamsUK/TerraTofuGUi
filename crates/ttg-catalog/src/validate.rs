@@ -169,6 +169,55 @@ pub fn catalog(cat: &Catalog) -> Vec<String> {
                     )));
                 }
             }
+            if let Some(m) = &f.moved_from {
+                uses_v2 = true;
+                let still_there = match &m.provider {
+                    Some(pid) => def
+                        .providers
+                        .get(pid)
+                        .is_some_and(|pm| pm.fields.iter().any(|x| x.name == m.field)),
+                    None => def.fields.iter().any(|x| x.name == m.field),
+                };
+                if still_there {
+                    errs.push(where_(&format!(
+                        "field '{}': moved_from names '{}', which is still declared",
+                        f.name, m.field
+                    )));
+                }
+                if let Some(pid) = &m.provider {
+                    if !cat.providers.contains_key(pid) {
+                        errs.push(where_(&format!(
+                            "field '{}': moved_from provider '{pid}' is not a known provider",
+                            f.name
+                        )));
+                    }
+                }
+            }
+        }
+        // Units picked by another field: an enum of this type, with a unit per option.
+        for f in def
+            .fields
+            .iter()
+            .chain(def.providers.values().flat_map(|m| m.fields.iter()))
+        {
+            let Some(u) = &f.units else { continue };
+            uses_v2 = true;
+            match def.fields.iter().find(|x| x.name == u.field) {
+                Some(sel) if sel.field_type == FieldType::Enum => {
+                    for k in u.values.keys() {
+                        if !sel.options.contains(k) {
+                            errs.push(where_(&format!(
+                                "field '{}': units for '{k}', which is not an option of '{}'",
+                                f.name, u.field
+                            )));
+                        }
+                    }
+                }
+                _ => errs.push(where_(&format!(
+                    "field '{}': units field '{}' is not an enum field of this type",
+                    f.name, u.field
+                ))),
+            }
         }
         // relations
         for r in &def.relations {
@@ -241,6 +290,12 @@ pub fn catalog(cat: &Catalog) -> Vec<String> {
                 }
                 if !pnames.insert(&f.name) {
                     errs.push(pw(&format!("duplicate provider field '{}'", f.name)));
+                }
+                if f.moved_from.is_some() {
+                    errs.push(pw(&format!(
+                        "provider field '{}': moved_from is only valid on an abstract field",
+                        f.name
+                    )));
                 }
                 if f.name == "name" || def.fields.iter().any(|a| a.name == f.name) {
                     errs.push(pw(&format!(
@@ -342,6 +397,12 @@ pub fn catalog(cat: &Catalog) -> Vec<String> {
                         errs.push(pw(&format!("output '{k}' references unknown block '{b}'")));
                     }
                 }
+                if let Some(c) = &o.when {
+                    ctx.v2 = true;
+                    ctx.what = pw(&format!("output '{k}' "));
+                    check_condition(&mut ctx, c, &mut errs);
+                    ctx.what = pw("");
+                }
             }
             uses_v2 |= ctx.v2;
         }
@@ -377,6 +438,9 @@ fn check_field(cat: &Catalog, where_: &str, f: &FieldDef, errs: &mut Vec<String>
         v2 = true;
     }
     if f.field_type == FieldType::StringList && !f.options.is_empty() {
+        v2 = true;
+    }
+    if f.field_type == FieldType::Number {
         v2 = true;
     }
     if f.state_secret && f.field_type != FieldType::Bool {
@@ -622,6 +686,14 @@ fn check_condition(ctx: &mut SourceCtx, c: &Condition, errs: &mut Vec<String>) {
                     ctx.what, f.field
                 ));
             }
+            let fields = ctx.fields;
+            check_compare(
+                ctx,
+                fields.iter().find(|x| x.name == f.field),
+                &f.field,
+                f.compare(),
+                errs,
+            );
         }
         Condition::ProviderField(f) => {
             if f.absent || f.ends_with.is_some() || f.not_ends_with.is_some() {
@@ -633,6 +705,14 @@ fn check_condition(ctx: &mut SourceCtx, c: &Condition, errs: &mut Vec<String>) {
                     ctx.what, f.provider_field
                 ));
             }
+            let fields = ctx.provider_fields;
+            check_compare(
+                ctx,
+                fields.iter().find(|x| x.name == f.provider_field),
+                &f.provider_field,
+                f.compare(),
+                errs,
+            );
         }
         Condition::Ancestor(a) => {
             ctx.v2 = true;
@@ -735,6 +815,56 @@ fn check_where(ctx: &mut SourceCtx, target_type: Option<&str>, w: &Condition, er
         v2: true,
     };
     check_condition(&mut sub, w, errs);
+}
+
+fn is_numeric(f: &FieldDef) -> bool {
+    matches!(f.field_type, FieldType::Int | FieldType::Number)
+}
+
+/// `one_of` / `not_one_of` and the numeric comparisons of a field condition: a number
+/// compares only against a numeric field, and a bound that names a field must name a
+/// numeric one this mapping can read.
+fn check_compare(
+    ctx: &mut SourceCtx,
+    field: Option<&FieldDef>,
+    name: &str,
+    cmp: Compare<'_>,
+    errs: &mut Vec<String>,
+) {
+    if cmp.is_empty() {
+        return;
+    }
+    ctx.v2 = true;
+    let bounds = cmp.bounds();
+    if bounds.is_empty() {
+        return;
+    }
+    if field.is_some_and(|f| !is_numeric(f)) {
+        errs.push(format!(
+            "{}when: numeric comparisons need an int or number field, and '{name}' is neither",
+            ctx.what
+        ));
+    }
+    for (op, b) in bounds {
+        let (other, provider) = match b {
+            Bound::Number(_) => continue,
+            Bound::Field(f) => (&f.field, false),
+            Bound::ProviderField(f) => (&f.provider_field, true),
+        };
+        let pool = if provider { ctx.provider_fields } else { ctx.fields };
+        match pool.iter().find(|x| &x.name == other) {
+            None => errs.push(format!(
+                "{}when {op}: undeclared {}field '{other}'",
+                ctx.what,
+                if provider { "provider " } else { "" }
+            )),
+            Some(x) if !is_numeric(x) => errs.push(format!(
+                "{}when {op}: '{other}' is not an int or number field",
+                ctx.what
+            )),
+            Some(_) => {}
+        }
+    }
 }
 
 /// `ref_type` asks what an `entity_ref` item points at, so the item must be one and the

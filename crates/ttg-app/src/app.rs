@@ -319,8 +319,9 @@ impl TtgApp {
         app.ensure_provider_settings();
         if let Some(p) = open {
             match ttg_core::project::load(&p) {
-                Ok(project) => {
+                Ok(mut project) => {
                     app.catalog.ensure_native_types(&project);
+                    app.catalog.normalize_values(&mut project);
                     app.project = project;
                     app.path = Some(p.clone());
                     app.fit_requested = true;
@@ -856,8 +857,9 @@ impl TtgApp {
 
     pub fn open_path(&mut self, p: PathBuf) {
         match ttg_core::project::load(&p) {
-            Ok(project) => {
+            Ok(mut project) => {
                 self.catalog.ensure_native_types(&project);
+                self.catalog.normalize_values(&mut project);
                 self.project = project;
                 self.ensure_provider_settings();
                 self.path = Some(p.clone());

@@ -1548,6 +1548,10 @@ impl TtgApp {
         }
         let mut val: Value =
             serde_json::from_value(v.clone()).map_err(|e| format!("field \"{}\": {e}", f.name))?;
+        // `"20"` for a whole-number field, `2` for an enum of numbers: stored canonically.
+        if let Some(c) = ttg_catalog::fields::coerced(f, &val) {
+            val = c;
+        }
         self.resolve_entity_refs(f, &mut val)
             .map_err(|e| format!("field \"{}\": {e}", f.name))?;
         ttg_catalog::fields::check_value(f, Some(&val)).map_err(|e| format!("field \"{}\": {e}", f.name))?;
@@ -1785,6 +1789,7 @@ impl TtgApp {
                 "description": f.description,
                 "pattern_hint": f.pattern_hint,
                 "manifests": f.manifests,
+                "units": f.units.as_ref().map(|u| json!({"by": u.field, "values": u.values})),
                 "items": f.items.iter().map(|i| json!({"name": i.name, "type": format!("{:?}", i.field_type).to_lowercase(), "options": i.options, "targets": i.targets})).collect::<Vec<_>>(),
             })
         };

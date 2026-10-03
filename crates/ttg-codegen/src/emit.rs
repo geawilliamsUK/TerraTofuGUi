@@ -74,6 +74,11 @@ pub struct EntityBlocks {
 }
 
 impl EntityBlocks {
+    /// The blocks themselves, in the order of `addresses`.
+    pub(crate) fn blocks(&self) -> &[Block] {
+        &self.blocks
+    }
+
     /// The blocks rendered exactly as they appear in [`Generated::files`] — the same
     /// formatter, the same `# ---` introduction — without the file header.
     pub fn hcl(&self) -> String {
@@ -249,9 +254,9 @@ struct Emitter<'a> {
 /// Generate the complete file set for one provider. Errors if diagnostics contain any
 /// `Error`, or if a mapping cannot be resolved.
 pub fn generate(p: &Project, cat: &Catalog, provider: &str, tool: Tool) -> Result<Generated, GenError> {
-    let pdef = cat
-        .provider(provider)
-        .ok_or_else(|| GenError::UnknownProvider(provider.to_string()))?;
+    if cat.provider(provider).is_none() {
+        return Err(GenError::UnknownProvider(provider.to_string()));
+    }
     let mut diags = diagnostics::run(p, cat, provider);
     if tool != p.settings.tool {
         // The state checks answer for the project's own tool; this export is for the
@@ -264,6 +269,24 @@ pub fn generate(p: &Project, cat: &Catalog, provider: &str, tool: Tool) -> Resul
     if diags.iter().any(|d| d.severity == Severity::Error) {
         return Err(GenError::Blocked(diags));
     }
+    let mut g = emit_unchecked(p, cat, provider, tool)?;
+    g.diagnostics = diags;
+    Ok(g)
+}
+
+/// [`generate`] without the diagnostics that gate it: the blocks the project produces as
+/// it stands. The argument-conflict check (`crate::conflicts`) runs on this, from inside
+/// the diagnostics. `Generated::diagnostics` is empty.
+pub(crate) fn emit_unchecked(
+    p: &Project,
+    cat: &Catalog,
+    provider: &str,
+    tool: Tool,
+) -> Result<Generated, GenError> {
+    let pdef = cat
+        .provider(provider)
+        .ok_or_else(|| GenError::UnknownProvider(provider.to_string()))?;
+    let diags = Vec::new();
     // Only the provider's layer is generated.
     let layer = crate::layers::project_for(p, cat, provider);
     let p = &layer;
@@ -433,6 +456,9 @@ pub fn generate(p: &Project, cat: &Catalog, provider: &str, tool: Tool) -> Resul
                 for (suffix, o) in &m.outputs {
                     let key = o.block.clone().unwrap_or(primary.clone());
                     if !em.planned.contains(&(id.clone(), key.clone())) {
+                        continue;
+                    }
+                    if o.when.as_ref().is_some_and(|c| !em.cond_holds(&e, c, None)) {
                         continue;
                     }
                     let bdef = m.blocks.iter().find(|b| b.key == key).unwrap();

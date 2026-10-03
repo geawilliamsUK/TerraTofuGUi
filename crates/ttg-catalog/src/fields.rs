@@ -28,7 +28,13 @@ pub fn check_value(def: &FieldDef, value: Option<&Value>) -> Result<(), String> 
             .as_bool()
             .map(|_| ())
             .ok_or_else(|| "expected true/false".into()),
-        FieldType::Int => v.as_int().map(|_| ()).ok_or_else(|| "expected an integer".into()),
+        FieldType::Int => coerced(def, v)
+            .as_ref()
+            .unwrap_or(v)
+            .as_int()
+            .map(|_| ())
+            .ok_or_else(|| "expected a whole number".into()),
+        FieldType::Number => number(v).map(|_| ()).ok_or_else(|| "expected a number".into()),
         FieldType::Cidr => {
             let s = v.as_str().ok_or("expected a CIDR string")?;
             if is_cidr(s) {
@@ -76,6 +82,58 @@ pub fn check_value(def: &FieldDef, value: Option<&Value>) -> Result<(), String> 
             }
             Ok(())
         }
+    }
+}
+
+/// The numeric value of a field value: a number, or text that reads as one (a value saved
+/// while the field was an `enum` of numbers, such as a database's `"32"` GB).
+pub fn number(v: &Value) -> Option<f64> {
+    match v {
+        Value::Int(i) => Some(*i as f64),
+        Value::Float(f) if f.is_finite() => Some(*f),
+        Value::Str(s) => s.trim().parse::<f64>().ok().filter(|f| f.is_finite()),
+        _ => None,
+    }
+}
+
+/// The canonical form of a value for its field's type, when it differs from the value
+/// itself: `"32"` for an `int` field becomes `32` (a field that used to be an enum of
+/// numbers), `2.0` becomes `2`, `0.5` stays `0.5` on a `number` field and `"0.5"` becomes
+/// it, and `30` on an `enum` field whose options are numbers becomes `"30"`. `None` when
+/// the value is already canonical or cannot be converted (the check then reports it).
+/// Rows of a `struct_list` are converted item by item.
+pub fn coerced(def: &FieldDef, v: &Value) -> Option<Value> {
+    let whole = |f: f64| (f.fract() == 0.0 && f.abs() < 9.0e15).then_some(f as i64);
+    match (def.field_type, v) {
+        (FieldType::Int, Value::Str(_) | Value::Float(_)) => number(v).and_then(whole).map(Value::Int),
+        (FieldType::Number, Value::Float(f)) => whole(*f).map(Value::Int),
+        (FieldType::Number, Value::Str(_)) => {
+            number(v).map(|f| whole(f).map(Value::Int).unwrap_or(Value::Float(f)))
+        }
+        (FieldType::Enum, Value::Int(i)) => Some(Value::Str(i.to_string())),
+        (FieldType::String, Value::Int(i)) => Some(Value::Str(i.to_string())),
+        (FieldType::String, Value::Float(f)) => Some(Value::Str(f.to_string())),
+        (FieldType::StructList, Value::Records(rows)) => {
+            let mut changed = false;
+            let rows: Vec<ttg_core::Record> = rows
+                .iter()
+                .map(|row| {
+                    row.iter()
+                        .map(|(k, x)| {
+                            let c = def
+                                .items
+                                .iter()
+                                .find(|sub| &sub.name == k)
+                                .and_then(|sub| coerced(sub, x));
+                            changed |= c.is_some();
+                            (k.clone(), c.unwrap_or_else(|| x.clone()))
+                        })
+                        .collect()
+                })
+                .collect();
+            changed.then_some(Value::Records(rows))
+        }
+        _ => None,
     }
 }
 

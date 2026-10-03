@@ -129,9 +129,46 @@ pub struct FieldDef {
     /// state (see `ttg-codegen::state`).
     #[serde(default)]
     pub state_secret: bool,
+    /// The unit the value is in, by the value of another (enum) field (v2): an alarm's
+    /// threshold is a percentage for `cpu` and seconds for `lb_latency`. The inspector
+    /// shows it beside the field.
+    #[serde(default)]
+    pub units: Option<UnitsDef>,
+    /// Where this field's values were stored before (v2), so a project saved then still
+    /// loads with them: `{ provider = "aws", field = "statistic", skip = ["Average"] }`
+    /// moves a saved AWS `statistic` here when this field has no value, except the values
+    /// in `skip` (the old field's default, which every entity saved whether it meant it
+    /// or not). Abstract fields only.
+    #[serde(default)]
+    pub moved_from: Option<MovedFrom>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct UnitsDef {
+    /// An enum field of the same type whose value picks the unit.
+    pub field: String,
+    /// Option of that field -> unit, e.g. `cpu = "percent"`.
+    pub values: IndexMap<String, String>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct MovedFrom {
+    /// The provider whose provider field it was; absent for an abstract field.
+    #[serde(default)]
+    pub provider: Option<String>,
+    pub field: String,
+    /// Old values not carried over.
+    #[serde(default)]
+    pub skip: Vec<String>,
 }
 
 impl FieldDef {
+    /// The unit this field's value is in for an entity whose `units.field` has `selector`.
+    pub fn unit_for(&self, selector: &str) -> Option<&str> {
+        self.units.as_ref()?.values.get(selector).map(String::as_str)
+    }
     pub fn label(&self) -> &str {
         self.label.as_deref().unwrap_or(&self.name)
     }
@@ -146,6 +183,9 @@ pub enum FieldType {
     String,
     Bool,
     Int,
+    /// A decimal number (v2), e.g. an alarm threshold of 0.5 seconds. Whole numbers are
+    /// stored as integers, so a field that used to be an `int` keeps its saved values.
+    Number,
     Cidr,
     Enum,
     StringList,
@@ -379,6 +419,10 @@ pub struct OutputRef {
     /// Mark the output `sensitive = true` (required when the attribute is sensitive).
     #[serde(default)]
     pub sensitive: bool,
+    /// Only emit the output when this holds (v2): an attribute that only exists in one
+    /// configuration, such as the secret RDS creates for a managed master password.
+    #[serde(default)]
+    pub when: Option<Condition>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -572,6 +616,22 @@ pub struct CondField {
     /// Holds when the entity has no value for the field (defaults do not count) (v2).
     #[serde(default)]
     pub absent: bool,
+    /// The value (as text) is one of these / none of these (v2): a provider's allowed
+    /// retention periods. An unset field is none of them.
+    #[serde(default)]
+    pub one_of: Vec<String>,
+    #[serde(default)]
+    pub not_one_of: Vec<String>,
+    /// Numeric comparisons against a number or another numeric field (v2). A value that
+    /// is not a number satisfies none of them.
+    #[serde(default)]
+    pub less_than: Option<Box<Bound>>,
+    #[serde(default)]
+    pub at_most: Option<Box<Bound>>,
+    #[serde(default)]
+    pub greater_than: Option<Box<Bound>>,
+    #[serde(default)]
+    pub at_least: Option<Box<Bound>>,
 }
 #[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -590,6 +650,98 @@ pub struct CondProviderField {
     /// Holds when the entity has no value for the field (defaults do not count) (v2).
     #[serde(default)]
     pub absent: bool,
+    /// See [`CondField`].
+    #[serde(default)]
+    pub one_of: Vec<String>,
+    #[serde(default)]
+    pub not_one_of: Vec<String>,
+    #[serde(default)]
+    pub less_than: Option<Box<Bound>>,
+    #[serde(default)]
+    pub at_most: Option<Box<Bound>>,
+    #[serde(default)]
+    pub greater_than: Option<Box<Bound>>,
+    #[serde(default)]
+    pub at_least: Option<Box<Bound>>,
+}
+
+/// Set membership and numeric comparisons of a [`CondField`] or [`CondProviderField`]
+/// (v2). Checked after `equals` / `not_equals` and before the prefix / suffix tests; when
+/// several are given they must all hold, so `at_least` with `at_most` is a range.
+#[derive(Debug, Clone, Copy)]
+pub struct Compare<'a> {
+    pub one_of: &'a [String],
+    pub not_one_of: &'a [String],
+    pub less_than: Option<&'a Bound>,
+    pub at_most: Option<&'a Bound>,
+    pub greater_than: Option<&'a Bound>,
+    pub at_least: Option<&'a Bound>,
+}
+
+impl<'a> Compare<'a> {
+    pub fn is_empty(&self) -> bool {
+        self.one_of.is_empty() && self.not_one_of.is_empty() && self.bounds().is_empty()
+    }
+    /// Every numeric bound with its operator name.
+    pub fn bounds(&self) -> Vec<(&'static str, &'a Bound)> {
+        [
+            ("less_than", self.less_than),
+            ("at_most", self.at_most),
+            ("greater_than", self.greater_than),
+            ("at_least", self.at_least),
+        ]
+        .into_iter()
+        .filter_map(|(k, b)| b.map(|b| (k, b)))
+        .collect()
+    }
+}
+
+impl CondField {
+    pub fn compare(&self) -> Compare<'_> {
+        Compare {
+            one_of: &self.one_of,
+            not_one_of: &self.not_one_of,
+            less_than: self.less_than.as_deref(),
+            at_most: self.at_most.as_deref(),
+            greater_than: self.greater_than.as_deref(),
+            at_least: self.at_least.as_deref(),
+        }
+    }
+}
+
+impl CondProviderField {
+    pub fn compare(&self) -> Compare<'_> {
+        Compare {
+            one_of: &self.one_of,
+            not_one_of: &self.not_one_of,
+            less_than: self.less_than.as_deref(),
+            at_most: self.at_most.as_deref(),
+            greater_than: self.greater_than.as_deref(),
+            at_least: self.at_least.as_deref(),
+        }
+    }
+}
+
+/// The other side of a numeric comparison: a number, or another numeric field of the
+/// same entity (`at_most = { field = "storage" }`).
+#[derive(Debug, Clone, Deserialize)]
+#[serde(untagged)]
+pub enum Bound {
+    Number(f64),
+    Field(BoundField),
+    ProviderField(BoundProviderField),
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct BoundField {
+    pub field: String,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct BoundProviderField {
+    pub provider_field: String,
 }
 
 /// String transform applied to a resolved string value.

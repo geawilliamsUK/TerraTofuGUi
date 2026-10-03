@@ -491,6 +491,59 @@ impl Catalog {
     pub fn is_native(type_id: &str) -> bool {
         type_id.starts_with(NATIVE_PREFIX)
     }
+
+    /// Bring every field value of a project to the form its field's type stores
+    /// (`crate::fields::coerced`): values saved before a field changed type — a database's
+    /// storage `"32"` from when it was an enum, a log retention `"30"` — load as the
+    /// numbers the definitions now declare. Returns how many values changed.
+    pub fn normalize_values(&self, p: &mut ttg_core::Project) -> usize {
+        let mut changed = 0;
+        let mut fix =
+            |type_id: &str,
+             config: &mut ttg_core::Config,
+             provider_config: &mut std::collections::BTreeMap<String, ttg_core::Config>| {
+                let Some(def) = self.resources.get(type_id) else {
+                    return;
+                };
+                // Values saved where a field used to live move to where it lives now.
+                for f in def.fields.iter() {
+                    let Some(m) = &f.moved_from else { continue };
+                    let old = match &m.provider {
+                        Some(pid) => provider_config.get_mut(pid).and_then(|c| c.remove(&m.field)),
+                        None => config.remove(&m.field),
+                    };
+                    let Some(old) = old else { continue };
+                    changed += 1;
+                    let unset = config.get(&f.name).is_none_or(|v| v.is_empty());
+                    if unset && !m.skip.contains(&old.display()) {
+                        config.insert(f.name.clone(), old);
+                    }
+                }
+                let mut apply = |fields: &[FieldDef], cfg: &mut ttg_core::Config| {
+                    for f in fields {
+                        if let Some(v) = cfg.get_mut(&f.name) {
+                            if let Some(c) = crate::fields::coerced(f, v) {
+                                *v = c;
+                                changed += 1;
+                            }
+                        }
+                    }
+                };
+                apply(&def.fields, config);
+                for (pid, cfg) in provider_config.iter_mut() {
+                    if let Some(m) = def.providers.get(pid) {
+                        apply(&m.fields, cfg);
+                    }
+                }
+            };
+        for n in p.nodes.values_mut() {
+            fix(&n.resource_type, &mut n.config, &mut n.provider_config);
+        }
+        for c in p.containers.values_mut() {
+            fix(&c.container_type, &mut c.config, &mut c.provider_config);
+        }
+        changed
+    }
 }
 
 #[cfg(test)]
