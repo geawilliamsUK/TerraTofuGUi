@@ -652,7 +652,7 @@ pub fn run(full: &Project, cat: &Catalog, provider: &str) -> Vec<Diagnostic> {
                 c.relation == edge.relation.key()
                     && c.target_type.as_deref().is_none_or(|tt| tt == t.resource_type)
             });
-            if is_consumed {
+            if is_consumed || read_by_target(cat, provider, edge.relation, e.resource_type, t.resource_type) {
                 continue;
             }
             push(
@@ -669,6 +669,7 @@ pub fn run(full: &Project, cat: &Catalog, provider: &str) -> Vec<Diagnostic> {
         }
     }
     network_checks(p, cat, provider, &mut out);
+    crate::edge::checks(p, cat, provider, &mut out);
     extra_checks(p, cat, provider, &mut out);
     out.extend(crate::state::checks(full, p, cat, provider, full.settings.tool));
     out.extend(crate::versions::checks(p, cat, provider));
@@ -930,6 +931,10 @@ pub fn condition_holds_for(
                     }
                 })
                 .unwrap_or_default();
+            let targets = match &r.hop {
+                Some(h) => crate::edge::hop(p, cat, &targets, h),
+                None => targets,
+            };
             let matching = targets
                 .iter()
                 .filter(|t| {
@@ -1028,8 +1033,18 @@ pub fn condition_holds_for(
                 let b = record.get(other).map(|v| v.display());
                 return a.is_some() && a == b;
             }
+            if let Some(n) = i.min_count {
+                let count = match record.get(&i.item) {
+                    Some(Value::List(l)) => l.len(),
+                    Some(Value::Records(r)) => r.len(),
+                    Some(v) if !v.is_empty() => 1,
+                    _ => 0,
+                };
+                return count >= n;
+            }
             cond_value(record.get(&i.item), &i.equals, &i.not_equals)
         }
+        Condition::Not(n) => !condition_holds_for(p, cat, provider, e, &n.not, item, target),
         Condition::All(a) => a
             .all
             .iter()
@@ -1196,6 +1211,99 @@ pub fn consumed_relations(m: &ProviderMapping) -> Vec<Consumed> {
     rel.into_iter().collect()
 }
 
+/// Does the mapping at the *target* end of an edge read it (an `incoming` source or
+/// condition naming the relation and the source's type)? Then the link is expressed
+/// there — Cloud CDN switched on by the load balancer a CDN points at — and the source
+/// needs neither a `depends_on` (which would point the wrong way and could close a cycle)
+/// nor a "cannot express" warning.
+pub fn read_by_target(
+    cat: &Catalog,
+    provider: &str,
+    relation: Relation,
+    source_type: &str,
+    target_type: &str,
+) -> bool {
+    let Some(m) = cat.mapping(target_type, provider) else {
+        return false;
+    };
+    let mut found = HashSet::new();
+    for b in m.blocks.iter().chain(m.data.iter()) {
+        scan_block_incoming(b, &mut found);
+    }
+    found
+        .iter()
+        .any(|c| c.relation == relation.key() && c.target_type.as_deref().is_none_or(|t| t == source_type))
+}
+
+fn scan_block_incoming(b: &BlockDef, out: &mut HashSet<Consumed>) {
+    if let Some(c) = &b.when {
+        scan_cond_incoming(c, out);
+    }
+    b.args.values().for_each(|s| scan_source_incoming(s, out));
+    b.nested.iter().for_each(|n| scan_nested_incoming(n, out));
+}
+
+fn scan_nested_incoming(n: &NestedBlockDef, out: &mut HashSet<Consumed>) {
+    if let Some(c) = &n.when {
+        scan_cond_incoming(c, out);
+    }
+    n.args.values().for_each(|s| scan_source_incoming(s, out));
+    n.nested.iter().for_each(|x| scan_nested_incoming(x, out));
+}
+
+fn scan_cond_incoming(c: &Condition, out: &mut HashSet<Consumed>) {
+    match c {
+        Condition::Relation(r) if r.incoming => {
+            out.insert(Consumed {
+                relation: r.relation.clone(),
+                target_type: r.target_type.clone(),
+            });
+        }
+        Condition::All(a) => a.all.iter().for_each(|x| scan_cond_incoming(x, out)),
+        Condition::Any(a) => a.any.iter().for_each(|x| scan_cond_incoming(x, out)),
+        Condition::Not(n) => scan_cond_incoming(&n.not, out),
+        _ => {}
+    }
+}
+
+fn scan_source_incoming(s: &ArgSource, out: &mut HashSet<Consumed>) {
+    match s {
+        ArgSource::Relation(r) => {
+            if r.incoming {
+                out.insert(Consumed {
+                    relation: r.relation.clone(),
+                    target_type: r.target_type.clone(),
+                });
+            }
+            if let Some(fb) = &r.fallback {
+                scan_source_incoming(fb, out);
+            }
+        }
+        ArgSource::Field(f) => {
+            if let Some(fb) = &f.fallback {
+                scan_source_incoming(fb, out);
+            }
+        }
+        ArgSource::ProviderField(f) => {
+            if let Some(fb) = &f.fallback {
+                scan_source_incoming(fb, out);
+            }
+        }
+        ArgSource::If(i) => {
+            scan_cond_incoming(&i.cond, out);
+            scan_source_incoming(&i.then, out);
+            if let Some(o) = &i.otherwise {
+                scan_source_incoming(o, out);
+            }
+        }
+        ArgSource::Raw(r) => r.refs.values().for_each(|x| scan_source_incoming(x, out)),
+        ArgSource::Object(o) => o.object.values().for_each(|x| scan_source_incoming(x, out)),
+        ArgSource::List(l) => l.list.iter().for_each(|x| scan_source_incoming(x, out)),
+        ArgSource::Func(f) => f.args.iter().for_each(|x| scan_source_incoming(x, out)),
+        _ => {}
+    }
+}
+
 /// Relations a mapping talks about in a `when`-guarded manual step. It cannot generate
 /// the link, but it says so in its own words, so the generic "link by hand" entry would
 /// only repeat that. The `depends_on` for ordering is still emitted.
@@ -1267,6 +1375,7 @@ fn scan_cond(c: &Condition, rel: &mut HashSet<Consumed>) {
         }
         Condition::All(a) => a.all.iter().for_each(|x| scan_cond(x, rel)),
         Condition::Any(a) => a.any.iter().for_each(|x| scan_cond(x, rel)),
+        Condition::Not(n) => scan_cond(&n.not, rel),
         _ => {}
     }
 }

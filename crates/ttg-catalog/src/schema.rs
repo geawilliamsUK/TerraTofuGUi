@@ -334,11 +334,39 @@ pub struct NestedBlockDef {
     pub for_each_relation: Option<String>,
     #[serde(default)]
     pub for_each_target_type: Option<String>,
+    /// Inside a `for_each_field` row: emit one nested block per entry of this list-valued
+    /// sub-field of the row (v2). The inner row is the outer one with `value` set to the
+    /// entry, so `{ item = "value" }` is the entry and the outer row's items stay readable.
+    #[serde(default)]
+    pub for_each_item: Option<String>,
     #[serde(default)]
     pub args: IndexMap<String, ArgSource>,
     #[serde(default)]
     pub nested: Vec<NestedBlockDef>,
 }
+
+/// A second step from each entity a relation reached (v2): from a CDN's origin load
+/// balancer to the DNS Records that alias it. The entities the hop reaches replace the
+/// first ones as the subjects of the source or condition.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Hop {
+    pub relation: String,
+    /// Follow the edges that point *at* the first-hop entity instead of away from it.
+    #[serde(default)]
+    pub incoming: bool,
+    /// Only keep entities of this abstract type.
+    #[serde(default)]
+    pub target_type: Option<String>,
+    /// Only keep entities whose host name (a DNS Record's fully qualified name, a CDN's
+    /// custom domain) a TLS Certificate linked from the first-hop entity covers — its
+    /// domain or one of its alternative names, `*.` wildcards one label deep.
+    #[serde(default)]
+    pub certificate_covers: bool,
+}
+
+/// Abstract types that have a host name `certificate_covers` can test.
+pub const HOST_NAME_TYPES: &[&str] = &["dns_record", "cdn"];
 
 #[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -392,6 +420,14 @@ pub enum Condition {
     /// `{ setting = "kubernetes_manifests" }` — a project setting is on; `equals` /
     /// `not_equals` compare it instead (`equals = "false"`: the setting is off) (v2).
     Setting(CondSetting),
+    /// `{ not = <condition> }` — the condition does not hold (v2).
+    Not(CondNot),
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct CondNot {
+    pub not: Box<Condition>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -468,6 +504,10 @@ pub struct CondRelation {
     pub equals: Option<String>,
     #[serde(default)]
     pub not_equals: Option<String>,
+    /// Take a second step from each target before counting (v2); `target_field` and
+    /// `min_count` then apply to what the hop reaches.
+    #[serde(default)]
+    pub hop: Option<Hop>,
 }
 #[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -484,6 +524,10 @@ pub struct CondItem {
     /// security-group source from a cluster source when the two render differently.
     #[serde(default)]
     pub ref_type: Option<String>,
+    /// Holds when the item has at least this many entries (a list item's length; a set
+    /// scalar counts as one) (v2).
+    #[serde(default)]
+    pub min_count: Option<usize>,
 }
 #[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -723,6 +767,9 @@ pub struct SrcRelation {
     /// not emitted) (v2).
     #[serde(default)]
     pub fallback: Option<Box<ArgSource>>,
+    /// Take a second step from each target and reference what it reaches instead (v2).
+    #[serde(default)]
+    pub hop: Option<Hop>,
 }
 #[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]

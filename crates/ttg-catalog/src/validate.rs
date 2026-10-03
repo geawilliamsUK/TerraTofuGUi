@@ -531,6 +531,9 @@ fn check_condition(ctx: &mut SourceCtx, c: &Condition, errs: &mut Vec<String>) {
             {
                 ctx.v2 = true;
             }
+            if let Some(h) = &r.hop {
+                check_hop(ctx, "when", r.target_type.as_deref(), h, errs);
+            }
             if r.min_count == Some(0) {
                 errs.push(format!(
                     "{}when: min_count must be at least 1 (use absent = true for \"none\")",
@@ -645,6 +648,16 @@ fn check_condition(ctx: &mut SourceCtx, c: &Condition, errs: &mut Vec<String>) {
             if let Some(ty) = &i.ref_type {
                 check_ref_type(ctx, &i.item, ty, errs);
             }
+            if i.min_count == Some(0) {
+                errs.push(format!(
+                    "{}when item '{}': min_count must be at least 1",
+                    ctx.what, i.item
+                ));
+            }
+        }
+        Condition::Not(n) => {
+            ctx.v2 = true;
+            check_condition(ctx, &n.not, errs);
         }
         Condition::Setting(s) => {
             ctx.v2 = true;
@@ -735,9 +748,79 @@ fn check_relation_ref(
     }
 }
 
+/// A second step from the entities a relation reached: the kind must exist, the type must
+/// be known, an outgoing hop must be declared by the first-hop type when the mapping says
+/// which type that is, and `certificate_covers` needs a type that has a host name.
+fn check_hop(ctx: &mut SourceCtx, at: &str, first: Option<&str>, h: &Hop, errs: &mut Vec<String>) {
+    ctx.v2 = true;
+    let what = ctx.what.clone();
+    let e = |msg: String| format!("{what}{at} hop: {msg}");
+    if Relation::from_key(&h.relation).is_none() {
+        errs.push(e(format!("unknown relation kind '{}'", h.relation)));
+    }
+    if let Some(tt) = &h.target_type {
+        if !ctx.cat.resources.contains_key(tt) {
+            errs.push(e(format!("target_type '{tt}' is not a known type")));
+        }
+    }
+    if !h.incoming {
+        if let Some(def) = first.and_then(|t| ctx.cat.resources.get(t)) {
+            let declared = def.relations.iter().any(|r| {
+                r.kind == h.relation
+                    && h.target_type
+                        .as_ref()
+                        .is_none_or(|tt| r.targets.iter().any(|t| t == tt))
+            });
+            if !declared {
+                errs.push(e(format!(
+                    "'{}' declares no relation '{}'{}",
+                    def.resource.type_id,
+                    h.relation,
+                    h.target_type
+                        .as_ref()
+                        .map(|t| format!(" to '{t}'"))
+                        .unwrap_or_default()
+                )));
+            }
+        }
+    }
+    if h.certificate_covers
+        && !h
+            .target_type
+            .as_deref()
+            .is_some_and(|t| HOST_NAME_TYPES.contains(&t))
+    {
+        errs.push(e(format!(
+            "certificate_covers needs a target_type with a host name ({})",
+            HOST_NAME_TYPES.join(", ")
+        )));
+    }
+}
+
 fn check_nested(ctx: &mut SourceCtx, n: &NestedBlockDef, errs: &mut Vec<String>) {
     let outer_items = ctx.item_fields.clone();
     let outer_rel = ctx.in_relation;
+    if let Some(item) = &n.for_each_item {
+        ctx.v2 = true;
+        if n.for_each_field.is_some() || n.for_each_relation.is_some() {
+            errs.push(format!(
+                "{}nested '{}': for_each_item cannot be combined with for_each_field or for_each_relation",
+                ctx.what, n.block
+            ));
+        }
+        check_item_ref(ctx, &format!("nested '{}' for_each_item", n.block), item, errs);
+        // The entry is read as `value`, so a row that has an item of that name would lose it.
+        if let Some(items) = ctx.item_fields.as_mut() {
+            if items.iter().any(|x| x == "value") {
+                errs.push(format!(
+                    "{}nested '{}': for_each_item needs a row without an item named 'value'",
+                    ctx.what, n.block
+                ));
+            } else {
+                items.push("value".into());
+            }
+        }
+    }
     if let Some(rel) = &n.for_each_relation {
         ctx.v2 = true;
         if n.for_each_field.is_some() {
@@ -945,6 +1028,9 @@ fn check_source(ctx: &mut SourceCtx, at: &str, src: &ArgSource, errs: &mut Vec<S
             } else {
                 check_relation_ref(ctx, at, &r.relation, r.target_type.as_deref(), errs);
             }
+            if let Some(h) = &r.hop {
+                check_hop(ctx, at, r.target_type.as_deref(), h, errs);
+            }
             if let Some(f) = &r.field {
                 ctx.v2 = true;
                 if !r.attr.is_empty() {
@@ -958,12 +1044,15 @@ fn check_source(ctx: &mut SourceCtx, at: &str, src: &ArgSource, errs: &mut Vec<S
                 if f.trim().is_empty() {
                     errs.push(e("field name is empty".into()));
                 }
-                // The field belongs to the entity at the other end, so it can only be
-                // checked when the mapping says which type that is.
-                if let (Some(tt), Some(other)) = (
-                    &r.target_type,
-                    r.target_type.as_ref().and_then(|t| ctx.cat.resources.get(t)),
-                ) {
+                // The field belongs to the entity at the other end (of the hop, when there
+                // is one), so it can only be checked when the mapping says which type that is.
+                let subject = match &r.hop {
+                    Some(h) => &h.target_type,
+                    None => &r.target_type,
+                };
+                if let (Some(tt), Some(other)) =
+                    (subject, subject.as_ref().and_then(|t| ctx.cat.resources.get(t)))
+                {
                     if f != "name" && !other.fields.iter().any(|x| &x.name == f) {
                         errs.push(e(format!("'{tt}' has no field '{f}'")));
                     }

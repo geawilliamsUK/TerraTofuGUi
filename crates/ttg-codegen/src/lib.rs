@@ -15,6 +15,7 @@ pub mod cost;
 pub mod dataflow;
 pub mod diagnostics;
 pub mod diff;
+pub mod edge;
 pub mod emit;
 pub mod files;
 pub mod k8s;

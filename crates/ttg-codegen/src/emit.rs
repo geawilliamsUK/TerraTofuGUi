@@ -1396,8 +1396,27 @@ impl<'a> Emitter<'a> {
         parent: &str,
         outer_item: Option<ItemCtx<'_>>,
     ) -> Result<Vec<Block>, GenError> {
-        let own_rows = n.for_each_field.is_some() || n.for_each_relation.is_some();
-        let rows: Vec<Row> = if own_rows {
+        let own_rows =
+            n.for_each_field.is_some() || n.for_each_relation.is_some() || n.for_each_item.is_some();
+        let rows: Vec<Row> = if let Some(list) = &n.for_each_item {
+            // One row per entry of a list item of the current row: the outer row with
+            // `value` set to the entry.
+            let outer = outer_item.and_then(|c| c.record);
+            match outer.and_then(|r| r.get(list)) {
+                Some(Value::List(entries)) => entries
+                    .iter()
+                    .map(|s| {
+                        let mut r = outer.cloned().unwrap_or_default();
+                        r.insert("value".into(), Value::Str(s.clone()));
+                        Row {
+                            record: Some(r),
+                            target: outer_item.and_then(|c| c.target).map(str::to_string),
+                        }
+                    })
+                    .collect(),
+                _ => Vec::new(),
+            }
+        } else if own_rows {
             self.rows(
                 e,
                 n.for_each_field.as_deref(),
@@ -1702,6 +1721,11 @@ impl<'a> Emitter<'a> {
                     diagnostics::relation_sources_of_type(self.p, e, kind, r.target_type.as_deref())
                 } else {
                     self.relation_targets_filtered(e, kind, r.target_type.as_deref())
+                };
+                // `hop`: a second step from each target, whose results are referenced instead.
+                let targets = match &r.hop {
+                    Some(h) => crate::edge::hop(self.p, self.cat, &targets, h),
+                    None => targets,
                 };
                 let mut exprs = Vec::new();
                 for t in targets {
@@ -2029,7 +2053,14 @@ impl<'a> Emitter<'a> {
             if diagnostics::manifests_only(self.cat, e.resource_type, edge.relation, t.resource_type) {
                 continue;
             }
-            let is_consumed = covers(consumed, edge.relation.key(), t.resource_type);
+            let is_consumed = covers(consumed, edge.relation.key(), t.resource_type)
+                || diagnostics::read_by_target(
+                    self.cat,
+                    self.provider,
+                    edge.relation,
+                    e.resource_type,
+                    t.resource_type,
+                );
             if edge.relation != Relation::DependsOn && is_consumed {
                 continue;
             }

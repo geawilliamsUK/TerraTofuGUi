@@ -364,6 +364,52 @@ says *more than one*: a Log Group with two incoming clusters cannot be named aft
 `log_group.toml` reports it as an error. `min_count = 0` is rejected — `absent = true` is
 what "none" means.
 
+**A link read at the other end.** When the mapping of an edge's *target* reads it with
+`incoming` (a source or a condition naming the relation and the source's type), the link
+is expressed there: a Load Balancer turns Cloud CDN on when a CDN points at it. The source
+then needs no `depends_on` — it would point the wrong way and could close a cycle — and
+gets no "cannot express" warning or "link by hand" step, even when its own mapping does
+not consume the relation.
+
+**Two steps: `hop`.** `hop = { relation = "…", incoming = true, target_type = "…" }` on a
+relation source or condition takes a second step from every entity the first one reached,
+and what the hop reaches becomes the subject: `attr` / `block` / `field` read it and
+`target_field` / `min_count` count it. A CDN reaches its origin load balancer, then the DNS
+Records that alias the load balancer:
+
+```toml
+domain_name = { relation = "attribute_reference", target_type = "load_balancer", hop = { relation = "attribute_reference", incoming = true, target_type = "dns_record", certificate_covers = true }, attr = "fqdn", fallback = { relation = "attribute_reference", target_type = "load_balancer", attr = "dns_name" } }
+```
+
+`certificate_covers = true` keeps only the entities whose host name — a DNS Record's fully
+qualified name (its record name in its zone's domain, `@` for the apex), a CDN's custom
+domain (`ttg_catalog::HOST_NAME_TYPES`) — a TLS Certificate linked from the first-hop
+entity covers: its domain or one of its alternative names, `*.` wildcards matching exactly
+one label. The loader checks that the kind exists, that the type is known, that an outgoing
+hop is declared by the first-hop type when the mapping names it, and that
+`certificate_covers` is used with a type that has a host name. The hop's relation belongs to
+the first-hop entity, so it never counts as consumed by this mapping.
+
+**Negation.** `{ not = <condition> }` holds when the condition does not.
+
+**Lists inside a row.** Inside a `for_each_field` row, `{ item = "paths", min_count = 2 }`
+holds when the list item has at least two entries (a set scalar counts as one), and a nested
+block with `for_each_item = "paths"` is emitted once per entry of that list item. The inner
+row is the outer row with `value` set to the entry, so `{ item = "value" }` is the entry
+and the row's other items stay readable; the row must not have an item called `value`
+already. A Web Application Firewall's rate rule uses both to write one `byte_match_statement`
+for a single path prefix and an `or_statement` of them for several:
+
+```toml
+[[providers.aws.blocks.nested.nested.nested.nested.nested]]
+block = "or_statement"
+when = { all = [ { item = "paths", min_count = 2 }, { item = "method", equals = "ANY" } ] }
+
+[[providers.aws.blocks.nested.nested.nested.nested.nested.nested]]
+block = "statement"
+for_each_item = "paths"
+```
+
 **Comparing against a list field.** `equals` / `not_equals` on a `string_list` field (or on
 `target_field` when the target's field is one) test **membership**: `{ field = "addons",
 equals = "cluster_autoscaler" }` holds when that entry is in the list, and a Kubernetes
@@ -512,7 +558,8 @@ ARCHITECTURE.md §6.0.
 
 See `definitions/resources/function.toml`, `security_group.toml`, `relational_database.toml`,
 `secret.toml` and `kubernetes_node_pool.toml` for worked examples of every feature;
-`tls_certificate.toml` for `refs` and `dns_record.toml` for two relations sharing a kind.
+`tls_certificate.toml` for `refs`, `dns_record.toml` for two relations sharing a kind,
+`cdn.toml` for `hop` and `web_application_firewall.toml` for `for_each_item` and `not`.
 
 ## 2.7 Connection values (schema_version 2)
 

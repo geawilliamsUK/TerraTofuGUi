@@ -66,6 +66,7 @@ fn scan_cond(c: &Condition, set: &mut HashSet<String>) {
         }
         Condition::All(a) => a.all.iter().for_each(|x| scan_cond(x, set)),
         Condition::Any(a) => a.any.iter().for_each(|x| scan_cond(x, set)),
+        Condition::Not(n) => scan_cond(&n.not, set),
         _ => {}
     }
 }

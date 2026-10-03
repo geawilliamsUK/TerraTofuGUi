@@ -925,6 +925,11 @@ pub fn checks(full: &Project, layer: &Project, cat: &Catalog, provider: &str, to
         let Some(m) = cat.mapping(e.resource_type, provider) else {
             continue;
         };
+        // A provider whose mapping generates no value (Google Cloud has no separate origin
+        // for a CDN's secret header) puts nothing into the state.
+        if !m.blocks.iter().any(|b| b.resource.starts_with("random_")) {
+            continue;
+        }
         let fields = def.fields.iter().chain(m.fields.iter());
         for f in fields.filter(|f| f.state_secret) {
             let on = e
