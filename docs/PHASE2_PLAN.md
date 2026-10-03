@@ -964,6 +964,68 @@ definition for the migration — and the alarm on the worker watched an orphaned
   without the execution policy, the load balancer forwarding to web by IP and the worker
   alarm on the shared cluster.
 
+## Round 4: secrets, databases, alarms and defaults (zipOS TF-014, TF-021, TF-022)
+
+- **Secrets out of state** (TF-014) — a Secret's *Value managed outside OpenTofu*
+  (`value_outside`) creates only the secret: no version on AWS and Google Cloud, a
+  placeholder value with `lifecycle { ignore_changes = [value] }` on Azure (Key Vault has
+  no empty secret), and a manual step with `aws secretsmanager put-secret-value`,
+  `az keyvault secret set` or `gcloud secrets versions add`. It is refused together with
+  *Generate the value* or a *Value from database* link, and a database that would take its
+  password from such a secret is refused on every provider.
+- **RDS-managed master password** (TF-014) — the AWS field *Master password* (`managed` |
+  `secret` | `variable`; unset keeps the old behaviour) emits
+  `manage_master_user_password = true` (with the linked key as
+  `master_user_secret_kms_key_id`) and no `password`; the secret's ARN is the
+  `<db>_master_user_secret_arn` output (an output `when`, new in the mapping language) and
+  the `MASTER_SECRET_ARN` connection value. A Secret deriving its value from such a
+  database is refused. Azure and Google Cloud have no service-managed admin password;
+  the field's description points at IAM / directory authentication instead.
+- **Conflicts before export** (TF-014) — `ttg_codegen::conflicts`: a curated table of
+  mutually exclusive arguments per resource type, checked against the emitted blocks
+  (extra arguments included) from inside the diagnostics, so the GUI, `ttg check` and
+  every export see it (`Code::Conflict`, an error). Each group was confirmed against the
+  real providers by planning a configuration that sets both with `tofu test` and
+  `mock_provider` (OpenTofu 1.12.6; AWS 6.67, azurerm 4.81, google 7.46). That
+  investigation also showed that a mock-provider plan *does* run the provider's own
+  validation with known values, so it catches the zipOS clash too; it was not wired into
+  the validate path because mocked computed values (random strings for ARNs, empty
+  nested blocks) trip the provider's other validators all over a real export, so every
+  resource type would need `mock_resource` defaults to keep it quiet, and it needs the
+  providers installed. The table runs everywhere with no binaries.
+- **Databases** (TF-022) — storage is a free number of GB (old enum values load as numbers)
+  with per-provider minimums (AWS 20 GB gp2/gp3, 100 GB io1/io2; Azure MySQL 20–16,384;
+  Cloud SQL 10) and Azure PostgreSQL rounding up to the sizes it offers (a warning, and the
+  cost estimate prices the rounded size); *Grow storage up to* maps to
+  `max_allocated_storage`, Azure auto-grow (no limit, said in a warning) and
+  `disk_autoresize_limit` (0 now turns Cloud SQL's and Azure MySQL's default growth off);
+  *Server parameters* become an `aws_db_parameter_group` of the engine's family,
+  flexible-server configurations or Cloud SQL database flags. *Size class* says it is
+  ignored when an instance class / SKU / tier override is set.
+- **Alarms that fire** (TF-021 1–4) — target-health presets (`lb_unhealthy_hosts`,
+  `lb_healthy_hosts`, and a custom metric of those names) carry `TargetGroup` and
+  `LoadBalancer` (the load balancer's one target group); `lb_5xx_rate` and `db_storage`
+  (now percent free, against the instance's allocated storage) are metric math; a
+  portable *Statistic* (auto, Average, Sum, Minimum, Maximum, p50/p90/p95/p99; the old AWS
+  `statistic` moves to it through `moved_from`) gives `extended_statistic` on AWS and
+  percentile aligners on Google Cloud, and leaves the alarm out of the Azure export;
+  thresholds are `number`s and the inspector shows each preset's unit (`units`). Azure
+  flips free storage to storage used, Google converts percentages to fractions and
+  seconds to milliseconds; a tcp load balancer uses AWS/NetworkELB and refuses the HTTP
+  presets. Container-app cluster dimensions are the containers package's.
+- **Defaults and papercuts** (TF-022) — log retention is a number checked against each
+  provider's allowed values; a new subnet (canvas or `entity_add`) takes the next free
+  block of its network; a registry's lifecycle expires untagged images by default (or
+  tagged ones, optionally by tag prefix, or any); numeric `extra` values are stored in the
+  schema's form; `settings_set { name }`, an untitled project named after the file it is
+  saved as, and `verbose: false` replies on `entity_add` / `entity_update` / `link_add`.
+- **Mapping language** — `number` fields, `one_of` / `not_one_of` and numeric comparisons
+  on field conditions, `when` on outputs, `units`, `moved_from`, a nested `lifecycle`
+  block, and `Catalog::normalize_values` bringing saved values to their declared types on
+  open and on every export.
+- `examples/managed-data.ttg.json` exercises all of it on three providers;
+  `crates/ttg-codegen/tests/data_ops.rs` covers it.
+
 ## Explicitly still out of scope
 
 Running `plan`/`apply`, live-account access, multi-user collaboration, drift detection

@@ -268,6 +268,22 @@ were ignored. When the open project has unsaved changes the import needs approva
 `project_open`, regardless of `confirm_disk`; an import that would not load is refused
 before the prompt is shown. The format is in docs/FILE_FORMAT.md.
 
+Defaults and replies (2026-10-03): `settings_set { name }` renames the project (it heads
+the export's README and is the default state key prefix), and `project_save` to a named
+file names a project still called `untitled` after the file (`TtgApp::save_to`, so the
+GUI's Save As does the same). `entity_add`, `entity_update` and `link_add` take
+`verbose: false` and then answer with only `{status, id, changed}` — `changed` compares
+the project before and after, a link's id is `<source> -<relation>-> <target>` — instead
+of the whole entity; `settings_set { verbose: false }` makes that the session default
+(`McpState::terse_replies`, not saved) and a call's own `verbose` wins. The cut is made in
+`exec_logged`, so it applies to direct calls; commands inside `project_apply` and the bulk
+forms keep their own summaries. `entity_add` of a subnet picks the first free block of
+its network (`ttg_core::cidr::next_free`), and `entity_update.extra` stores a value in
+the form the schema declares (`ttg_codegen::diagnostics::canonical_extra`: `30` for a
+string argument becomes `"30"`, `"30"` for a number becomes `30`); field values are
+converted to their field's type the same way (`"20"` for an `int` field is stored as 20).
+`catalog_type` lists a field's `units` (the unit an alarm threshold is in, per metric).
+
 Added 2026-09-09: `project_apply` (a list of `{tool, args}` diagram writes executed as
 one undo step; `AgentCommand::Batch` snapshots first, runs each sub-command through the
 normal path, then truncates the history back and pushes one step; any failure restores

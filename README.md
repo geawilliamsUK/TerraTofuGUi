@@ -50,8 +50,12 @@ policy attached. See `examples/edge-dynamic.ttg.json`.
 Day-two operations are part of the vocabulary too: a queue can **dead-letter** into
 another one (an SQS redrive policy, Service Bus forwarding inside a namespace, a Pub/Sub
 dead-letter policy with the IAM the service agent needs); an **Alarm** picks its metric
-from a portable preset (queue depth, dead letters, 5xx, free storage, …) and refuses a
-preset the watched resource has no metric for rather than guessing; a **Virtual Network**
+from a portable preset (queue depth, dead letters, 5xx count or rate, unhealthy targets,
+free storage as a percentage, …), a statistic (percentiles included) and a decimal
+threshold in the unit the inspector shows beside it, carries the dimensions the cloud
+publishes the metric with (a target-health alarm names the target group as well as the
+load balancer), and refuses a preset the watched resource has no metric for rather than
+guessing; a **Virtual Network**
 can turn on flow logs; a **Container Registry** can hold several repositories; a **Topic**
 can subscribe a mailbox or a webhook, or receive a **Budget**'s threshold alert instead of
 (or alongside) an email; and **Budget** and **Audit Trail** put the monthly spend alert
@@ -63,7 +67,11 @@ afterwards: buckets block public access and refuse plain HTTP by default, expire
 and unfinished uploads, can log access to a second bucket, and restrict which HTTP
 methods a CORS rule answers (GET/HEAD by default, extendable to PUT for a pre-signed
 browser upload); databases encrypt their
-storage, keep backups and take a final snapshot before a destroy; queues, secrets, log
+storage, keep backups and take a final snapshot before a destroy, take free-form storage
+that can grow by itself up to a limit, carry server parameters, and on AWS can leave the
+master password to RDS (no password in the configuration or the state; workloads read the
+secret RDS keeps); a **Secret** can be created without a value, which is then set outside
+OpenTofu and never reaches the state; queues, secrets, log
 groups and topics can all be linked to an **Encryption Key** with the *Encrypted with*
 relation, which becomes a KMS key with a usable key policy on AWS, a Key Vault key on
 Azure and a KMS key ring on Google Cloud. Project-wide **default tags** (Settings ▸
@@ -78,7 +86,11 @@ TLS-only bucket first. With OpenTofu, **state encryption** adds an `encryption {
 AWS KMS or Cloud KMS with the Encryption Key you choose (the bootstrap root creates it, since
 the key must exist before the state it encrypts), a passphrase on Azure — and Terraform,
 which cannot encrypt state, gets a warning instead. A generated secret in local or
-unencrypted state is flagged. Provider versions can be pinned per project (Settings ▸
+unencrypted state is flagged. Arguments a provider refuses together when it plans —
+`password` with `manage_master_user_password`, `statistic` with `extended_statistic`,
+`name` with `name_prefix` — are an error before export, whether the mapping or an extra
+argument set them, because `validate` cannot see the clash while one side is a variable.
+Provider versions can be pinned per project (Settings ▸
 Provider versions); the defaults are `aws ~> 6.0`, `azurerm ~> 4.0` and `google ~> 7.0`.
 
 Google Cloud (added 2026-09-09, `hashicorp/google` 7.x since round 3): networks and subnets, Cloud NAT,
