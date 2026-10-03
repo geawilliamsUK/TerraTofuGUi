@@ -51,7 +51,14 @@ pattern = "^[a-z0-9-]+$"      # optional regex (string only); no look-around
 pattern_hint = "lowercase…"   # shown when the pattern fails
 manifests = true              # v2, optional: read by the Kubernetes manifests export (§2.7)
 state_secret = true           # optional, bool fields only: true puts a secret into the state
+required_unless_item = { item = "protocol", in = ["all", "icmp"] }  # struct_list items only
 ```
+
+`required_unless_item` belongs on a `required` item of a `struct_list` (§2.6): the
+requirement lapses in a row whose other item (`item`) has one of the values in `in`. A
+Security Group rule's ports are required for `tcp` / `udp` and optional for `all` and
+`icmp`. The item must name another item of the same row, `in` must not be empty, and the
+loader refuses it on anything but a required item.
 
 `manifests = true` says that no provider mapping reads the field — the Kubernetes
 manifests export does (a workload's `image_tag`, `cpu`, `max_replicas`). The field then
@@ -318,7 +325,28 @@ answer.
 
 **Repeated blocks.** `for_each_field = "rules"` on a `[[…blocks]]`, `[[…data]]` or
 `[[…nested]]` entry emits one block per row (or per entry of a `string_list`, whose row has
-a single item `value`). Top-level repeated resources are named `<slug>_<key>_<n>`. Inside:
+a single item `value`). Top-level repeated resources are named after the row's **key**,
+not its position, so reordering the list never replaces them: `<slug>_<key>_<row key>`,
+the row key slugified (`aws_ecr_repository.ecr_repo_zipos_web`). The row key is
+
+- for a `for_each_relation` block, the target entity's name (`aws_route_table_association.public_routes_assoc_public_a`);
+- for a `string_list`, the entry itself;
+- for a `struct_list`, the item named by `for_each_key = "endpoint"` on the block, or else
+  the row's `name` item. A row without one keeps its index (`<slug>_<key>_<n>`).
+
+Rows whose keys slugify alike get `_2`, `_3`, … in row order (two rules both named `rule`),
+so give rows distinct names. A repeated **data** block collapses instead: rows with the
+same key share one lookup, which is how a Security Group looks each AWS-managed prefix list
+up once however many rules name it. `for_each_key` must be an item of the row and only
+applies with `for_each_field`; both are checked at load time.
+
+Before this naming, repeated resources were `<slug>_<key>_<n>`. Every export therefore
+writes a `moved.tf` with one `moved { from = <old> to = <new> }` per renamed instance, so
+an existing state follows the rename on its next apply instead of destroying and
+recreating the resource; for a state that never had the old names the blocks do nothing.
+Once every state has been applied with them, `moved.tf` can be deleted; the switch that
+writes it (`emit::LEGACY_INDEX_MOVES`) is turned off one release later. A `$raw` written
+against an old address is exported with the new one and warned about (§2.8). Inside:
 
 | Source / condition | Meaning |
 |---|---|
@@ -328,7 +356,17 @@ a single item `value`). Top-level repeated resources are named `<slug>_<key>_<n>
 | `{ template = "{item.from}-{item.to}" }` | `item.` placeholders; `{item.index}` is the row index |
 | `when = { item = "direction", equals = "ingress" }` | row filter; `not_equals` and `equals_item = "other"` also work, and `ref_type` on an `entity_ref` item (below) |
 
-A `self_block` reference to a repeated block yields the list of all instances.
+A `self_block` reference to a repeated block yields the list of all instances, and so
+does `self_data` to a repeated data block — unless it names `key_item = "<item>"`, which
+picks the instance whose key is that item's value in the current row:
+
+```toml
+# security_group.toml (AWS): the lookup this rule's `prefix_list` names
+prefix_list_id = { if = { item = "prefix_list", not_equals = "" }, then = { self_data = "prefix_list", key_item = "prefix_list", attr = "id" } }
+```
+
+`key_item` is only valid inside a `for_each_field` block, on a data block that has
+`for_each_field` itself.
 
 **One column of a table field.** `{ field = "taints", column = "key" }` (also on
 `provider_field`) is the list of that sub-field's values across the rows of a `struct_list`,
@@ -590,7 +628,12 @@ the nearest kept one. The difference is reported as `Layer` diagnostics (parity 
 holds the id of another node (the inspector shows a dropdown). Inside the row,
 `{ item_ref = "source_group", attr = "id" }` is a traversal to that node's primary block
 (`block = "…"` for a secondary one). Used by Security Group rules whose source is another
-group.
+group. A target may be a native type (§2.8), checked only for a known provider and a
+type name since native types are created on demand: a rule's `source_prefix_list` names
+`native:aws:data.aws_ec2_managed_prefix_list` or `native:aws:aws_ec2_managed_prefix_list`,
+and `item_ref` then resolves to `data.aws_ec2_managed_prefix_list.<slug>.id`. On another
+provider's layer such an entity does not exist; the diagnostics do not report the row's
+reference as dangling there, and the mapping is expected to leave the row out.
 
 An `entity_ref` item may name more than one target type, and the types usually render
 differently. The condition `{ item = "source_group", ref_type = "kubernetes_cluster" }`
@@ -703,6 +746,66 @@ emitted. The sources are validated like block arguments at load time, and
 `tests/schema_check.rs` checks every `self_block` attribute against the provider schema.
 
 ---
+
+## 2.8 Extra arguments, native resources and data sources (project side)
+
+What a *project* adds to a mapping, rather than a definition file; ARCHITECTURE.md §4.2
+has the storage shape (`extra`: provider → block key → argument → JSON value).
+
+**Native types.** `native:<provider>:<resource>` is a provider resource no curated type
+covers (`native:aws:aws_iam_role_policy`) and `native:<provider>:data.<data source>` a
+provider **data source** (`native:aws:data.aws_ec2_managed_prefix_list`): a lookup of
+something that already exists, emitted as `data "<type>" "<slug>"`, drawn with a dashed
+outline and a `data` badge. Either is one block keyed `main` whose every argument is an
+extra argument, checked against the bundled provider schema (resources and data sources
+both, `ttg schema search` / `show`; required arguments missing are errors). The MCP
+`schema_search` tool lists both kinds, labelled.
+
+**`$ref`.** `{"$ref": {"entity": "<id or name>", "attr": "id"}}` becomes a traversal to the
+entity's primary block — or to its data block, for a native data source:
+`{"$ref": {"entity": "cf_prefix", "attr": "id"}}` → `data.aws_ec2_managed_prefix_list.cf_prefix.id`.
+`"block": "<key>"` addresses another block, and for a **repeated** block `"key": "<row key>"`
+picks one instance (§2.6): `{"$ref": {"entity": "ecr", "block": "repo", "key": "zipos-migrate",
+"attr": "repository_url"}}` → `aws_ecr_repository.ecr_repo_zipos_migrate.repository_url`. The
+key matches the row key as written or slugified, or the target entity's id for a relation
+row; `"index": n` picks by position. A `$ref` to an external (manual) or unmapped entity
+becomes an input variable, as relation references do.
+
+**`$raw`.** `{"$raw": "<HCL expression>"}` is parsed with hcl-rs. `"refs": {"name": <value>}`
+splices any extra value (usually a `$ref`) in for `@name@` first, so a hand-written
+expression can still name a generated block without guessing its address:
+
+```json
+{"$raw": "jsonencode([{ image = \"${@repo@}:release\" }])",
+ "refs": {"repo": {"$ref": {"entity": "ecr", "block": "repo", "key": "zipos-web", "attr": "repository_url"}}}}
+```
+
+**What the graph sees** (`ttg_codegen::refs`). Every `$ref`, and every address inside a
+`$raw` (`<type>.<name>…`, `data.<type>.<name>`, `var.x`, `local.x`, `module.x`, in template
+strings and `for` expressions too, `for` variables excepted), is checked against what the
+export generates:
+
+- an address the export generates links the `$raw`'s entity to the entity that generates
+  it: it counts as a link for `expects_incoming` ("nothing links to this Log Group") and
+  is drawn on the canvas as a dashed reference arrow;
+- an address it does not generate is an **error** naming the `$raw` and the address
+  ("`$raw in task.container_definitions refers to aws_secretsmanager_secret.app_secret,
+  which the Amazon Web Services export does not generate ("app-secret" is flagged as
+  external / managed by hand…)`"), as are `local.*`, `module.*`, unknown roots, `var.*`
+  the export does not declare, an expression that does not parse, and a `$ref` naming an
+  entity, block or key that does not exist or is not generated;
+- an old index-based address of a repeated block is a **warning** and is exported as the
+  new one;
+- a `$ref` to a repeated block without `key` is a warning: it refers to the first instance.
+
+**`null`.** An extra argument whose value is `null` on an argument the mapping sets
+removes that argument from the generated block, and on a nested block the mapping emits
+removes the block: `manage_master_user_password = true` with `password = null` on an AWS
+database. Removing an argument the provider schema requires is an error. `null` on
+anything the mapping does not set has nothing to remove (info). Over MCP, `entity_update`
+stores `null` only for an argument the mapping sets (elsewhere `null` deletes the extra
+argument, as before), and `{"$restore": true}` deletes an override or removal so the
+mapping's own value comes back.
 
 ## 3. What the generator does with a mapping
 

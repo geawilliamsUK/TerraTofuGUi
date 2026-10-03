@@ -318,8 +318,8 @@ OpenTofu installed, so a definition change that produces invalid HCL fails the b
 
 The curated types are the *portable* part of the catalog. For full provider scope the app
 bundles a compact index of the real provider schemas (every resource, argument and nested
-block of the AWS and Azure providers the catalog pins, about half a megabyte compressed)
-and uses it in three ways:
+block of the AWS, Azure and Google Cloud providers the catalog pins, and every data
+source, about 1.3 MB compressed) and uses it in these ways:
 
 - **Advanced arguments on curated resources.** Every provider mapping section in the
   inspector has an *Advanced arguments* editor: search any argument the provider
@@ -334,8 +334,22 @@ and uses it in three ways:
   with required arguments flagged. Native resources are provider-only by nature, so they
   tag themselves to that provider's layer and the other provider's export leaves them
   out. Link them to other resources with *Depends on* and reference attributes with the
-  ref button (`{"$ref": {"entity": "assets", "attr": "id"}}` in the file), or use
-  `{"$raw": "<hcl>"}` for an expression.
+  ref button (`{"$ref": {"entity": "assets", "attr": "id"}}` in the file; `"block"` and,
+  for a repeated block such as one ECR repository of several, `"key": "worker"` pick
+  which block), or use `{"$raw": "<hcl>"}` for an expression (`"refs"` splices `$ref`s
+  into it at `@name@`). A value of `null` on an argument the mapping sets leaves it out
+  of the block (∅ in the editor).
+- **Native data sources.** The same search lists every data source
+  (`native:aws:data.aws_ec2_managed_prefix_list`): a lookup of something that already
+  exists, drawn with a dashed outline and a *data* badge, emitted as `data "<type>"
+  "<name>"` and referenced like any resource. A Security Group rule row can also name an
+  AWS-managed prefix list directly (`prefix_list =
+  "com.amazonaws.global.cloudfront.origin-facing"`) and the export looks it up itself.
+- **References the graph can see.** Every `$ref` and every address inside a `$raw` is
+  checked against what the export generates. One it generates is a link — drawn as a
+  dashed arrow, and enough to clear "nothing links to this" — and one it does not (a
+  resource since flagged external or deleted, a typo, a `local.*`) is an error naming the
+  argument and the address, before `validate` would fail.
 - **A test that keeps curated definitions honest.** Every resource type and argument a
   curated mapping writes is checked against the schema in CI, so a provider rename fails
   a test instead of a user's export.
@@ -343,12 +357,24 @@ and uses it in three ways:
 `ttg schema info` shows the index in use, `ttg schema search aws "sqs queue"` and
 `ttg schema show azure azurerm_storage_queue` explore it (add `--depth N` /
 `--required-only` to narrow a large resource - `aws_wafv2_web_acl` alone is ~900 KB
-unfiltered), and `ttg schema refresh` regenerates it from the installed tool into your
+unfiltered; `ttg schema search aws prefix_list --kind data` and `ttg schema show aws
+data.aws_ec2_managed_prefix_list` for data sources), and `ttg schema refresh`
+regenerates it from the installed tool into your
 data directory, where it takes precedence over the bundled copy (`--out
 crates/ttg-schema/data/index.json.gz` refreshes the bundled one). See
 `examples/native-extras.ttg.json`.
 
 ![A native resource with its schema-driven inspector](docs/screenshot-native.png)
+
+**What an export looks like.** Every file is already formatted the way `tofu fmt` /
+`terraform fmt` formats it. Resources made once per list entry or per linked resource
+are named after the entry (`aws_ecr_repository.images_repo_worker`), not its position,
+so reordering a list replaces nothing; `moved.tf` carries an existing state over from
+the old index-based names on its next apply. The export ships no
+`.terraform.lock.hcl`: lock for every platform before committing (`tofu providers lock
+-platform=linux_amd64 -platform=linux_arm64 -platform=darwin_arm64
+-platform=windows_amd64`, which `ttg export --lock` runs for you); its README says the
+same.
 
 ## Driving the app from an agent (MCP)
 

@@ -1026,6 +1026,67 @@ definition for the migration — and the alarm on the worker watched an orphaned
 - `examples/managed-data.ttg.json` exercises all of it on three providers;
   `crates/ttg-codegen/tests/data_ops.rs` covers it.
 
+## Round 4: references and export hygiene (zipOS feedback TF-003 (1), TF-004, TF-013, TF-014 note, TF-015)
+
+The zipOS build locked its load balancer to CloudFront with a `$raw` address of a data
+source it could not declare, and a hand-written `data.tf` beside the export; guessed
+indexed addresses (`ecr_repo_2`) inside `$raw`; found that reordering a repository list
+would replace repositories, that `tofu fmt -check` failed on most files, that the lock
+file held one platform, that `null` could not remove a mapping's argument, and that five
+`$raw` references went on pointing at a secret flagged external with no diagnostic.
+
+- **Native data sources** (TF-004) — the bundled schema index carries every data source
+  (aws 683, azurerm 399, google 465; the index grows from 1.11 to 1.35 MB, rebuilt for the
+  same provider versions). `native:<provider>:data.<type>` is one `data` block (`Catalog::
+  ensure_native`), schema-checked like a native resource, referenced by `$ref`
+  (`data.<type>.<slug>.<attr>`), drawn dashed with a *data* badge. `schema_search` lists
+  both kinds labelled (`kind` narrows), `schema_show` takes `data.<type>`, `entity_add`
+  refuses a type the schema lacks; `ttg schema search --kind`, `ttg schema show
+  data.<type>`.
+- **Prefix lists on rules** (TF-004) — a Security Group row's `prefix_list` (an
+  AWS-managed list's name) makes the AWS mapping look the list up, one `data
+  "aws_ec2_managed_prefix_list"` per distinct name (a repeated data block keyed by the
+  name collapses), and use `prefix_list_id`; `source_prefix_list` points at a native
+  prefix-list data source or resource on the canvas. A prefix list replaces the CIDR and
+  source group (warning if both are given). Azure and Google Cloud leave such rows out
+  with a warning. Reachability treats the list as an opaque source, and an
+  internet-facing load balancer admitting only CloudFront's origin-facing list says so
+  in its exposure.
+- **Ports for `all` / `icmp`** (TF-003 (1)) — `required_unless_item = { item =
+  "protocol", in = ["all", "icmp"] }` on the port items; an ICMP rule without ports is
+  every type (`-1` on AWS, `*` on Azure).
+- **`$raw` in the graph** (TF-015) — `ttg_codegen::refs` parses every `$raw` with hcl-rs
+  (templates and `for` expressions included) and checks every address, and every
+  `$ref`, against the export's plan. Generated addresses become derived references
+  (they clear `expects_incoming` warnings and draw as dashed arrows); missing ones are
+  errors naming the argument and the address, with the reason when an entity explains it
+  (flagged external, off the layer). `"refs"` splices `$ref`s into a `$raw` at `@name@`.
+- **Keyed instances and `$ref` by key** (TF-013, TF-015) — `ttg_codegen::plan` decides
+  every address up front; repeated blocks are named by the row's key (target name, list
+  entry, `for_each_key` / `name` item), `_2` for a colliding key. `$ref` takes `"key"`
+  (or `"index"`). Every rename gets a `moved` block in `moved.tf` (no-ops for a state
+  that never had the old names; `emit::LEGACY_INDEX_MOVES` turns them off a release
+  later), and a `$raw` naming an old address is exported with the new one and warned
+  about.
+- **`null` removes** (TF-014 note) — on an argument or nested block the mapping sets;
+  removing a schema-required one is an error. Over MCP `null` is stored only for those,
+  and `{"$restore": true}` undoes it.
+- **fmt-clean output** (TF-013) — `files::align_attributes` follows hclwrite's grouping
+  and object `for` expressions are padded like `fmt` pads them; the validate suite runs
+  `fmt -check -recursive` with every installed binary on every export.
+- **Lock files** (TF-013) — no lock file is shipped; the export README and
+  ARCHITECTURE.md §6.3 say how to lock for CI, and `ttg export --lock` runs `providers
+  lock` for linux_amd64, linux_arm64, darwin_arm64 and windows_amd64.
+
+Acceptance, on a scratch copy of the zipOS graph: the native ingress rule with its
+`$raw` prefix-list address became a row on the load balancer's group, and the three
+indexed ECR addresses became `$ref`s by key spliced into the container definitions. The
+AWS export validates with no hand-written file and passes `tofu fmt -check`; deleting the
+secret (or flagging it external) gives one error per `$raw` that names it.
+`examples/native-extras.ttg.json` now carries a native data source, a `$ref` by key
+spliced into a `$raw`, and a log group referenced only from a `$raw`, so the validate
+suite exercises them on every provider.
+
 ## Explicitly still out of scope
 
 Running `plan`/`apply`, live-account access, multi-user collaboration, drift detection

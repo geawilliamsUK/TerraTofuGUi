@@ -309,11 +309,30 @@ stray display name. Writes are refused while a modal dialog is open, naming the 
 
 `entity_add` and `catalog_type` accept native type ids (`native:<provider>:<resource>`,
 as returned by `schema_search`) directly: the synthetic definition is registered on first
-use (`Catalog::ensure_native`), same as dropping one from the palette.
+use (`Catalog::ensure_native`), same as dropping one from the palette. Data sources are
+native types too, `native:<provider>:data.<data source>` (an AWS-managed prefix list:
+`native:aws:data.aws_ec2_managed_prefix_list`): one `data` block whose arguments are the
+entity's extra arguments. `entity_add` refuses a native type the provider's schema does
+not have, naming whether it looked for a resource or a data source.
+
+`schema_search` searches resources and data sources together; every hit carries `kind`
+(`resource` | `data`) and the `type_id` to add it with, and `kind: "resource"` /
+`kind: "data"` narrows the search. `schema_show` reads a data source as
+`data.<type>` (or `kind: "data"`).
 
 An `entity_update.extra` value's `{"$ref": {"entity": ..., "attr": ...}}` targets the
-referenced entity's primary block; add `"block": "<key>"` to address one of its secondary
-blocks instead (e.g. Object Storage's `versioning` block on AWS).
+referenced entity's primary block (a native data source's data block); add `"block":
+"<key>"` to address one of its secondary blocks instead (e.g. Object Storage's
+`versioning` block on AWS), and `"key": "<row key>"` to pick one instance of a repeated
+block (`{"entity": "ecr", "block": "repo", "key": "zipos-web", "attr":
+"repository_url"}`). A `{"$raw": …}` value may carry `"refs": {"name": {"$ref": …}}`,
+spliced in at `@name@`. Both are checked against what the export generates: a reference
+to nothing is an error in the `diagnostics` reply (and the `entity_update` reply's own
+`diagnostics`), naming the argument and the address. `null` on an argument the mapping
+sets is stored, and removes that argument (or nested block) from the generated block;
+`null` on anything else deletes the extra argument as before; `{"$restore": true}`
+deletes the override or removal so the mapping's own value returns (MAPPING_FORMAT.md
+§2.8).
 
 ## 3. Settings and persistence
 

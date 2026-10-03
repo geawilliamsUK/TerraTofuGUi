@@ -223,9 +223,14 @@ the entity's Owner / Description › the project-wide `settings.tags`.
 merged into the generated block after the mapping's own arguments (yours win). Nested
 blocks are objects or lists of objects, decided by the bundled provider schema
 (`ttg-schema`); `{"$ref": {"entity": …, "attr": …}}` becomes a traversal to another
-resource and `{"$raw": "…"}` a raw expression. Native provider resources (type id
-`native:<provider>:<tf type>`) are synthetic catalog entries whose single block takes
-every argument from `extra`; the catalog creates them on demand (`Catalog::ensure_native`).
+resource (`"block"` and, for a repeated block, `"key"` pick which one) and `{"$raw": "…"}`
+a raw expression (`"refs"` splices `$ref`s into it at `@name@`). A `null` value removes
+the argument the mapping sets, or the nested block. Native provider resources (type id
+`native:<provider>:<tf type>`) and data sources (`native:<provider>:data.<tf type>`, one
+`data` block) are synthetic catalog entries whose single block takes every argument from
+`extra`; the catalog creates them on demand (`Catalog::ensure_native`). Every `$ref` and
+every address in a `$raw` is checked against what the export generates and becomes a
+link in the graph (`ttg_codegen::refs`, §6.0); MAPPING_FORMAT.md §2.8 has the details.
 
 **Provider layers.** One diagram serves every provider. A node, container or edge may
 carry `providers`; a provider's *layer* is the project minus entities not tagged for it,
@@ -433,6 +438,17 @@ Three layers, all surfaced through the same `Diagnostic` list:
    (warning), and an AWS interface endpoint with private DNS whose security group admits
    nothing in its network (error: it answers for the service's name everywhere there).
    The last two use reachability's notion of membership.
+4. **References in extra arguments** (`ttg-codegen::refs`, `Code::Reference`). The export's
+   plan (`ttg-codegen::plan`: every block it generates and its address, the same one the
+   emitter uses) is built first; each `$ref` and each address hcl-rs finds in a `$raw`
+   (template strings and `for` expressions included) is looked up in it. What the export
+   generates becomes a *derived reference* from the entity holding the extra argument to
+   the entity generating the address: `expects_incoming` counts it as a link and the
+   canvas draws it as a dashed arrow (`refs::derived_references`, refreshed with the
+   diagnostics). What it does not generate — an address of an entity flagged external,
+   deleted or off the layer, a `local.*`, an undeclared `var.*`, a block key or row key
+   that does not exist — is an error naming the `$raw` and the address, so the export
+   stops before `validate` would.
 
 `diagnostics::run` answers for one target provider. `diagnostics::other_providers` adds
 the *other* providers' errors, each downgraded to a warning, tagged with the provider it
@@ -528,6 +544,18 @@ for schema reference default to the OpenTofu registry.
 
 `ttg-codegen::validate` looks for `terraform` / `tofu` on `PATH`. If found it runs
 `init -backend=false -input=false` then `validate` in the export directory and returns the output.
+The validate suite (`tests/validate_examples.rs`) also runs `fmt -check -recursive` with
+every installed binary on every export: the renderer writes what `fmt` writes
+(`files::align_attributes` follows hclwrite's alignment — consecutive single-line
+attributes form a group whatever their nesting, and anything else, a multi-line value's
+first line included, ends it), so an export never shows a formatting diff.
+
+**Lock file.** An export ships no `.terraform.lock.hcl`, and re-exporting never touches
+one. `init` writes a lock file with the checksums of the platform it ran on only, which a
+CI runner on another platform refuses, so the export README says to lock for every
+platform before committing, `<tool> providers lock -platform=linux_amd64
+-platform=linux_arm64 -platform=darwin_arm64 -platform=windows_amd64`
+(`validate::LOCK_PLATFORMS`), and `ttg export --lock` runs exactly that after exporting.
 If not found it returns `BinaryNotFound` and the GUI shows the exact command to run. The app has
 no runtime dependency on either binary. `init` can take minutes, so the GUI never runs this on the
 UI thread: `TtgApp::run_validate` starts one background thread for the exported providers and
@@ -710,6 +738,24 @@ files, `README.md` and `MANUAL_STEPS.md`; the files directly inside `k8s/` (`.ya
 Terraform files at every level of `bootstrap/` except hidden directories. `export` removes
 the stale ones and then any owned directory left empty (one still holding a state file
 stays); `diff::against_dir` lists the same stale files as removed.
+
+### 6.8 Addresses (`ttg-codegen::plan`)
+
+Before anything is resolved, `Plan::build` decides which blocks the export generates
+and what each is called: `<slug>` for an entity's `main` block, `<slug>_<key>` for its
+others, and for a repeated block (`for_each_field` / `for_each_relation`) one instance per
+surviving row named after the row's key — the target entity's name, the list entry, or
+the row's `for_each_key` / `name` item — so reordering a list does not replace the
+resources it made (MAPPING_FORMAT.md §2.6). The emitter, the diagnostics' reference
+checks, `$ref` by key, `entity_preview`'s addresses and the inspector's address list all
+read the same plan. Repeated blocks used to be named by row index; each instance whose
+name changed keeps its old name as `legacy`, and the export writes `moved.tf` with one
+`moved` block per rename so an existing state follows it (no-ops for a state that never
+had the old names). The file can be deleted once every state has been applied with it;
+`emit::LEGACY_INDEX_MOVES` turns it off one release after the rename. One step runs on
+the planned names after emission: `dedupe_grants` writes an identical grant only once
+(§6.7a), so `entity_blocks` and the files list the copy kept, and a dropped copy gets no
+`moved` block (its address is not declared; the kept one has its own).
 
 ## 7. GUI architecture (`ttg-app`)
 
