@@ -271,6 +271,11 @@ fn function(c: &mut Ctx) {
     c.note("the Consumption free grant (1M executions, 400,000 GB-s) and the function's storage account are not included");
 }
 
+/// The storage sizes an Azure PostgreSQL flexible server comes in, in GB.
+const PG_SIZES_GB: &[f64] = &[
+    32.0, 64.0, 128.0, 256.0, 512.0, 1024.0, 2048.0, 4096.0, 8192.0, 16384.0, 32767.0,
+];
+
 fn relational_database(c: &mut Ctx) {
     let mysql = c.text("engine").as_deref() == Some("mysql");
     let (block, table, storage_row) = if mysql {
@@ -291,7 +296,11 @@ fn relational_database(c: &mut Ctx) {
         sku.clone()
     };
     c.charge(label, table, &sku, copies * hours);
-    let gb = c.field("storage").as_ref().and_then(num).unwrap_or(32.0);
+    let mut gb = c.field("storage").as_ref().and_then(num).unwrap_or(32.0);
+    if !mysql {
+        // A PostgreSQL flexible server bills the fixed size the request is rounded up to.
+        gb = PG_SIZES_GB.iter().copied().find(|s| *s >= gb).unwrap_or(gb);
+    }
     c.charge(
         format!("{gb} GB storage{}", if ha { ", HA (x2)" } else { "" }),
         "flexible_storage",

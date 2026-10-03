@@ -588,3 +588,24 @@ resource = "aws_s3_bucket"
     ))
     .unwrap_or_else(|e| panic!("should load: {e}"));
 }
+
+// ------------------------------------------------------------------ cost
+
+/// Free-form storage is priced as entered, and as Azure PostgreSQL rounds it.
+#[test]
+fn the_cost_estimate_prices_free_form_storage() {
+    let p = example("managed-data.ttg.json");
+    let cat = Catalog::builtin();
+    let storage = |provider: &str| -> String {
+        let e = ttg_codegen::cost::estimate(&p, &cat, provider, None).unwrap();
+        let line = e.lines.iter().find(|l| l.entity == "db-app").unwrap();
+        line.charges
+            .iter()
+            .map(|c| c.item.clone())
+            .find(|i| i.contains("GB") && i.contains("storage"))
+            .unwrap_or_else(|| panic!("{provider}: no storage charge in {:?}", line.charges))
+    };
+    assert!(storage("aws").starts_with("20 GB gp3"), "{}", storage("aws"));
+    assert!(storage("azure").starts_with("32 GB"), "{}", storage("azure"));
+    assert!(storage("gcp").starts_with("20 GB"), "{}", storage("gcp"));
+}
