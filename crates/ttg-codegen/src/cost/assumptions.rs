@@ -112,6 +112,20 @@ pub const ASSUMPTIONS: &[Assumption] = &[
         &["container_app"],
     ),
     a(
+        "job_runs",
+        30.0,
+        "runs a month",
+        "Runs of each container job (a migration per release, a nightly batch)",
+        &["container_job"],
+    ),
+    a(
+        "job_run_minutes",
+        5.0,
+        "minutes",
+        "How long one run of a container job takes",
+        &["container_job"],
+    ),
+    a(
         "nat_data_gb",
         100.0,
         "GB a month",

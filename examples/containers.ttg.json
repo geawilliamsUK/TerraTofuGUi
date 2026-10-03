@@ -1,0 +1,1089 @@
+{
+  "schema_version": 1,
+  "name": "containers",
+  "settings": {
+    "tool": "opentofu",
+    "target_provider": "aws",
+    "provider_settings": {
+      "aws": {
+        "region": "eu-west-2"
+      },
+      "azure": {
+        "location": "uksouth"
+      },
+      "gcp": {
+        "region": "europe-west2",
+        "zone": "europe-west2-a"
+      }
+    },
+    "backend": null,
+    "state_encryption": false
+  },
+  "containers": {
+    "rg-shop": {
+      "id": "rg-shop",
+      "name": "shop",
+      "container_type": "resource_group",
+      "config": {},
+      "provider_config": {},
+      "position": {
+        "x": 40,
+        "y": 40
+      },
+      "size": {
+        "w": 2140,
+        "h": 1300
+      },
+      "parent": null,
+      "manual": false
+    },
+    "vnet-shop": {
+      "id": "vnet-shop",
+      "name": "core",
+      "container_type": "virtual_network",
+      "config": {
+        "cidr_block": "10.40.0.0/16"
+      },
+      "provider_config": {
+        "aws": {
+          "enable_dns_hostnames": true
+        }
+      },
+      "position": {
+        "x": 80,
+        "y": 100
+      },
+      "size": {
+        "w": 1460,
+        "h": 1000
+      },
+      "parent": "rg-shop",
+      "manual": false
+    },
+    "env-apps": {
+      "id": "env-apps",
+      "name": "apps",
+      "container_type": "container_environment",
+      "config": {
+        "container_insights": true
+      },
+      "provider_config": {},
+      "position": {
+        "x": 520,
+        "y": 420
+      },
+      "size": {
+        "w": 640,
+        "h": 420
+      },
+      "parent": "vnet-shop",
+      "manual": false
+    },
+    "kv-shop": {
+      "id": "kv-shop",
+      "name": "shop secrets",
+      "container_type": "key_vault",
+      "config": {},
+      "provider_config": {
+        "azure": {
+          "vault_name": "shop-kv-x7q2"
+        }
+      },
+      "position": {
+        "x": 1600,
+        "y": 100
+      },
+      "size": {
+        "w": 520,
+        "h": 260
+      },
+      "parent": "rg-shop",
+      "manual": false
+    },
+    "zone-shop": {
+      "id": "zone-shop",
+      "name": "shop zone",
+      "container_type": "dns_zone",
+      "config": {
+        "domain": "shop.example.com"
+      },
+      "provider_config": {},
+      "position": {
+        "x": 1600,
+        "y": 400
+      },
+      "size": {
+        "w": 260,
+        "h": 160
+      },
+      "parent": "rg-shop",
+      "manual": false
+    }
+  },
+  "nodes": {
+    "sub-pub-a": {
+      "id": "sub-pub-a",
+      "name": "public a",
+      "resource_type": "subnet",
+      "config": {
+        "cidr_block": "10.40.0.0/24"
+      },
+      "provider_config": {
+        "aws": {
+          "availability_zone": "eu-west-2a",
+          "map_public_ip": true
+        },
+        "azure": {
+          "delegation": "none"
+        }
+      },
+      "position": {
+        "x": 120,
+        "y": 160
+      },
+      "parent": "vnet-shop",
+      "manual": false
+    },
+    "sub-pub-b": {
+      "id": "sub-pub-b",
+      "name": "public b",
+      "resource_type": "subnet",
+      "config": {
+        "cidr_block": "10.40.1.0/24"
+      },
+      "provider_config": {
+        "aws": {
+          "availability_zone": "eu-west-2b",
+          "map_public_ip": true
+        },
+        "azure": {
+          "delegation": "none"
+        }
+      },
+      "position": {
+        "x": 120,
+        "y": 260
+      },
+      "parent": "vnet-shop",
+      "manual": false
+    },
+    "sub-app-a": {
+      "id": "sub-app-a",
+      "name": "apps a",
+      "resource_type": "subnet",
+      "config": {
+        "cidr_block": "10.40.2.0/23"
+      },
+      "provider_config": {
+        "aws": {
+          "availability_zone": "eu-west-2a"
+        },
+        "azure": {
+          "delegation": "app_environments"
+        }
+      },
+      "position": {
+        "x": 120,
+        "y": 400
+      },
+      "parent": "vnet-shop",
+      "manual": false
+    },
+    "sub-app-b": {
+      "id": "sub-app-b",
+      "name": "apps b",
+      "resource_type": "subnet",
+      "config": {
+        "cidr_block": "10.40.4.0/24"
+      },
+      "provider_config": {
+        "aws": {
+          "availability_zone": "eu-west-2b"
+        },
+        "azure": {
+          "delegation": "none"
+        }
+      },
+      "position": {
+        "x": 120,
+        "y": 500
+      },
+      "parent": "vnet-shop",
+      "manual": false
+    },
+    "sub-db-a": {
+      "id": "sub-db-a",
+      "name": "data a",
+      "resource_type": "subnet",
+      "config": {
+        "cidr_block": "10.40.10.0/24"
+      },
+      "provider_config": {
+        "aws": {
+          "availability_zone": "eu-west-2a"
+        },
+        "azure": {
+          "delegation": "postgres_flexible"
+        }
+      },
+      "position": {
+        "x": 120,
+        "y": 640
+      },
+      "parent": "vnet-shop",
+      "manual": false
+    },
+    "sub-db-b": {
+      "id": "sub-db-b",
+      "name": "data b",
+      "resource_type": "subnet",
+      "config": {
+        "cidr_block": "10.40.11.0/24"
+      },
+      "provider_config": {
+        "aws": {
+          "availability_zone": "eu-west-2b"
+        },
+        "azure": {
+          "delegation": "none"
+        }
+      },
+      "position": {
+        "x": 120,
+        "y": 740
+      },
+      "parent": "vnet-shop",
+      "manual": false
+    },
+    "igw-shop": {
+      "id": "igw-shop",
+      "name": "internet",
+      "resource_type": "internet_gateway",
+      "config": {},
+      "provider_config": {},
+      "position": {
+        "x": 360,
+        "y": 160
+      },
+      "parent": "vnet-shop",
+      "manual": false
+    },
+    "nat-shop": {
+      "id": "nat-shop",
+      "name": "egress nat",
+      "resource_type": "nat_gateway",
+      "config": {},
+      "provider_config": {},
+      "position": {
+        "x": 360,
+        "y": 260
+      },
+      "parent": "vnet-shop",
+      "manual": false
+    },
+    "rt-public": {
+      "id": "rt-public",
+      "name": "public routes",
+      "resource_type": "route_table",
+      "config": {},
+      "provider_config": {},
+      "position": {
+        "x": 360,
+        "y": 360
+      },
+      "parent": "vnet-shop",
+      "manual": false
+    },
+    "rt-private": {
+      "id": "rt-private",
+      "name": "private routes",
+      "resource_type": "route_table",
+      "config": {},
+      "provider_config": {},
+      "position": {
+        "x": 360,
+        "y": 460
+      },
+      "parent": "vnet-shop",
+      "manual": false
+    },
+    "sg-lb": {
+      "id": "sg-lb",
+      "name": "lb sg",
+      "resource_type": "security_group",
+      "config": {
+        "rules": [
+          {
+            "name": "https-in",
+            "direction": "ingress",
+            "protocol": "tcp",
+            "from_port": 443,
+            "to_port": 443,
+            "cidr": "0.0.0.0/0",
+            "source_group": "",
+            "description": "HTTPS from anywhere"
+          },
+          {
+            "name": "to-apps",
+            "direction": "egress",
+            "protocol": "tcp",
+            "from_port": 8080,
+            "to_port": 8080,
+            "cidr": "10.40.0.0/16",
+            "source_group": "",
+            "description": "to the web tasks"
+          }
+        ]
+      },
+      "provider_config": {},
+      "position": {
+        "x": 620,
+        "y": 160
+      },
+      "parent": "vnet-shop",
+      "manual": false
+    },
+    "sg-web": {
+      "id": "sg-web",
+      "name": "web sg",
+      "resource_type": "security_group",
+      "config": {
+        "rules": [
+          {
+            "name": "from-lb",
+            "direction": "ingress",
+            "protocol": "tcp",
+            "from_port": 8080,
+            "to_port": 8080,
+            "cidr": "",
+            "source_group": "sg-lb",
+            "description": "from the load balancer only"
+          },
+          {
+            "name": "all-out",
+            "direction": "egress",
+            "protocol": "all",
+            "from_port": 0,
+            "to_port": 0,
+            "cidr": "0.0.0.0/0",
+            "source_group": "",
+            "description": ""
+          }
+        ]
+      },
+      "provider_config": {},
+      "position": {
+        "x": 820,
+        "y": 160
+      },
+      "parent": "vnet-shop",
+      "manual": false
+    },
+    "sg-worker": {
+      "id": "sg-worker",
+      "name": "worker sg",
+      "resource_type": "security_group",
+      "config": {
+        "rules": [
+          {
+            "name": "all-out",
+            "direction": "egress",
+            "protocol": "all",
+            "from_port": 0,
+            "to_port": 0,
+            "cidr": "0.0.0.0/0",
+            "source_group": "",
+            "description": ""
+          }
+        ]
+      },
+      "provider_config": {},
+      "position": {
+        "x": 1020,
+        "y": 160
+      },
+      "parent": "vnet-shop",
+      "manual": false
+    },
+    "sg-db": {
+      "id": "sg-db",
+      "name": "db sg",
+      "resource_type": "security_group",
+      "config": {
+        "rules": [
+          {
+            "name": "pg-from-apps",
+            "direction": "ingress",
+            "protocol": "tcp",
+            "from_port": 5432,
+            "to_port": 5432,
+            "cidr": "",
+            "source_group": "sg-web",
+            "description": "PostgreSQL from web"
+          },
+          {
+            "name": "pg-from-worker",
+            "direction": "ingress",
+            "protocol": "tcp",
+            "from_port": 5432,
+            "to_port": 5432,
+            "cidr": "",
+            "source_group": "sg-worker",
+            "description": "PostgreSQL from the worker and the migration"
+          }
+        ]
+      },
+      "provider_config": {},
+      "position": {
+        "x": 1220,
+        "y": 160
+      },
+      "parent": "vnet-shop",
+      "manual": false
+    },
+    "lb-shop": {
+      "id": "lb-shop",
+      "name": "shop lb",
+      "resource_type": "load_balancer",
+      "config": {
+        "scheme": "internet_facing",
+        "protocol": "https",
+        "listener_port": 443,
+        "target_port": 8080,
+        "drop_invalid_header_fields": true,
+        "idle_timeout_seconds": 120
+      },
+      "provider_config": {},
+      "position": {
+        "x": 620,
+        "y": 300
+      },
+      "parent": "vnet-shop",
+      "manual": false
+    },
+    "cert-shop": {
+      "id": "cert-shop",
+      "name": "shop cert",
+      "resource_type": "tls_certificate",
+      "config": {
+        "domain": "app.shop.example.com"
+      },
+      "provider_config": {},
+      "position": {
+        "x": 1640,
+        "y": 160
+      },
+      "parent": "kv-shop",
+      "manual": false
+    },
+    "rec-app": {
+      "id": "rec-app",
+      "name": "app record",
+      "resource_type": "dns_record",
+      "config": {
+        "record_name": "app",
+        "record_type": "A",
+        "ttl": 300
+      },
+      "provider_config": {},
+      "position": {
+        "x": 1640,
+        "y": 460
+      },
+      "parent": "zone-shop",
+      "manual": false
+    },
+    "db-shop": {
+      "id": "db-shop",
+      "name": "shop db",
+      "resource_type": "relational_database",
+      "config": {
+        "engine": "postgres",
+        "size": "small",
+        "storage": "32",
+        "database_name": "shop",
+        "admin_username": "dbadmin",
+        "iam_authentication": true
+      },
+      "provider_config": {
+        "azure": {
+          "server_name": "shop-core-x7q2"
+        }
+      },
+      "position": {
+        "x": 1220,
+        "y": 700
+      },
+      "parent": "vnet-shop",
+      "manual": false
+    },
+    "reg-shop": {
+      "id": "reg-shop",
+      "name": "images",
+      "resource_type": "container_registry",
+      "config": {
+        "repositories": [
+          "shop-web",
+          "shop-worker",
+          "shop-migrate"
+        ],
+        "immutable_tags": true,
+        "scan_on_push": true,
+        "keep_last_images": 20
+      },
+      "provider_config": {
+        "azure": {
+          "registry_name": "shopimagesx7q2"
+        }
+      },
+      "position": {
+        "x": 1600,
+        "y": 620
+      },
+      "parent": "rg-shop",
+      "manual": false
+    },
+    "sec-app": {
+      "id": "sec-app",
+      "name": "app secret",
+      "resource_type": "secret",
+      "config": {
+        "generate_value": false
+      },
+      "provider_config": {},
+      "position": {
+        "x": 1840,
+        "y": 160
+      },
+      "parent": "kv-shop",
+      "manual": false,
+      "description": "One JSON document per environment: DATABASE_URL, SESSION_SECRET, PAYMENTS_KEY."
+    },
+    "obj-uploads": {
+      "id": "obj-uploads",
+      "name": "uploads",
+      "resource_type": "object_storage",
+      "config": {
+        "versioning": true,
+        "block_public_access": true
+      },
+      "provider_config": {
+        "aws": {
+          "bucket_name": "shop-uploads-x7q2"
+        },
+        "azure": {
+          "account_name": "shopuploadsx7q2",
+          "container_name": "uploads",
+          "replication": "LRS"
+        },
+        "gcp": {
+          "bucket_name": "shop-uploads-x7q2"
+        }
+      },
+      "position": {
+        "x": 1600,
+        "y": 740
+      },
+      "parent": "rg-shop",
+      "manual": false
+    },
+    "q-jobs": {
+      "id": "q-jobs",
+      "name": "jobs",
+      "resource_type": "event_queue",
+      "config": {
+        "visibility_timeout_seconds": 300
+      },
+      "provider_config": {
+        "azure": {
+          "namespace_name": "shop-bus-x7q2"
+        }
+      },
+      "position": {
+        "x": 1600,
+        "y": 860
+      },
+      "parent": "rg-shop",
+      "manual": false
+    },
+    "log-apps": {
+      "id": "log-apps",
+      "name": "app logs",
+      "resource_type": "log_group",
+      "config": {
+        "retention_days": "30"
+      },
+      "provider_config": {},
+      "position": {
+        "x": 1840,
+        "y": 620
+      },
+      "parent": "rg-shop",
+      "manual": false
+    },
+    "topic-alerts": {
+      "id": "topic-alerts",
+      "name": "alerts",
+      "resource_type": "topic",
+      "config": {},
+      "provider_config": {
+        "azure": {
+          "namespace_name": "shop-alerts-x7q2"
+        }
+      },
+      "position": {
+        "x": 1840,
+        "y": 740
+      },
+      "parent": "rg-shop",
+      "manual": false
+    },
+    "role-exec": {
+      "id": "role-exec",
+      "name": "exec role",
+      "resource_type": "iam_role",
+      "config": {
+        "trusted_service": "container",
+        "permissions": "none"
+      },
+      "provider_config": {},
+      "position": {
+        "x": 1840,
+        "y": 860
+      },
+      "parent": "rg-shop",
+      "manual": false,
+      "description": "Starts the tasks: pulls the images, reads the injected secrets, writes the logs."
+    },
+    "role-web": {
+      "id": "role-web",
+      "name": "web role",
+      "resource_type": "iam_role",
+      "config": {
+        "trusted_service": "container",
+        "permissions": "none"
+      },
+      "provider_config": {},
+      "position": {
+        "x": 1840,
+        "y": 980
+      },
+      "parent": "rg-shop",
+      "manual": false
+    },
+    "role-worker": {
+      "id": "role-worker",
+      "name": "worker role",
+      "resource_type": "iam_role",
+      "config": {
+        "trusted_service": "container",
+        "permissions": "none"
+      },
+      "provider_config": {},
+      "position": {
+        "x": 1600,
+        "y": 980
+      },
+      "parent": "rg-shop",
+      "manual": false
+    },
+    "app-web": {
+      "id": "app-web",
+      "name": "web",
+      "resource_type": "container_app",
+      "config": {
+        "size": "medium",
+        "cpu_architecture": "arm64",
+        "port": 8080,
+        "replicas": 2,
+        "public": false,
+        "repository": "shop-web",
+        "image_tag": "1.4.2",
+        "env": [
+          {
+            "name": "WORKER_MODE",
+            "value": "external"
+          },
+          {
+            "name": "PORT",
+            "value": "8080"
+          }
+        ],
+        "secrets": [
+          {
+            "name": "DATABASE_URL",
+            "key": "DATABASE_URL"
+          },
+          {
+            "name": "SESSION_SECRET",
+            "key": "SESSION_SECRET"
+          },
+          {
+            "name": "PAYMENTS_KEY",
+            "secret": "sec-app",
+            "key": "PAYMENTS_KEY"
+          }
+        ],
+        "health_check_path": "/api/health",
+        "health_check_interval": 30,
+        "health_check_timeout": 5,
+        "health_check_retries": 3,
+        "health_check_start_period": 30,
+        "stop_timeout": 30,
+        "delete_objects": true,
+        "db_user": "web"
+      },
+      "provider_config": {},
+      "position": {
+        "x": 560,
+        "y": 480
+      },
+      "parent": "env-apps",
+      "manual": false
+    },
+    "app-worker": {
+      "id": "app-worker",
+      "name": "worker",
+      "resource_type": "container_app",
+      "config": {
+        "size": "medium",
+        "cpu_architecture": "arm64",
+        "port": 8081,
+        "replicas": 1,
+        "background_worker": true,
+        "repository": "shop-worker",
+        "env": [
+          {
+            "name": "WORKER_HEALTH_PORT",
+            "value": "8081"
+          },
+          {
+            "name": "WORKER_JOB_CONCURRENCY",
+            "value": "2"
+          }
+        ],
+        "secrets": [
+          {
+            "name": "DATABASE_URL",
+            "key": "DATABASE_URL"
+          }
+        ],
+        "health_check_path": "/healthz",
+        "health_check_command": "node -e \"fetch('http://127.0.0.1:8081/healthz').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))\"",
+        "health_check_interval": 30,
+        "health_check_timeout": 5,
+        "health_check_retries": 3,
+        "health_check_start_period": 30,
+        "stop_timeout": 120
+      },
+      "provider_config": {},
+      "position": {
+        "x": 800,
+        "y": 480
+      },
+      "parent": "env-apps",
+      "manual": false
+    },
+    "job-migrate": {
+      "id": "job-migrate",
+      "name": "migrate",
+      "resource_type": "container_job",
+      "config": {
+        "size": "small",
+        "cpu_architecture": "arm64",
+        "repository": "shop-migrate",
+        "timeout_seconds": 900,
+        "retries": 0,
+        "secrets": [
+          {
+            "name": "DATABASE_URL",
+            "key": "DATABASE_URL"
+          }
+        ]
+      },
+      "provider_config": {},
+      "position": {
+        "x": 1000,
+        "y": 480
+      },
+      "parent": "env-apps",
+      "manual": false
+    },
+    "alm-worker": {
+      "id": "alm-worker",
+      "name": "worker cpu",
+      "resource_type": "alarm",
+      "config": {
+        "metric": "cpu",
+        "comparison": "greater_than",
+        "threshold": 80,
+        "period_seconds": "300",
+        "evaluation_periods": 2
+      },
+      "provider_config": {},
+      "position": {
+        "x": 1600,
+        "y": 1100
+      },
+      "parent": "rg-shop",
+      "manual": false
+    }
+  },
+  "edges": [
+    {
+      "source": "nat-shop",
+      "target": "sub-pub-a",
+      "relation": "network_membership"
+    },
+    {
+      "source": "rt-public",
+      "target": "igw-shop",
+      "relation": "attribute_reference"
+    },
+    {
+      "source": "rt-public",
+      "target": "sub-pub-a",
+      "relation": "attachment"
+    },
+    {
+      "source": "rt-public",
+      "target": "sub-pub-b",
+      "relation": "attachment"
+    },
+    {
+      "source": "rt-private",
+      "target": "nat-shop",
+      "relation": "attribute_reference"
+    },
+    {
+      "source": "rt-private",
+      "target": "sub-app-a",
+      "relation": "attachment"
+    },
+    {
+      "source": "rt-private",
+      "target": "sub-app-b",
+      "relation": "attachment"
+    },
+    {
+      "source": "rt-private",
+      "target": "sub-db-a",
+      "relation": "attachment"
+    },
+    {
+      "source": "rt-private",
+      "target": "sub-db-b",
+      "relation": "attachment"
+    },
+    {
+      "source": "lb-shop",
+      "target": "sub-pub-a",
+      "relation": "network_membership"
+    },
+    {
+      "source": "lb-shop",
+      "target": "sub-pub-b",
+      "relation": "network_membership"
+    },
+    {
+      "source": "lb-shop",
+      "target": "sg-lb",
+      "relation": "attribute_reference"
+    },
+    {
+      "source": "lb-shop",
+      "target": "cert-shop",
+      "relation": "attribute_reference"
+    },
+    {
+      "source": "lb-shop",
+      "target": "app-web",
+      "relation": "attachment"
+    },
+    {
+      "source": "cert-shop",
+      "target": "zone-shop",
+      "relation": "attribute_reference"
+    },
+    {
+      "source": "rec-app",
+      "target": "lb-shop",
+      "relation": "attribute_reference"
+    },
+    {
+      "source": "db-shop",
+      "target": "sub-db-a",
+      "relation": "network_membership"
+    },
+    {
+      "source": "db-shop",
+      "target": "sub-db-b",
+      "relation": "network_membership"
+    },
+    {
+      "source": "db-shop",
+      "target": "sg-db",
+      "relation": "attribute_reference"
+    },
+    {
+      "source": "env-apps",
+      "target": "sub-app-a",
+      "relation": "network_membership"
+    },
+    {
+      "source": "env-apps",
+      "target": "log-apps",
+      "relation": "logs_to"
+    },
+    {
+      "source": "app-web",
+      "target": "sub-app-a",
+      "relation": "network_membership"
+    },
+    {
+      "source": "app-web",
+      "target": "sub-app-b",
+      "relation": "network_membership"
+    },
+    {
+      "source": "app-web",
+      "target": "reg-shop",
+      "relation": "attachment"
+    },
+    {
+      "source": "app-web",
+      "target": "role-exec",
+      "relation": "attribute_reference"
+    },
+    {
+      "source": "app-web",
+      "target": "sec-app",
+      "relation": "reads"
+    },
+    {
+      "source": "app-web",
+      "target": "log-apps",
+      "relation": "logs_to"
+    },
+    {
+      "source": "app-worker",
+      "target": "sub-app-a",
+      "relation": "network_membership"
+    },
+    {
+      "source": "app-worker",
+      "target": "sub-app-b",
+      "relation": "network_membership"
+    },
+    {
+      "source": "app-worker",
+      "target": "reg-shop",
+      "relation": "attachment"
+    },
+    {
+      "source": "app-worker",
+      "target": "role-exec",
+      "relation": "attribute_reference"
+    },
+    {
+      "source": "app-worker",
+      "target": "sec-app",
+      "relation": "reads"
+    },
+    {
+      "source": "app-worker",
+      "target": "log-apps",
+      "relation": "logs_to"
+    },
+    {
+      "source": "job-migrate",
+      "target": "sub-app-a",
+      "relation": "network_membership"
+    },
+    {
+      "source": "job-migrate",
+      "target": "sub-app-b",
+      "relation": "network_membership"
+    },
+    {
+      "source": "job-migrate",
+      "target": "reg-shop",
+      "relation": "attachment"
+    },
+    {
+      "source": "job-migrate",
+      "target": "role-exec",
+      "relation": "attribute_reference"
+    },
+    {
+      "source": "job-migrate",
+      "target": "sec-app",
+      "relation": "reads"
+    },
+    {
+      "source": "job-migrate",
+      "target": "log-apps",
+      "relation": "logs_to"
+    },
+    {
+      "source": "app-web",
+      "target": "role-web",
+      "relation": "iam_binding"
+    },
+    {
+      "source": "app-web",
+      "target": "sg-web",
+      "relation": "attribute_reference"
+    },
+    {
+      "source": "app-web",
+      "target": "obj-uploads",
+      "relation": "attribute_reference"
+    },
+    {
+      "source": "app-web",
+      "target": "db-shop",
+      "relation": "attribute_reference"
+    },
+    {
+      "source": "app-web",
+      "target": "q-jobs",
+      "relation": "sends_to"
+    },
+    {
+      "source": "app-worker",
+      "target": "role-worker",
+      "relation": "iam_binding"
+    },
+    {
+      "source": "app-worker",
+      "target": "sg-worker",
+      "relation": "attribute_reference"
+    },
+    {
+      "source": "app-worker",
+      "target": "q-jobs",
+      "relation": "attribute_reference"
+    },
+    {
+      "source": "app-worker",
+      "target": "obj-uploads",
+      "relation": "reads"
+    },
+    {
+      "source": "job-migrate",
+      "target": "sg-worker",
+      "relation": "attribute_reference"
+    },
+    {
+      "source": "alm-worker",
+      "target": "app-worker",
+      "relation": "attribute_reference"
+    },
+    {
+      "source": "alm-worker",
+      "target": "topic-alerts",
+      "relation": "sends_to"
+    }
+  ]
+}

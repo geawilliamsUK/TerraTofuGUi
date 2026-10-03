@@ -1,18 +1,21 @@
 # Abstract type: Load Balancer  (schema_version 2)
 #
-# A layer-7 (http / https) or layer-4 (tcp) load balancer in front of compute instances.
+# A layer-7 (http / https) or layer-4 (tcp) load balancer in front of compute instances
+# or container apps.
 # AWS: aws_lb (application or network) + target group + listener + one
 #      aws_lb_target_group_attachment per 'Attached to' instance. https adds the
 #      certificate and TLS policy to the listener, and optionally a port-80 listener that
 #      redirects. Access logs add an access_logs block plus the bucket policy the ELB
-#      service needs.
+#      service needs. A Container App target makes the target group `ip`, health-checked
+#      on the app's path; the app's ECS service registers its tasks itself.
 # Azure: azurerm_lb (Standard) + public IP (internet-facing) or subnet frontend (internal)
 #      + backend pool + probe + rule + one NIC/backend-pool association per instance.
 #      The association targets the instance's `nic` block (`{ target = "id", block = "nic" }`).
 #      azurerm_lb is layer 4, so https is passed through to the backends untouched.
 # GCP: a regional passthrough Network Load Balancer for http / tcp; https switches to a
 #      global external Application Load Balancer (health check, backend service, URL map,
-#      target HTTPS proxy and global forwarding rule).
+#      target HTTPS proxy and global forwarding rule). A Container App behind it is a
+#      Cloud Run service, reached through a serverless network endpoint group.
 
 schema_version = 2
 
@@ -20,7 +23,7 @@ schema_version = 2
 type = "load_balancer"
 category = "load_balancer"
 display_name = "Load Balancer"
-description = "Distributes traffic to compute instances. Link 'Subnets' (AWS needs two availability zones) and 'Forwards to' the instances."
+description = "Distributes traffic to compute instances or container apps. Link 'Subnets' (AWS needs two availability zones) and 'Forwards to' the targets."
 kind = "node"
 allowed_parents = ["virtual_network", "resource_group"]
 icon = "LB"
@@ -116,7 +119,7 @@ cardinality = "optional"
 [[relations]]
 kind = "attachment"
 label = "Forwards to"
-targets = ["compute_instance", "kubernetes_cluster"]
+targets = ["compute_instance", "kubernetes_cluster", "container_app"]
 cardinality = "many"
 
 # ---------------------------------------------------------------- AWS
@@ -180,13 +183,25 @@ resource = "aws_lb_target_group"
 
 [providers.aws.blocks.args]
 name        = { template = "{name}-tg", transform = "kebab" }
-port        = { field = "target_port" }
+# A container app is reached on its own container port.
+port        = { if = { relation = "attachment", target_type = "container_app" }, then = { relation = "attachment", target_type = "container_app", field = "port" }, else = { field = "target_port" } }
 # TLS terminates at the listener, so an https load balancer still talks HTTP to the targets.
 protocol    = { map = "protocol", table = { http = "HTTP", https = "HTTP", tcp = "TCP" } }
 vpc_id      = { relation = "network_membership", attr = "vpc_id" }
-# Pods are registered by their IP, not as EC2 instances, so a cluster target changes the
-# whole target group; the registration itself is the controller's job (manual step).
-target_type = { if = { relation = "attachment", target_type = "kubernetes_cluster" }, then = { value = "ip" }, else = { value = "instance" } }
+# Pods and Fargate tasks are registered by their IP, not as EC2 instances, so a cluster or
+# container-app target changes the whole target group. Pods are registered by the
+# controller (manual step); a container app's ECS service registers its own tasks.
+target_type = { if = { any = [ { relation = "attachment", target_type = "kubernetes_cluster" }, { relation = "attachment", target_type = "container_app" } ] }, then = { value = "ip" }, else = { value = "instance" } }
+# A draining task gets as long to finish its requests as it has to stop.
+deregistration_delay = { if = { relation = "attachment", target_type = "container_app" }, then = { relation = "attachment", target_type = "container_app", field = "stop_timeout" } }
+
+[[providers.aws.blocks.nested]]
+block = "health_check"
+when = { relation = "attachment", target_type = "container_app", target_field = "health_check_path" }
+
+[providers.aws.blocks.nested.args]
+path     = { relation = "attachment", target_type = "container_app", field = "health_check_path" }
+interval = { relation = "attachment", target_type = "container_app", field = "health_check_interval" }
 
 [[providers.aws.blocks]]
 key = "listener"
@@ -438,6 +453,17 @@ instance targets.
 """
 
 [[providers.azure.manual_steps]]
+title = "Container Apps have a load balancer of their own"
+when = { relation = "attachment", target_type = "container_app" }
+body = """
+Nothing is attached for the linked Container App: an app's **ingress** is its own managed
+load balancer, with TLS and a host name, so a layer-4 `azurerm_lb` cannot sit in front of
+it. The app's ingress is made external when an internet-facing load balancer forwards to
+it, which is the entry point the diagram asks for. For a WAF or a custom domain in front,
+put Front Door (or an Application Gateway) before the app's FQDN.
+"""
+
+[[providers.azure.manual_steps]]
 title = "TLS is not terminated on an Azure Load Balancer"
 when = { field = "protocol", equals = "https" }
 body = """
@@ -525,10 +551,12 @@ network               = { if = { field = "scheme", equals = "internal" }, then =
 subnetwork            = { if = { field = "scheme", equals = "internal" }, then = { relation = "network_membership", attr = "id" } }
 
 # ---- https: global external Application Load Balancer
+# Serverless backends (Cloud Run) are not health-checked by the load balancer, so the
+# health check only exists for instance groups.
 [[providers.gcp.blocks]]
 key = "ghc"
 resource = "google_compute_health_check"
-when = { field = "protocol", equals = "https" }
+when = { all = [ { field = "protocol", equals = "https" }, { relation = "attachment", target_type = "container_app", absent = true } ] }
 
 [providers.gcp.blocks.args]
 name = { template = "{name}-hc", transform = "kebab" }
@@ -539,6 +567,25 @@ block = "http_health_check"
 [providers.gcp.blocks.nested.args]
 port = { field = "target_port" }
 
+# A Cloud Run service joins the load balancer through a serverless network endpoint group.
+[[providers.gcp.blocks]]
+key = "neg"
+resource = "google_compute_region_network_endpoint_group"
+when = { all = [ { field = "protocol", equals = "https" }, { relation = "attachment", target_type = "container_app" } ] }
+
+[providers.gcp.blocks.args]
+name                  = { template = "{name}-neg", transform = "kebab" }
+region                = { var = "region" }
+network_endpoint_type = { value = "SERVERLESS" }
+
+[[providers.gcp.blocks.nested]]
+block = "cloud_run"
+
+[providers.gcp.blocks.nested.args]
+service = { relation = "attachment", target_type = "container_app", attr = "name" }
+
+# A serverless backend takes no port name, health check or timeout: Cloud Run answers for
+# all three itself.
 [[providers.gcp.blocks]]
 key = "gbs"
 resource = "google_compute_backend_service"
@@ -547,10 +594,11 @@ when = { field = "protocol", equals = "https" }
 [providers.gcp.blocks.args]
 name                  = { field = "name", transform = "kebab" }
 protocol              = { value = "HTTP" }
-port_name             = { value = "app" }
+port_name             = { if = { relation = "attachment", target_type = "container_app", absent = true }, then = { value = "app" } }
 load_balancing_scheme = { value = "EXTERNAL_MANAGED" }
-# A CDN in front sets how long the edge waits for the backends.
-timeout_sec           = { relation = "attribute_reference", incoming = true, target_type = "cdn", field = "origin_read_timeout", fallback = { field = "idle_timeout_seconds", fallback = { value = 30 } } }
+# A serverless NEG backend (a container app) takes no timeout; otherwise a CDN in front
+# sets how long the edge waits for the backends.
+timeout_sec           = { if = { relation = "attachment", target_type = "container_app", absent = true }, then = { relation = "attribute_reference", incoming = true, target_type = "cdn", field = "origin_read_timeout", fallback = { field = "idle_timeout_seconds", fallback = { value = 30 } } } }
 health_checks         = { self_block = "ghc", attr = "id", wrap = "list" }
 # Cloud CDN is a property of the backend service: a CDN linked to this load balancer
 # turns it on here rather than creating anything of its own.
@@ -585,6 +633,13 @@ block = "cache_key_policy"
 include_host         = { value = true }
 include_protocol     = { value = true }
 include_query_string = { value = true }
+
+[[providers.gcp.blocks.nested]]
+block = "backend"
+when = { relation = "attachment", target_type = "container_app" }
+
+[providers.gcp.blocks.nested.args]
+group = { self_block = "neg", attr = "id" }
 
 [[providers.gcp.blocks]]
 key = "urlmap"
@@ -649,6 +704,16 @@ message = "\"{name}\" listens on https but has no Certificate link; a target HTT
 severity = "error"
 when = { all = [ { field = "protocol", equals = "https" }, { field = "scheme", equals = "internal" } ] }
 message = "\"{name}\": the global HTTPS load balancer this mapping builds is external only; set the scheme to internet_facing or use tcp"
+
+[[providers.gcp.checks]]
+severity = "error"
+when = { all = [ { relation = "attachment", target_type = "container_app" }, { field = "protocol", not_equals = "https" } ] }
+message = "\"{name}\" forwards to a Container App, which on Google Cloud is a Cloud Run service that only the https (Application) load balancer reaches, through a serverless network endpoint group; set the protocol to https"
+
+[[providers.gcp.checks]]
+severity = "error"
+when = { all = [ { relation = "attachment", target_type = "container_app" }, { any = [ { relation = "attachment", target_type = "compute_instance" }, { relation = "attachment", target_type = "container_app", min_count = 2 } ] } ] }
+message = "\"{name}\" forwards to a Container App and to other targets, but a backend service cannot mix a serverless network endpoint group with anything else and this mapping builds one backend service; use one load balancer per app"
 
 [[providers.gcp.checks]]
 when = { all = [ { field = "redirect_http" }, { field = "protocol", equals = "https" } ] }

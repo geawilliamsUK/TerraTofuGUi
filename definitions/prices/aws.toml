@@ -36,6 +36,7 @@ budget = "AWS Budgets: monitoring budgets cost nothing (the first two action-ena
 tls_certificate = "Public ACM certificates cost nothing."
 dns_record = "Records are part of the hosted zone; queries are priced on the zone's line."
 network_peering = "A peering connection costs nothing to create; traffic across it is billed per GB and is not estimated."
+container_environment = "An ECS cluster costs nothing; its services and tasks are priced on their own lines. Container Insights metrics are billed as CloudWatch metrics and are not estimated."
 
 [not_estimated]
 
@@ -92,13 +93,15 @@ cluster = { "*" = 0.10 }
 
 [tables.fargate]
 unit = "hour"
-description = "ECS on Fargate, Linux/x86, per vCPU-hour and per GB-hour"
+description = "ECS on Fargate, Linux, per vCPU-hour and per GB-hour: x86 (vcpu, gb) and Graviton / arm64 (vcpu_arm, gb_arm)"
 source = "AWS Fargate pricing (aws.amazon.com/fargate/pricing)"
-checked = "2026-09-29: Price List Bulk API (pricing.us-east-1.amazonaws.com) region offers, AmazonECS Fargate-vCPU-Hours:perCPU and Fargate-GB-Hours, all three regions"
+checked = "2026-09-29: Price List Bulk API (pricing.us-east-1.amazonaws.com) region offers, AmazonECS Fargate-vCPU-Hours:perCPU and Fargate-GB-Hours, all three regions. 2026-10-02: the arm64 rows against the same offers (publication 2026-09-11), Fargate-ARM-vCPU-Hours:perCPU and Fargate-ARM-GB-Hours"
 
 [tables.fargate.rows]
 vcpu = { unit = "vCPU-hour", us-east-1 = 0.04048, eu-west-1 = 0.04048, eu-west-2 = 0.04656 }
 gb   = { unit = "GB-hour", us-east-1 = 0.004445, eu-west-1 = 0.004445, eu-west-2 = 0.00511 }
+vcpu_arm = { unit = "vCPU-hour", us-east-1 = 0.03238, eu-west-1 = 0.03238, eu-west-2 = 0.03725 }
+gb_arm   = { unit = "GB-hour", us-east-1 = 0.00356, eu-west-1 = 0.00356, eu-west-2 = 0.00409 }
 
 [tables.lambda]
 unit = "GB-second"

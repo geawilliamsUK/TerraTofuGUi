@@ -12,6 +12,7 @@ pub(crate) fn model(type_id: &str) -> Model {
         "kubernetes_cluster" => kubernetes_cluster,
         "kubernetes_node_pool" => kubernetes_node_pool,
         "container_app" => container_app,
+        "container_job" => container_job,
         "function" => function,
         "relational_database" => relational_database,
         "cache" => cache,
@@ -199,13 +200,46 @@ fn container_app(c: &mut Ctx) {
         "memory",
         mem * seconds,
     );
-    c.charge(
-        format!("{} requests", fmt(req)),
-        "container_apps",
-        "requests",
-        req / 1e6,
-    );
+    // A background worker has no ingress, so nothing is billed per request.
+    if !c.flag("background_worker") {
+        c.charge(
+            format!("{} requests", fmt(req)),
+            "container_apps",
+            "requests",
+            req / 1e6,
+        );
+    }
     c.note("the monthly free grant (180,000 vCPU-s, 360,000 GiB-s, 2M requests) is not deducted; idle replicas bill at a lower rate than assumed here");
+}
+
+/// A Container Apps job bills the vCPU and memory seconds of its runs.
+fn container_job(c: &mut Ctx) {
+    let cpu = c
+        .arg("main", "template.container.cpu")
+        .as_ref()
+        .and_then(num)
+        .unwrap_or(0.25);
+    let mem = c
+        .arg("main", "template.container.memory")
+        .as_ref()
+        .and_then(gib)
+        .unwrap_or(0.5);
+    let runs = c.a("job_runs");
+    let minutes = c.a("job_run_minutes");
+    let seconds = runs * minutes * 60.0;
+    c.charge(
+        format!("{} run(s) x {minutes} min x {cpu} vCPU", fmt(runs)),
+        "container_apps",
+        "vcpu",
+        cpu * seconds,
+    );
+    c.charge(
+        format!("{} run(s) x {minutes} min x {mem} GiB", fmt(runs)),
+        "container_apps",
+        "memory",
+        mem * seconds,
+    );
+    c.note("the monthly free grant (180,000 vCPU-s, 360,000 GiB-s) is not deducted");
 }
 
 fn function(c: &mut Ctx) {

@@ -12,6 +12,7 @@ pub(crate) fn model(type_id: &str) -> Model {
         "kubernetes_cluster" => kubernetes_cluster,
         "kubernetes_node_pool" => kubernetes_node_pool,
         "container_app" => container_app,
+        "container_job" => container_job,
         "function" => function,
         "relational_database" => relational_database,
         "cache" => cache,
@@ -213,6 +214,38 @@ fn container_app(c: &mut Ctx) {
         mem * seconds,
     );
     c.note("instance-based billing (the instances are kept running): requests are not charged separately");
+}
+
+/// A Cloud Run job bills the vCPU and memory seconds of its tasks, at the
+/// instance-based rates.
+fn container_job(c: &mut Ctx) {
+    let path = "template.template.containers.resources.limits";
+    let cpu = c
+        .arg("main", &format!("{path}.cpu"))
+        .as_ref()
+        .and_then(num)
+        .unwrap_or(1.0);
+    let mem = c
+        .arg("main", &format!("{path}.memory"))
+        .as_ref()
+        .and_then(gib)
+        .unwrap_or(0.5);
+    let runs = c.a("job_runs");
+    let minutes = c.a("job_run_minutes");
+    let seconds = runs * minutes * 60.0;
+    c.charge(
+        format!("{} run(s) x {minutes} min x {cpu} vCPU", fmt(runs)),
+        "cloud_run",
+        "vcpu",
+        cpu * seconds,
+    );
+    c.charge(
+        format!("{} run(s) x {minutes} min x {mem} GiB", fmt(runs)),
+        "cloud_run",
+        "memory",
+        mem * seconds,
+    );
+    c.note("the monthly free tier (180,000 vCPU-s, 360,000 GiB-s) is not deducted");
 }
 
 fn function(c: &mut Ctx) {

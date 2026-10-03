@@ -1,44 +1,35 @@
-# Abstract type: Container App  (schema_version 2)
+# Abstract type: Container Job  (schema_version 2)
 #
-# A long-running container from an image, without servers or a cluster to manage.
-#   AWS:   ECS on Fargate — aws_ecs_task_definition + aws_ecs_service, in the enclosing
-#          Container Environment's cluster (or an aws_ecs_cluster of its own outside one).
-#   Azure: azurerm_container_app in the enclosing environment (or its own
-#          azurerm_container_app_environment outside one).
-#   GCP:   a Cloud Run (v2) service.
+# A container that runs to completion when something starts it — a database migration
+# before a release, a nightly batch — with the same configuration, roles and environment
+# as a Container App, and nothing kept running.
+#   AWS:   an aws_ecs_task_definition only (no service): CI starts it with
+#          `aws ecs run-task`, and the `<job>_run` output holds everything that needs.
+#   Azure: an azurerm_container_app_job with a manual trigger.
+#   GCP:   a google_cloud_run_v2_job.
 #
-# The app's configuration travels with it: environment variables, secrets injected as
-# environment variables, the health check, the stop timeout and the image (from a linked
-# Container Registry) are written in each provider's own shape.
-#
-# Roles: 'Task role' is what the code runs as; 'Execution role' is what the platform
-# uses to start it — pull the image, read the injected secrets, write the logs. With
-# only a task role linked it does both jobs, as it always has. The links to queues,
-# topics, buckets, secrets and databases become a least-privilege policy on the task
-# role, the same statements a Kubernetes Workload gets. As with the workload, 'Uses' is
-# read and write and 'Reads' is read-only.
-#
-# A 'background worker' has no ingress: no port mapping, no load balancer, and on
-# Google Cloud a CPU that is always allocated.
+# The links mean what they mean on a Container App: 'Task role' is what the code runs
+# as (optional — a migration that only talks to its database needs none), 'Execution
+# role' is what starts it, and 'Uses' / 'Reads' / 'Sends to' become a least-privilege
+# policy on the task role.
 
 schema_version = 2
 
 [resource]
-type = "container_app"
+type = "container_job"
 category = "container"
-display_name = "Container App"
-description = "A long-running container (ECS Fargate / Azure Container Apps / Cloud Run). Draw it inside a Container Environment, link its task role, subnets (AWS), image registry, secrets and the resources it uses."
+display_name = "Container Job"
+description = "A container run to completion on demand (ECS task / Container Apps job / Cloud Run job): migrations, batches. Draw it inside a Container Environment and link its roles, image registry and secrets."
 kind = "node"
 allowed_parents = ["resource_group", "virtual_network", "container_environment"]
-icon = "APP"
+icon = "JOB"
 
 [[fields]]
 name = "image"
 label = "Image"
 type = "string"
-default = "public.ecr.aws/nginx/nginx:latest"
 required_unless_relation = "attachment"
-description = "A full image reference, used when no Container Registry is linked ('Runs image from'). Private registries need pull rights for the execution role (ECR) or identity (AcrPull on Azure)."
+description = "A full image reference, used when no Container Registry is linked ('Runs image from')."
 
 [[fields]]
 name = "repository"
@@ -54,7 +45,7 @@ label = "Image tag"
 type = "string"
 pattern = "^[A-Za-z0-9_][A-Za-z0-9_.-]{0,127}$"
 pattern_hint = "a container image tag: letters, digits, '_', '.' and '-', up to 128 characters"
-description = "The tag to run from the linked registry. Unset, it is an input variable (<app>_image_tag), so a pipeline can pass the tag it just pushed."
+description = "The tag to run from the linked registry. Unset, it is an input variable (<job>_image_tag)."
 
 [[fields]]
 name = "size"
@@ -71,35 +62,21 @@ label = "CPU architecture"
 type = "enum"
 options = ["x86_64", "arm64"]
 default = "x86_64"
-description = "arm64 runs on AWS Graviton (about 20% cheaper on Fargate); build the image for linux/arm64. Azure Container Apps and Cloud Run run linux/amd64 only."
+description = "arm64 runs on AWS Graviton; build the image for linux/arm64. Azure Container Apps and Cloud Run run linux/amd64 only."
 
 [[fields]]
-name = "port"
-label = "Container port"
+name = "timeout_seconds"
+label = "Timeout (s)"
 type = "int"
-default = 80
-description = "The port the container listens on: the load balancer's target, the ingress target port, and where an HTTP health check is sent."
+default = 1800
+description = "A run that takes longer is stopped (Azure: replica timeout; Cloud Run: task timeout). ECS has no limit of its own: the caller has to stop a stuck task."
 
 [[fields]]
-name = "replicas"
-label = "Replicas"
+name = "retries"
+label = "Retries"
 type = "int"
-required = true
-default = 1
-
-[[fields]]
-name = "public"
-label = "Public ingress"
-type = "bool"
-default = false
-description = "Reachable from the internet (Azure: external ingress; Cloud Run: all traffic and public invocation; AWS: a public IP on the tasks). Prefer a load balancer forwarding to the app for production."
-
-[[fields]]
-name = "background_worker"
-label = "Background worker"
-type = "bool"
-default = false
-description = "No ingress at all: no port mapping, no load balancer, nothing calls it. Google Cloud keeps its CPU allocated between requests (there are none)."
+default = 0
+description = "How often a failed run is retried (Azure, Google Cloud). ECS retries nothing by itself. Keep 0 for anything that must not run twice."
 
 [[fields]]
 name = "env"
@@ -148,56 +125,11 @@ type = "string"
 description = "AWS: read this key of a JSON secret (valueFrom <arn>:<key>::). Empty reads the whole value. Key Vault and Secret Manager secrets hold one value each, so there the whole secret is read."
 
 [[fields]]
-name = "health_check_path"
-label = "Health check path"
-type = "string"
-pattern = "^/"
-pattern_hint = "an HTTP path starting with '/'"
-description = "HTTP GET on the container port: the load balancer's health check (AWS target group, Google NEG backends have none) and the liveness probe on Azure and Google Cloud."
-
-[[fields]]
-name = "health_check_command"
-label = "Health check command"
-type = "string"
-description = "A shell command run inside the container (AWS ECS healthCheck, CMD-SHELL); exit 0 means healthy. Azure and Google Cloud probe over HTTP only — set the path too."
-
-[[fields]]
-name = "health_check_interval"
-label = "Health check interval (s)"
-type = "int"
-default = 30
-
-[[fields]]
-name = "health_check_timeout"
-label = "Health check timeout (s)"
-type = "int"
-default = 5
-
-[[fields]]
-name = "health_check_retries"
-label = "Health check retries"
-type = "int"
-default = 3
-description = "Consecutive failures before the container is restarted."
-
-[[fields]]
-name = "health_check_start_period"
-label = "Health check start period (s)"
-type = "int"
-description = "Grace after start before failures count (AWS startPeriod, at most 300; Azure initial delay, at most 60)."
-
-[[fields]]
-name = "stop_timeout"
-label = "Stop timeout (s)"
-type = "int"
-description = "How long the container has after SIGTERM to finish before it is killed (Fargate: at most 120; Azure: the termination grace period). Also the load balancer's deregistration delay. Cloud Run's is fixed at 10 seconds."
-
-[[fields]]
 name = "delete_objects"
 label = "May delete objects"
 type = "bool"
 default = false
-description = "Add delete permission to the read/write bucket grant ('Uses'). Off by default: a service that writes objects rarely needs to erase them."
+description = "Add delete permission to the read/write bucket grant ('Uses')."
 
 [[fields]]
 name = "db_user"
@@ -205,15 +137,14 @@ label = "Database user"
 type = "string"
 pattern = "^[A-Za-z0-9_@.-]{1,63}$"
 pattern_hint = "a database user name"
-description = "The user the app connects as when a linked database has IAM / directory authentication switched on. Defaults to the app's name."
+description = "The user the job connects as when a linked database has IAM / directory authentication switched on. Defaults to the job's name."
 
 [[relations]]
 kind = "iam_binding"
 label = "Task role / identity (runs as)"
 targets = ["iam_role"]
-cardinality = "one"
+cardinality = "optional"
 
-# A second role, attribute_reference only because iam_binding already names the task role.
 [[relations]]
 kind = "attribute_reference"
 label = "Execution role (pulls the image, reads secrets)"
@@ -273,16 +204,16 @@ cardinality = "optional"
 [providers.aws]
 status = "partial"
 file = "container"
+notes = "A Fargate task definition and nothing that runs it: start it with aws ecs run-task. The <job>_run output carries the cluster, the task definition and the network configuration."
+
+[[providers.aws.checks]]
+when = { all = [ { relation = "iam_binding", absent = true }, { relation = "attribute_reference", target_type = "iam_role", absent = true } ] }
+severity = "error"
+message = "\"{name}\" has no role: a Fargate task needs an execution role to pull its image and write its logs (link 'Execution role', or a task role that does both)"
 
 [[providers.aws.checks]]
 when = { relation = "network_membership", absent = true }
-severity = "error"
-message = "\"{name}\" needs at least one subnet on AWS (Fargate tasks run inside a VPC)"
-
-[[providers.aws.checks]]
-when = { all = [ { field = "background_worker" }, { relation = "attachment", incoming = true, target_type = "load_balancer" } ] }
-severity = "error"
-message = "\"{name}\" is a background worker, so a load balancer cannot forward to it; clear 'Background worker' or remove the link"
+message = "\"{name}\" has no subnets, so the run configuration cannot say where the task runs; link the subnets it should start in"
 
 [[providers.aws.checks]]
 for_each_field = "secrets"
@@ -294,8 +225,9 @@ message = "\"{name}\": secret variable {item.name} has no Secret to read; link o
 for_each_field = "secrets"
 when = { all = [ { item = "secret" }, { item = "secret", linked = "reads", absent = true } ] }
 severity = "error"
-message = "\"{name}\": secret variable {item.name} names a Secret the app is not linked to; link it with 'Reads secrets' so the app may read it"
+message = "\"{name}\": secret variable {item.name} names a Secret the job is not linked to; link it with 'Reads secrets' so the job may read it"
 
+# A task needs a cluster to run in: the enclosing environment's, or one of its own.
 [[providers.aws.blocks]]
 key = "cluster"
 resource = "aws_ecs_cluster"
@@ -305,15 +237,13 @@ when = { ancestor = "container_environment", absent = true }
 name = { template = "{name}-cluster", transform = "kebab" }
 tags = { object = { Name = { field = "name" } } }
 
-# The account only matters for the rds-db:connect ARN, which names the database user
-# rather than a resource attribute (see kubernetes_workload.toml).
 [[providers.aws.data]]
 key = "account"
 resource = "aws_caller_identity"
 when = { relation = "attribute_reference", target_type = "relational_database", target_field = "iam_authentication" }
 
 [[providers.aws.blocks]]
-key = "task"
+key = "main"
 resource = "aws_ecs_task_definition"
 
 [providers.aws.blocks.args]
@@ -324,6 +254,7 @@ cpu                      = { map = "size", table = { small = "256", medium = "51
 memory                   = { map = "size", table = { small = "512", medium = "1024", large = "2048", xlarge = "4096" } }
 execution_role_arn       = { relation = "attribute_reference", target_type = "iam_role", attr = "arn", fallback = { relation = "iam_binding", attr = "arn" } }
 task_role_arn            = { relation = "iam_binding", attr = "arn" }
+tags                     = { object = { Name = { field = "name" } } }
 
 [providers.aws.blocks.args.container_definitions]
 func = "jsonencode"
@@ -332,18 +263,12 @@ func = "jsonencode"
 [[providers.aws.blocks.args.container_definitions.args.list]]
 [providers.aws.blocks.args.container_definitions.args.list.object]
 name         = { field = "name", transform = "kebab" }
-image        = { if = { relation = "attachment", target_type = "container_registry" }, then = { func = "format", args = [ { value = "%s/%s:%s" }, { relation = "attachment", target_type = "container_registry", connection = "REGISTRY" }, { field = "repository", transform = "kebab", fallback = { if = { relation = "attachment", target_type = "container_registry", target_field = "repositories" }, then = { func = "element", args = [ { relation = "attachment", target_type = "container_registry", field = "repositories", transform = "kebab" }, { value = 0 } ] }, else = { relation = "attachment", target_type = "container_registry", field = "name", transform = "kebab" } } }, { field = "image_tag", fallback = { entity_var = "image_tag", description = "Image tag the container app \"{name}\" runs (the tag your pipeline pushed)." } } ] }, else = { field = "image" } }
+image        = { if = { relation = "attachment", target_type = "container_registry" }, then = { func = "format", args = [ { value = "%s/%s:%s" }, { relation = "attachment", target_type = "container_registry", connection = "REGISTRY" }, { field = "repository", transform = "kebab", fallback = { if = { relation = "attachment", target_type = "container_registry", target_field = "repositories" }, then = { func = "element", args = [ { relation = "attachment", target_type = "container_registry", field = "repositories", transform = "kebab" }, { value = 0 } ] }, else = { relation = "attachment", target_type = "container_registry", field = "name", transform = "kebab" } } }, { field = "image_tag", fallback = { entity_var = "image_tag", description = "Image tag the container job \"{name}\" runs (the tag your pipeline pushed)." } } ] }, else = { field = "image" } }
 essential    = { value = true }
-portMappings = { if = { field = "background_worker", not_equals = "true" }, then = { list = [ { object = { containerPort = { field = "port", fallback = { value = 80 } }, protocol = { value = "tcp" } } } ] } }
 environment  = { func = "concat", args = [ { for_each_field = "env", each = { object = { name = { item = "name" }, value = { item = "value" } } } }, { list = [ { if = { relation = "sends_to", target_type = "event_queue" }, then = { object = { name = { value = "QUEUE_URL" }, value = { relation = "sends_to", target_type = "event_queue", attr = "url" } } } }, { if = { relation = "sends_to", target_type = "topic" }, then = { object = { name = { value = "TOPIC_ARN" }, value = { relation = "sends_to", target_type = "topic", attr = "arn" } } } }, { if = { relation = "attribute_reference", target_type = "relational_database" }, then = { object = { name = { value = "DB_HOST" }, value = { relation = "attribute_reference", target_type = "relational_database", connection = "HOST" } } } }, { if = { relation = "attribute_reference", target_type = "relational_database" }, then = { object = { name = { value = "DB_PORT" }, value = { func = "tostring", args = [ { relation = "attribute_reference", target_type = "relational_database", connection = "PORT" } ] } } } }, { if = { relation = "attribute_reference", target_type = "relational_database" }, then = { object = { name = { value = "DB_NAME" }, value = { relation = "attribute_reference", target_type = "relational_database", connection = "NAME" } } } }, { if = { relation = "attribute_reference", target_type = "cache" }, then = { object = { name = { value = "CACHE_HOST" }, value = { relation = "attribute_reference", target_type = "cache", connection = "HOST" } } } }, { if = { relation = "attribute_reference", target_type = "cache" }, then = { object = { name = { value = "CACHE_PORT" }, value = { func = "tostring", args = [ { relation = "attribute_reference", target_type = "cache", connection = "PORT" } ] } } } } ] } ] }
-# ECS reads each value with the execution role when the task starts: the whole secret,
-# or one key of a JSON secret (<arn>:<key>::).
 secrets      = { if = { field = "secrets" }, then = { for_each_field = "secrets", each = { object = { name = { item = "name" }, valueFrom = { if = { item = "key" }, then = { func = "format", args = [ { value = "%s:%s::" }, { if = { item = "secret" }, then = { item_ref = "secret", attr = "arn" }, else = { relation = "reads", target_type = "secret", attr = "arn" } }, { item = "key" } ] }, else = { if = { item = "secret" }, then = { item_ref = "secret", attr = "arn" }, else = { relation = "reads", target_type = "secret", attr = "arn" } } } } } } }
-healthCheck  = { if = { field = "health_check_command" }, then = { object = { command = { list = [ { value = "CMD-SHELL" }, { field = "health_check_command" } ] }, interval = { field = "health_check_interval", optional = true }, timeout = { field = "health_check_timeout", optional = true }, retries = { field = "health_check_retries", optional = true }, startPeriod = { field = "health_check_start_period", optional = true } } } }
-stopTimeout  = { field = "stop_timeout", optional = true }
-logConfiguration = { if = { relation = "logs_to" }, then = { object = { logDriver = { value = "awslogs" }, options = { object = { "awslogs-group" = { relation = "logs_to", attr = "name" }, "awslogs-region" = { var = "region" }, "awslogs-stream-prefix" = { value = "app" } } } } } }
+logConfiguration = { if = { relation = "logs_to" }, then = { object = { logDriver = { value = "awslogs" }, options = { object = { "awslogs-group" = { relation = "logs_to", attr = "name" }, "awslogs-region" = { var = "region" }, "awslogs-stream-prefix" = { value = "job" } } } } } }
 
-# x86_64 is Fargate's default, so only Graviton needs saying.
 [[providers.aws.blocks.nested]]
 block = "runtime_platform"
 when = { field = "cpu_architecture", equals = "arm64" }
@@ -352,41 +277,18 @@ when = { field = "cpu_architecture", equals = "arm64" }
 operating_system_family = { value = "LINUX" }
 cpu_architecture        = { value = "ARM64" }
 
+# What `aws ecs run-task` needs, in one place for the pipeline to read
+# (`<tool> output -json <job>_run`).
 [[providers.aws.blocks]]
-key = "main"
-resource = "aws_ecs_service"
+key = "run"
+resource = "terraform_data"
 
-[providers.aws.blocks.args]
-name                              = { field = "name", transform = "kebab" }
-cluster                           = { if = { ancestor = "container_environment" }, then = { ancestor = "container_environment", attr = "id", optional = true }, else = { self_block = "cluster", attr = "id" } }
-task_definition                   = { self_block = "task", attr = "arn" }
-desired_count                     = { field = "replicas" }
-launch_type                       = { value = "FARGATE" }
-health_check_grace_period_seconds = { if = { relation = "attachment", incoming = true, target_type = "load_balancer" }, then = { field = "health_check_start_period", optional = true } }
-# The target group only accepts registrations once a listener forwards to it.
-depends_on                        = { relation = "attachment", incoming = true, target_type = "load_balancer", block = "listener", attr = "", wrap = "list" }
+[providers.aws.blocks.args.input]
+object.cluster          = { if = { ancestor = "container_environment" }, then = { ancestor = "container_environment", attr = "name", optional = true }, else = { self_block = "cluster", attr = "name" } }
+object.task_definition  = { self_block = "main", attr = "arn" }
+object.subnets          = { relation = "network_membership", attr = "id", wrap = "list" }
+object.security_groups  = { relation = "attribute_reference", target_type = "security_group", attr = "id", wrap = "list" }
 
-[[providers.aws.blocks.nested]]
-block = "network_configuration"
-
-[providers.aws.blocks.nested.args]
-subnets          = { relation = "network_membership", attr = "id", wrap = "list" }
-security_groups  = { relation = "attribute_reference", target_type = "security_group", attr = "id", wrap = "list" }
-assign_public_ip = { field = "public" }
-
-# A load balancer that forwards here: ECS registers each task's IP in its target group.
-[[providers.aws.blocks.nested]]
-block = "load_balancer"
-when = { relation = "attachment", incoming = true, target_type = "load_balancer" }
-
-[providers.aws.blocks.nested.args]
-target_group_arn = { relation = "attachment", incoming = true, target_type = "load_balancer", block = "tg", attr = "arn" }
-container_name   = { field = "name", transform = "kebab" }
-container_port   = { field = "port", fallback = { value = 80 } }
-
-# The execution role reads the injected secrets when a task starts. The managed
-# AmazonECSTaskExecutionRolePolicy (attached by the role itself) covers the image pull
-# and the logs, but no secrets.
 [[providers.aws.blocks]]
 key = "exec_secrets"
 resource = "aws_iam_role_policy"
@@ -406,12 +308,11 @@ Version = { value = "2012-10-17" }
 [[providers.aws.blocks.args.policy.args.object.Statement.list]]
 object = { Sid = { value = "InjectSecrets" }, Effect = { value = "Allow" }, Action = { value = ["secretsmanager:GetSecretValue"] }, Resource = { relation = "reads", target_type = "secret", attr = "arn", wrap = "list" } }
 
-# Least-privilege inline policy on the task role, derived from this app's links — the
-# statements a Kubernetes Workload gets for the same links.
+# Least-privilege inline policy on the task role (the same statements as a Container App).
 [[providers.aws.blocks]]
 key = "policy"
 resource = "aws_iam_role_policy"
-when = { any = [ { relation = "attribute_reference", target_type = "event_queue" }, { relation = "attribute_reference", target_type = "object_storage" }, { relation = "attribute_reference", target_type = "relational_database", target_field = "iam_authentication" }, { relation = "sends_to", target_type = "event_queue" }, { relation = "sends_to", target_type = "topic" }, { all = [ { relation = "reads", target_type = "secret" }, { field = "secrets", absent = true } ] }, { relation = "reads", target_type = "object_storage" } ] }
+when = { all = [ { relation = "iam_binding" }, { any = [ { relation = "attribute_reference", target_type = "event_queue" }, { relation = "attribute_reference", target_type = "object_storage" }, { relation = "attribute_reference", target_type = "relational_database", target_field = "iam_authentication" }, { relation = "sends_to", target_type = "event_queue" }, { relation = "sends_to", target_type = "topic" }, { all = [ { relation = "reads", target_type = "secret" }, { field = "secrets", absent = true } ] }, { relation = "reads", target_type = "object_storage" } ] } ] }
 
 [providers.aws.blocks.args]
 name = { template = "{name}-policy", transform = "kebab" }
@@ -424,7 +325,6 @@ func = "jsonencode"
 [providers.aws.blocks.args.policy.args.object]
 Version = { value = "2012-10-17" }
 
-# Consume the queue(s) it uses.
 [[providers.aws.blocks.args.policy.args.object.Statement.list]]
 if = { relation = "attribute_reference", target_type = "event_queue" }
 then = { object = { Sid = { value = "QueueConsume" }, Effect = { value = "Allow" }, Action = { value = ["sqs:ReceiveMessage", "sqs:DeleteMessage", "sqs:GetQueueAttributes", "sqs:GetQueueUrl"] }, Resource = { relation = "attribute_reference", target_type = "event_queue", attr = "arn", wrap = "list" } } }
@@ -437,9 +337,6 @@ then = { object = { Sid = { value = "QueueSend" }, Effect = { value = "Allow" },
 if = { relation = "sends_to", target_type = "topic" }
 then = { object = { Sid = { value = "TopicPublish" }, Effect = { value = "Allow" }, Action = { value = ["sns:Publish"] }, Resource = { relation = "sends_to", target_type = "topic", attr = "arn", wrap = "list" } } }
 
-# Secrets the code reads itself at run time. When the app injects secrets as
-# environment variables the execution role reads them instead, and the task role gets
-# nothing it does not need.
 [[providers.aws.blocks.args.policy.args.object.Statement.list]]
 if = { all = [ { relation = "reads", target_type = "secret" }, { field = "secrets", absent = true } ] }
 then = { object = { Sid = { value = "Secrets" }, Effect = { value = "Allow" }, Action = { value = ["secretsmanager:GetSecretValue", "secretsmanager:DescribeSecret"] }, Resource = { relation = "reads", target_type = "secret", attr = "arn", wrap = "list" } } }
@@ -457,17 +354,22 @@ if = { relation = "attribute_reference", target_type = "relational_database", ta
 then = { object = { Sid = { value = "DatabaseConnect" }, Effect = { value = "Allow" }, Action = { value = ["rds-db:connect"] }, Resource = { func = "formatlist", args = [ { value = "arn:aws:rds-db:%s:%s:dbuser:%s/%s" }, { var = "region" }, { self_data = "account", attr = "account_id" }, { relation = "attribute_reference", target_type = "relational_database", attr = "resource_id", wrap = "list" }, { field = "db_user", fallback = { field = "name", transform = "kebab" } } ] } } }
 
 [providers.aws.outputs]
-service_name        = { attr = "name", description = "ECS service name" }
-cluster_arn         = { block = "cluster", attr = "arn", description = "ECS cluster ARN" }
-task_definition_arn = { block = "task", attr = "arn", description = "Task definition ARN (current revision)" }
+task_definition_arn = { attr = "arn", description = "Task definition ARN (current revision)" }
+run                 = { block = "run", attr = "output", description = "What aws ecs run-task needs: cluster, task definition, subnets, security groups" }
 
 [[providers.aws.manual_steps]]
-title = "Front the service with a load balancer for real public traffic"
-when = { all = [ { field = "public" }, { relation = "attachment", incoming = true, target_type = "load_balancer", absent = true } ] }
+title = "Start the job with aws ecs run-task"
 body = """
-`assign_public_ip = true` gives each task a public IP that changes on every deployment.
-For a stable public entry point add a Load Balancer and link it 'Forwards to' this app:
-its target group then uses `target_type = "ip"` and the ECS service registers its tasks.
+Only the task definition is created; nothing runs it. Start it from the pipeline (before
+the services roll out, for a migration) with the values of the `<job>_run` output:
+
+    aws ecs run-task --launch-type FARGATE \\
+      --cluster <cluster> --task-definition <task definition> \\
+      --network-configuration 'awsvpcConfiguration={subnets=[<subnets>],securityGroups=[<security groups>],assignPublicIp=DISABLED}'
+
+then wait for it (`aws ecs wait tasks-stopped`) and check the container's exit code
+(`aws ecs describe-tasks`). The caller needs `ecs:RunTask` on the task definition and
+`iam:PassRole` on its roles.
 """
 
 [[providers.aws.manual_steps]]
@@ -475,19 +377,15 @@ title = "Make the roles assumable by ECS tasks"
 when = { any = [ { relation = "iam_binding", target_field = "trusted_service", not_equals = "container" }, { relation = "attribute_reference", target_type = "iam_role", target_field = "trusted_service", not_equals = "container" } ] }
 body = """
 Fargate assumes both the task role and the execution role through
-`ecs-tasks.amazonaws.com`. Set each linked Role's **Assumable by** field to `container`:
-the trust policy then names ECS tasks, and the role the app starts with (its execution
-role, or its only role) also gets `AmazonECSTaskExecutionRolePolicy` to pull images and
-write logs.
+`ecs-tasks.amazonaws.com`. Set each linked Role's **Assumable by** field to `container`.
 """
 
 [[providers.aws.manual_steps]]
 title = "Let the execution role decrypt the secrets"
 when = { relation = "reads", target_type = "secret", where = { relation = "encrypted_with" } }
 body = """
-A linked Secret is encrypted with a customer-managed key, and ECS reads injected secrets
-with the execution role, which also needs `kms:Decrypt` on that key. Add it to the key's
-policy, or as a statement on the execution role.
+A linked Secret is encrypted with a customer-managed key; the execution role reads injected
+secrets and also needs `kms:Decrypt` on that key.
 """
 
 [[providers.aws.manual_steps]]
@@ -495,56 +393,23 @@ title = "Database access is not an IAM grant"
 when = { relation = "attribute_reference", target_type = "relational_database", target_field = "iam_authentication", not_equals = "true" }
 body = """
 No policy statement is generated for the linked database: RDS wants a user name and a
-password unless IAM database authentication is on. Put the connection string in a Secret,
-link it with 'Reads secrets' and inject it as a secret environment variable, or tick
-**IAM / directory authentication** on the database — an `rds-db:connect` statement for
-this app's database user is then generated instead.
-"""
-
-[[providers.aws.manual_steps]]
-title = "Create the database user the role connects as"
-when = { relation = "attribute_reference", target_type = "relational_database", target_field = "iam_authentication" }
-body = """
-The policy grants `rds-db:connect` on
-`arn:aws:rds-db:<region>:<account>:dbuser:<instance resource id>/<database user>`, with the
-user taken from the app's **Database user** field (its name by default). Create that user
-inside the database and grant it `rds_iam` (PostgreSQL) or `AWSAuthenticationPlugin`
-(MySQL); the app then signs a token (`aws rds generate-db-auth-token`) as its password.
-"""
-
-[[providers.aws.manual_steps]]
-title = "Cache access is not an IAM grant"
-when = { relation = "attribute_reference", target_type = "cache" }
-body = """
-No policy statement is generated for a linked cache: ElastiCache has no IAM data plane for
-the engines this type creates. Inject the auth token from a Secret instead.
+password unless IAM database authentication is on. Inject the connection string from a
+Secret as a secret environment variable.
 """
 
 # ---------------------------------------------------------------- Azure
 [providers.azure]
 status = "full"
 file = "container"
-notes = "A Container App in the enclosing Container Environment (or one of its own). Secret variables are Key Vault references read with the execution identity (or the only one); a linked registry is pulled with that identity, which gets AcrPull."
+notes = "A Container Apps job with a manual trigger, in the enclosing Container Environment (or one of its own). Start it with az containerapp job start."
 
-# VNet integration needs a subnet delegated to Microsoft.App/environments (and /23 or
-# larger: checked by the built-in network checks). Inside a Container Environment the
-# environment owns the subnet, so the app's own subnet links do not matter here.
 [[providers.azure.checks]]
 when = { all = [ { ancestor = "container_environment", absent = true }, { relation = "network_membership" }, { relation = "network_membership", target_provider_field = "delegation", equals = "app_environments", absent = true } ] }
 message = "\"{name}\" is VNet-integrated but no linked subnet is delegated to app_environments (set the subnet's Azure Delegation field; the environment uses the first linked subnet)"
 
 [[providers.azure.checks]]
-when = { all = [ { field = "background_worker" }, { relation = "attachment", incoming = true, target_type = "load_balancer" } ] }
-severity = "error"
-message = "\"{name}\" is a background worker, so a load balancer cannot forward to it; clear 'Background worker' or remove the link"
-
-[[providers.azure.checks]]
 when = { field = "cpu_architecture", equals = "arm64" }
 message = "\"{name}\" is built for arm64, but Azure Container Apps run linux/amd64 only; publish a multi-architecture image"
-
-[[providers.azure.checks]]
-when = { all = [ { field = "health_check_command" }, { field = "health_check_path", absent = true } ] }
-message = "\"{name}\" has a health check command, which Container Apps cannot run (probes are HTTP or TCP); set the Health check path for an HTTP liveness probe"
 
 [[providers.azure.checks]]
 for_each_field = "secrets"
@@ -556,7 +421,12 @@ message = "\"{name}\": secret variable {item.name} has no Secret to read; link o
 for_each_field = "secrets"
 when = { all = [ { item = "secret" }, { item = "secret", linked = "reads", absent = true } ] }
 severity = "error"
-message = "\"{name}\": secret variable {item.name} names a Secret the app is not linked to; link it with 'Reads secrets' so the app may read it"
+message = "\"{name}\": secret variable {item.name} names a Secret the job is not linked to; link it with 'Reads secrets' so the job may read it"
+
+[[providers.azure.checks]]
+when = { all = [ { field = "secrets" }, { relation = "iam_binding", absent = true }, { relation = "attribute_reference", target_type = "iam_role", absent = true } ] }
+severity = "error"
+message = "\"{name}\" injects Key Vault secrets but has no identity to read them with; link a task or execution role"
 
 [[providers.azure.blocks]]
 key = "env"
@@ -572,31 +442,34 @@ infrastructure_subnet_id   = { relation = "network_membership", attr = "id" }
 
 [[providers.azure.blocks]]
 key = "main"
-resource = "azurerm_container_app"
+resource = "azurerm_container_app_job"
 
 [providers.azure.blocks.args]
 name                         = { field = "name", transform = "kebab" }
-container_app_environment_id = { if = { ancestor = "container_environment" }, then = { ancestor = "container_environment", attr = "id", optional = true }, else = { self_block = "env", attr = "id" } }
+location                     = { var = "location" }
 resource_group_name          = { ancestor = "resource_group", attr = "name" }
-revision_mode                = { value = "Single" }
+container_app_environment_id = { if = { ancestor = "container_environment" }, then = { ancestor = "container_environment", attr = "id", optional = true }, else = { self_block = "env", attr = "id" } }
+replica_timeout_in_seconds   = { field = "timeout_seconds", fallback = { value = 1800 } }
+replica_retry_limit          = { field = "retries", optional = true }
 tags                         = { object = { Name = { field = "name" } } }
-# A revision only starts once its identity may read the Key Vault secrets and pull the image.
 depends_on                   = { list = [ { if = { field = "secrets" }, then = { self_block = "secret_read", attr = "", wrap = "list" } }, { self_block = "acr_pull", attr = "" } ] }
 
 [[providers.azure.blocks.nested]]
-block = "template"
+block = "manual_trigger_config"
 
 [providers.azure.blocks.nested.args]
-min_replicas                     = { field = "replicas" }
-max_replicas                     = { field = "replicas" }
-termination_grace_period_seconds = { field = "stop_timeout", optional = true }
+parallelism              = { value = 1 }
+replica_completion_count = { value = 1 }
+
+[[providers.azure.blocks.nested]]
+block = "template"
 
 [[providers.azure.blocks.nested.nested]]
 block = "container"
 
 [providers.azure.blocks.nested.nested.args]
 name   = { field = "name", transform = "kebab" }
-image  = { if = { relation = "attachment", target_type = "container_registry" }, then = { func = "format", args = [ { value = "%s/%s:%s" }, { relation = "attachment", target_type = "container_registry", connection = "REGISTRY" }, { field = "repository", transform = "kebab", fallback = { if = { relation = "attachment", target_type = "container_registry", target_field = "repositories" }, then = { func = "element", args = [ { relation = "attachment", target_type = "container_registry", field = "repositories", transform = "kebab" }, { value = 0 } ] }, else = { relation = "attachment", target_type = "container_registry", field = "name", transform = "kebab" } } }, { field = "image_tag", fallback = { entity_var = "image_tag", description = "Image tag the container app \"{name}\" runs (the tag your pipeline pushed)." } } ] }, else = { field = "image" } }
+image  = { if = { relation = "attachment", target_type = "container_registry" }, then = { func = "format", args = [ { value = "%s/%s:%s" }, { relation = "attachment", target_type = "container_registry", connection = "REGISTRY" }, { field = "repository", transform = "kebab", fallback = { if = { relation = "attachment", target_type = "container_registry", target_field = "repositories" }, then = { func = "element", args = [ { relation = "attachment", target_type = "container_registry", field = "repositories", transform = "kebab" }, { value = 0 } ] }, else = { relation = "attachment", target_type = "container_registry", field = "name", transform = "kebab" } } }, { field = "image_tag", fallback = { entity_var = "image_tag", description = "Image tag the container job \"{name}\" runs (the tag your pipeline pushed)." } } ] }, else = { field = "image" } }
 cpu    = { map = "size", table = { small = 0.25, medium = 0.5, large = 1.0, xlarge = 2.0 } }
 memory = { map = "size", table = { small = "0.5Gi", medium = "1Gi", large = "2Gi", xlarge = "4Gi" } }
 
@@ -608,7 +481,6 @@ for_each_field = "env"
 name  = { item = "name" }
 value = { item = "value" }
 
-# A secret variable names one of the app's secrets (below), which is a Key Vault reference.
 [[providers.azure.blocks.nested.nested.nested]]
 block = "env"
 for_each_field = "secrets"
@@ -665,47 +537,14 @@ when = { relation = "attribute_reference", target_type = "cache" }
 name  = { value = "CACHE_PORT" }
 value = { func = "tostring", args = [ { relation = "attribute_reference", target_type = "cache", connection = "PORT" } ] }
 
-[[providers.azure.blocks.nested.nested.nested]]
-block = "liveness_probe"
-when = { field = "health_check_path" }
-
-[providers.azure.blocks.nested.nested.nested.args]
-transport               = { value = "HTTP" }
-port                    = { field = "port", fallback = { value = 80 } }
-path                    = { field = "health_check_path" }
-interval_seconds        = { field = "health_check_interval", optional = true }
-timeout                 = { field = "health_check_timeout", optional = true }
-failure_count_threshold = { field = "health_check_retries", optional = true }
-initial_delay           = { field = "health_check_start_period", optional = true }
-
-# A background worker has no ingress at all. Otherwise it is external when the app is
-# public or an internet-facing load balancer forwards to it: Container Apps' ingress is
-# its own load balancer.
-[[providers.azure.blocks.nested]]
-block = "ingress"
-when = { field = "background_worker", not_equals = "true" }
-
-[providers.azure.blocks.nested.args]
-external_enabled = { if = { any = [ { field = "public" }, { relation = "attachment", incoming = true, target_type = "load_balancer", where = { field = "scheme", equals = "internet_facing" } } ] }, then = { value = true }, else = { value = false } }
-target_port      = { field = "port", fallback = { value = 80 } }
-
-[[providers.azure.blocks.nested.nested]]
-block = "traffic_weight"
-
-[providers.azure.blocks.nested.nested.args]
-percentage      = { value = 100 }
-latest_revision = { value = true }
-
 [[providers.azure.blocks.nested]]
 block = "identity"
-when = { relation = "iam_binding" }
+when = { any = [ { relation = "iam_binding" }, { relation = "attribute_reference", target_type = "iam_role" } ] }
 
 [providers.azure.blocks.nested.args]
 type         = { value = "UserAssigned" }
-identity_ids = { if = { relation = "attribute_reference", target_type = "iam_role" }, then = { func = "distinct", args = [ { func = "concat", args = [ { relation = "iam_binding", attr = "id", wrap = "list" }, { relation = "attribute_reference", target_type = "iam_role", attr = "id", wrap = "list" } ] } ] }, else = { relation = "iam_binding", attr = "id", wrap = "list" } }
+identity_ids = { func = "distinct", args = [ { func = "concat", args = [ { relation = "iam_binding", attr = "id", wrap = "list" }, { relation = "attribute_reference", target_type = "iam_role", attr = "id", wrap = "list" } ] } ] }
 
-# One app secret per secret variable: a Key Vault reference, read with the execution
-# identity. Key Vault secrets hold one value, so the whole secret is the variable.
 [[providers.azure.blocks.nested]]
 block = "secret"
 for_each_field = "secrets"
@@ -717,18 +556,18 @@ key_vault_secret_id = { if = { item = "secret" }, then = { item_ref = "secret", 
 
 [[providers.azure.blocks.nested]]
 block = "registry"
-when = { relation = "attachment", target_type = "container_registry" }
+when = { all = [ { relation = "attachment", target_type = "container_registry" }, { any = [ { relation = "iam_binding" }, { relation = "attribute_reference", target_type = "iam_role" } ] } ] }
 
 [providers.azure.blocks.nested.args]
 server   = { relation = "attachment", target_type = "container_registry", connection = "REGISTRY" }
 identity = { relation = "attribute_reference", target_type = "iam_role", attr = "id", fallback = { relation = "iam_binding", attr = "id" } }
 
-# Least-privilege role assignments, one per linked resource.
 [[providers.azure.blocks]]
 key = "send"
 resource = "azurerm_role_assignment"
 for_each_relation = "sends_to"
 for_each_target_type = "event_queue"
+when = { relation = "iam_binding" }
 
 [providers.azure.blocks.args]
 scope                = { target = "id" }
@@ -740,6 +579,7 @@ key = "publish"
 resource = "azurerm_role_assignment"
 for_each_relation = "sends_to"
 for_each_target_type = "topic"
+when = { relation = "iam_binding" }
 
 [providers.azure.blocks.args]
 scope                = { target = "id" }
@@ -751,30 +591,31 @@ key = "receive"
 resource = "azurerm_role_assignment"
 for_each_relation = "attribute_reference"
 for_each_target_type = "event_queue"
+when = { relation = "iam_binding" }
 
 [providers.azure.blocks.args]
 scope                = { target = "id" }
 role_definition_name = { value = "Azure Service Bus Data Receiver" }
 principal_id         = { relation = "iam_binding", attr = "principal_id" }
 
-# Injected secrets are read by the execution identity; secrets the code reads itself
-# (no secret variables) by the identity it runs as.
 [[providers.azure.blocks]]
 key = "secret_read"
 resource = "azurerm_role_assignment"
 for_each_relation = "reads"
 for_each_target_type = "secret"
+when = { any = [ { relation = "iam_binding" }, { relation = "attribute_reference", target_type = "iam_role" } ] }
 
 [providers.azure.blocks.args]
 scope                = { target = "id" }
 role_definition_name = { value = "Key Vault Secrets User" }
-principal_id         = { if = { field = "secrets" }, then = { relation = "attribute_reference", target_type = "iam_role", attr = "principal_id", fallback = { relation = "iam_binding", attr = "principal_id" } }, else = { relation = "iam_binding", attr = "principal_id" } }
+principal_id         = { if = { field = "secrets" }, then = { relation = "attribute_reference", target_type = "iam_role", attr = "principal_id", fallback = { relation = "iam_binding", attr = "principal_id" } }, else = { relation = "iam_binding", attr = "principal_id", fallback = { relation = "attribute_reference", target_type = "iam_role", attr = "principal_id" } } }
 
 [[providers.azure.blocks]]
 key = "blob_read"
 resource = "azurerm_role_assignment"
 for_each_relation = "reads"
 for_each_target_type = "object_storage"
+when = { relation = "iam_binding" }
 
 [providers.azure.blocks.args]
 scope                = { target = "id" }
@@ -786,6 +627,7 @@ key = "blob"
 resource = "azurerm_role_assignment"
 for_each_relation = "attribute_reference"
 for_each_target_type = "object_storage"
+when = { relation = "iam_binding" }
 
 [providers.azure.blocks.args]
 scope                = { target = "id" }
@@ -795,14 +637,13 @@ principal_id         = { relation = "iam_binding", attr = "principal_id" }
 [[providers.azure.blocks]]
 key = "acr_pull"
 resource = "azurerm_role_assignment"
-when = { relation = "attachment", target_type = "container_registry" }
+when = { all = [ { relation = "attachment", target_type = "container_registry" }, { any = [ { relation = "iam_binding" }, { relation = "attribute_reference", target_type = "iam_role" } ] } ] }
 
 [providers.azure.blocks.args]
 scope                = { relation = "attachment", target_type = "container_registry", attr = "id" }
 role_definition_name = { value = "AcrPull" }
 principal_id         = { relation = "attribute_reference", target_type = "iam_role", attr = "principal_id", fallback = { relation = "iam_binding", attr = "principal_id" } }
 
-# A linked Security Group becomes the NSG of the environment subnet(s).
 [[providers.azure.blocks]]
 key = "nsg"
 resource = "azurerm_subnet_network_security_group_association"
@@ -814,61 +655,34 @@ subnet_id                 = { target = "id" }
 network_security_group_id = { relation = "attribute_reference", target_type = "security_group", attr = "id" }
 
 [providers.azure.outputs]
-fqdn = { attr = "latest_revision_fqdn", description = "Latest revision FQDN" }
+name = { attr = "name", description = "Job name (az containerapp job start)" }
 
 [[providers.azure.manual_steps]]
 title = "Key Vault secrets hold one value each"
 when = { field = "secrets" }
 body = """
-Each secret variable is an app secret referencing a Key Vault secret, read with the
-execution identity (or the app's only one). A Key Vault secret is a single value: a row's
-**JSON key** — how ECS picks one field of a JSON secret — has no counterpart, so the
-variable receives the whole secret. Store one Key Vault secret per value, draw a Secret
-for each, and name it in the row's **Secret** column.
+Each secret variable references a whole Key Vault secret: a row's **JSON key** has no
+counterpart on Azure. Store one Key Vault secret per value and name it in the row's
+**Secret** column.
 """
 
 [[providers.azure.manual_steps]]
-title = "Database access is not a role assignment"
-when = { relation = "attribute_reference", target_type = "relational_database", target_field = "iam_authentication", not_equals = "true" }
+title = "Start the job"
 body = """
-No role assignment is generated for the linked database: a flexible server is reached with
-a login and password unless directory authentication is on. Inject the connection string
-from a Secret, or tick **IAM / directory authentication** on the database and map the
-app's identity to a database role (`pgaadauth_create_principal`).
-"""
-
-[[providers.azure.manual_steps]]
-title = "A blob contributor may also delete"
-when = { all = [ { relation = "attribute_reference", target_type = "object_storage" }, { field = "delete_objects", equals = "false" } ] }
-body = """
-This app is marked as not deleting objects, but Azure has no built-in role between
-*Storage Blob Data Reader* and *Storage Blob Data Contributor*: the assignment generated for
-an 'Uses' bucket carries `.../blobs/delete`. Accept it, replace it with a custom role, or
-link the bucket with 'Reads' when the app only reads it.
+The job has a manual trigger: start a run from the pipeline with
+`az containerapp job start --name <job> --resource-group <resource group>` and follow it
+with `az containerapp job execution list`.
 """
 
 # ---------------------------------------------------------------- GCP
 [providers.gcp]
 status = "full"
 file = "container"
-notes = "A Cloud Run (v2) service. Public ingress grants allUsers the invoker role; a load balancer in front makes it internal-and-load-balancer only; subnets become direct VPC egress. A background worker keeps its CPU allocated (min = max instances), and still answers Cloud Run's startup probe on its port."
-
-[[providers.gcp.checks]]
-when = { all = [ { field = "background_worker" }, { relation = "attachment", incoming = true, target_type = "load_balancer" } ] }
-severity = "error"
-message = "\"{name}\" is a background worker, so a load balancer cannot forward to it; clear 'Background worker' or remove the link"
+notes = "A Cloud Run job; start it with gcloud run jobs execute. Subnets become direct VPC egress."
 
 [[providers.gcp.checks]]
 when = { field = "cpu_architecture", equals = "arm64" }
 message = "\"{name}\" is built for arm64, but Cloud Run runs linux/amd64 only; publish a multi-architecture image"
-
-[[providers.gcp.checks]]
-when = { all = [ { field = "health_check_command" }, { field = "health_check_path", absent = true } ] }
-message = "\"{name}\" has a health check command, which Cloud Run cannot run (probes are HTTP, TCP or gRPC); set the Health check path for an HTTP liveness probe"
-
-[[providers.gcp.checks]]
-when = { field = "stop_timeout" }
-message = "\"{name}\" asks for a stop timeout, but Cloud Run gives a container a fixed 10 seconds after SIGTERM; make shutdown fit in that"
 
 [[providers.gcp.checks]]
 for_each_field = "secrets"
@@ -880,182 +694,148 @@ message = "\"{name}\": secret variable {item.name} has no Secret to read; link o
 for_each_field = "secrets"
 when = { all = [ { item = "secret" }, { item = "secret", linked = "reads", absent = true } ] }
 severity = "error"
-message = "\"{name}\": secret variable {item.name} names a Secret the app is not linked to; link it with 'Reads secrets' so the app may read it"
+message = "\"{name}\": secret variable {item.name} names a Secret the job is not linked to; link it with 'Reads secrets' so the job may read it"
+
+[[providers.gcp.checks]]
+when = { all = [ { field = "secrets" }, { relation = "iam_binding", absent = true }, { relation = "attribute_reference", target_type = "iam_role", absent = true } ] }
+severity = "error"
+message = "\"{name}\" injects secrets, which Cloud Run reads with the job's own service account; link a task or execution role"
 
 [[providers.gcp.blocks]]
 key = "main"
-resource = "google_cloud_run_v2_service"
+resource = "google_cloud_run_v2_job"
 
 [providers.gcp.blocks.args]
 name                = { field = "name", transform = "kebab" }
 location            = { var = "region" }
-ingress             = { if = { all = [ { field = "public" }, { field = "background_worker", not_equals = "true" } ] }, then = { value = "INGRESS_TRAFFIC_ALL" }, else = { if = { relation = "attachment", incoming = true, target_type = "load_balancer" }, then = { value = "INGRESS_TRAFFIC_INTERNAL_LOAD_BALANCER" }, else = { value = "INGRESS_TRAFFIC_INTERNAL_ONLY" } } }
 deletion_protection = { value = false }
-# A revision fails to start if its service account cannot read a secret it injects.
 depends_on          = { if = { field = "secrets" }, then = { self_block = "secret_read", attr = "", wrap = "list" } }
 
 [[providers.gcp.blocks.nested]]
 block = "template"
 
-# Google Cloud has one identity per service; the task role is it.
-[providers.gcp.blocks.nested.args]
-service_account = { relation = "iam_binding", attr = "email", fallback = { relation = "attribute_reference", target_type = "iam_role", attr = "email" } }
-
 [[providers.gcp.blocks.nested.nested]]
-block = "scaling"
+block = "template"
 
+# Google Cloud has one identity per job: the task role, or the execution role when the
+# job has no task role.
 [providers.gcp.blocks.nested.nested.args]
-min_instance_count = { field = "replicas" }
-max_instance_count = { field = "replicas" }
+service_account = { relation = "iam_binding", attr = "email", fallback = { relation = "attribute_reference", target_type = "iam_role", attr = "email" } }
+timeout         = { func = "format", args = [ { value = "%ds" }, { field = "timeout_seconds", fallback = { value = 1800 } } ] }
+max_retries     = { field = "retries", optional = true }
 
-[[providers.gcp.blocks.nested.nested]]
+[[providers.gcp.blocks.nested.nested.nested]]
 block = "containers"
 
-[providers.gcp.blocks.nested.nested.args]
-image = { if = { relation = "attachment", target_type = "container_registry" }, then = { func = "format", args = [ { value = "%s/%s:%s" }, { relation = "attachment", target_type = "container_registry", connection = "REGISTRY" }, { field = "repository", transform = "kebab", fallback = { if = { relation = "attachment", target_type = "container_registry", target_field = "repositories" }, then = { func = "element", args = [ { relation = "attachment", target_type = "container_registry", field = "repositories", transform = "kebab" }, { value = 0 } ] }, else = { relation = "attachment", target_type = "container_registry", field = "name", transform = "kebab" } } }, { field = "image_tag", fallback = { entity_var = "image_tag", description = "Image tag the container app \"{name}\" runs (the tag your pipeline pushed)." } } ] }, else = { field = "image" } }
-
-[[providers.gcp.blocks.nested.nested.nested]]
-block = "ports"
-
 [providers.gcp.blocks.nested.nested.nested.args]
-container_port = { field = "port", fallback = { value = 80 } }
+image = { if = { relation = "attachment", target_type = "container_registry" }, then = { func = "format", args = [ { value = "%s/%s:%s" }, { relation = "attachment", target_type = "container_registry", connection = "REGISTRY" }, { field = "repository", transform = "kebab", fallback = { if = { relation = "attachment", target_type = "container_registry", target_field = "repositories" }, then = { func = "element", args = [ { relation = "attachment", target_type = "container_registry", field = "repositories", transform = "kebab" }, { value = 0 } ] }, else = { relation = "attachment", target_type = "container_registry", field = "name", transform = "kebab" } } }, { field = "image_tag", fallback = { entity_var = "image_tag", description = "Image tag the container job \"{name}\" runs (the tag your pipeline pushed)." } } ] }, else = { field = "image" } }
 
-# A background worker serves no requests, so its CPU must not be throttled between them.
-[[providers.gcp.blocks.nested.nested.nested]]
+[[providers.gcp.blocks.nested.nested.nested.nested]]
 block = "resources"
 
-[providers.gcp.blocks.nested.nested.nested.args]
-limits   = { object = { cpu = { map = "size", table = { small = "1", medium = "1", large = "2", xlarge = "4" } }, memory = { map = "size", table = { small = "512Mi", medium = "1Gi", large = "2Gi", xlarge = "4Gi" } } } }
-cpu_idle = { if = { field = "background_worker" }, then = { value = false } }
+[providers.gcp.blocks.nested.nested.nested.nested.args]
+limits = { object = { cpu = { map = "size", table = { small = "1", medium = "1", large = "2", xlarge = "4" } }, memory = { map = "size", table = { small = "512Mi", medium = "1Gi", large = "2Gi", xlarge = "4Gi" } } } }
 
-[[providers.gcp.blocks.nested.nested.nested]]
+[[providers.gcp.blocks.nested.nested.nested.nested]]
 block = "env"
 for_each_field = "env"
 
-[providers.gcp.blocks.nested.nested.nested.args]
+[providers.gcp.blocks.nested.nested.nested.nested.args]
 name  = { item = "name" }
 value = { item = "value" }
 
-[[providers.gcp.blocks.nested.nested.nested]]
+[[providers.gcp.blocks.nested.nested.nested.nested]]
 block = "env"
 for_each_field = "secrets"
 
-[providers.gcp.blocks.nested.nested.nested.args]
+[providers.gcp.blocks.nested.nested.nested.nested.args]
 name = { item = "name" }
 
-[[providers.gcp.blocks.nested.nested.nested.nested]]
+[[providers.gcp.blocks.nested.nested.nested.nested.nested]]
 block = "value_source"
 
-[[providers.gcp.blocks.nested.nested.nested.nested.nested]]
+[[providers.gcp.blocks.nested.nested.nested.nested.nested.nested]]
 block = "secret_key_ref"
 
-[providers.gcp.blocks.nested.nested.nested.nested.nested.args]
+[providers.gcp.blocks.nested.nested.nested.nested.nested.nested.args]
 secret  = { if = { item = "secret" }, then = { item_ref = "secret", attr = "id" }, else = { relation = "reads", target_type = "secret", attr = "id" } }
 version = { value = "latest" }
 
-[[providers.gcp.blocks.nested.nested.nested]]
+[[providers.gcp.blocks.nested.nested.nested.nested]]
 block = "env"
 when = { relation = "sends_to", target_type = "event_queue" }
 
-[providers.gcp.blocks.nested.nested.nested.args]
+[providers.gcp.blocks.nested.nested.nested.nested.args]
 name  = { value = "QUEUE_TOPIC" }
 value = { relation = "sends_to", target_type = "event_queue", attr = "id" }
 
-[[providers.gcp.blocks.nested.nested.nested]]
+[[providers.gcp.blocks.nested.nested.nested.nested]]
 block = "env"
 when = { relation = "sends_to", target_type = "topic" }
 
-[providers.gcp.blocks.nested.nested.nested.args]
+[providers.gcp.blocks.nested.nested.nested.nested.args]
 name  = { value = "TOPIC" }
 value = { relation = "sends_to", target_type = "topic", attr = "id" }
 
-[[providers.gcp.blocks.nested.nested.nested]]
+[[providers.gcp.blocks.nested.nested.nested.nested]]
 block = "env"
 when = { relation = "attribute_reference", target_type = "relational_database" }
 
-[providers.gcp.blocks.nested.nested.nested.args]
+[providers.gcp.blocks.nested.nested.nested.nested.args]
 name  = { value = "DB_HOST" }
 value = { relation = "attribute_reference", target_type = "relational_database", connection = "HOST" }
 
-[[providers.gcp.blocks.nested.nested.nested]]
+[[providers.gcp.blocks.nested.nested.nested.nested]]
 block = "env"
 when = { relation = "attribute_reference", target_type = "relational_database" }
 
-[providers.gcp.blocks.nested.nested.nested.args]
+[providers.gcp.blocks.nested.nested.nested.nested.args]
 name  = { value = "DB_PORT" }
 value = { func = "tostring", args = [ { relation = "attribute_reference", target_type = "relational_database", connection = "PORT" } ] }
 
-[[providers.gcp.blocks.nested.nested.nested]]
+[[providers.gcp.blocks.nested.nested.nested.nested]]
 block = "env"
 when = { relation = "attribute_reference", target_type = "relational_database" }
 
-[providers.gcp.blocks.nested.nested.nested.args]
+[providers.gcp.blocks.nested.nested.nested.nested.args]
 name  = { value = "DB_NAME" }
 value = { relation = "attribute_reference", target_type = "relational_database", connection = "NAME" }
 
-[[providers.gcp.blocks.nested.nested.nested]]
+[[providers.gcp.blocks.nested.nested.nested.nested]]
 block = "env"
 when = { relation = "attribute_reference", target_type = "cache" }
 
-[providers.gcp.blocks.nested.nested.nested.args]
+[providers.gcp.blocks.nested.nested.nested.nested.args]
 name  = { value = "CACHE_HOST" }
 value = { relation = "attribute_reference", target_type = "cache", connection = "HOST" }
 
-[[providers.gcp.blocks.nested.nested.nested]]
+[[providers.gcp.blocks.nested.nested.nested.nested]]
 block = "env"
 when = { relation = "attribute_reference", target_type = "cache" }
 
-[providers.gcp.blocks.nested.nested.nested.args]
+[providers.gcp.blocks.nested.nested.nested.nested.args]
 name  = { value = "CACHE_PORT" }
 value = { func = "tostring", args = [ { relation = "attribute_reference", target_type = "cache", connection = "PORT" } ] }
 
 [[providers.gcp.blocks.nested.nested.nested]]
-block = "liveness_probe"
-when = { field = "health_check_path" }
-
-[providers.gcp.blocks.nested.nested.nested.args]
-period_seconds        = { field = "health_check_interval", optional = true }
-timeout_seconds       = { field = "health_check_timeout", optional = true }
-failure_threshold     = { field = "health_check_retries", optional = true }
-initial_delay_seconds = { field = "health_check_start_period", optional = true }
-
-[[providers.gcp.blocks.nested.nested.nested.nested]]
-block = "http_get"
-
-[providers.gcp.blocks.nested.nested.nested.nested.args]
-path = { field = "health_check_path" }
-port = { field = "port", fallback = { value = 80 } }
-
-[[providers.gcp.blocks.nested.nested]]
 block = "vpc_access"
 when = { relation = "network_membership" }
 
-[providers.gcp.blocks.nested.nested.args]
+[providers.gcp.blocks.nested.nested.nested.args]
 egress = { value = "ALL_TRAFFIC" }
 
-[[providers.gcp.blocks.nested.nested.nested]]
+[[providers.gcp.blocks.nested.nested.nested.nested]]
 block = "network_interfaces"
 
-[providers.gcp.blocks.nested.nested.nested.args]
+[providers.gcp.blocks.nested.nested.nested.nested.args]
 subnetwork = { relation = "network_membership", attr = "id" }
 tags       = { relation = "attribute_reference", target_type = "security_group", block = "tag", attr = "output", wrap = "list", optional = true }
 
 [[providers.gcp.blocks]]
-key = "invoker"
-resource = "google_cloud_run_v2_service_iam_member"
-when = { all = [ { field = "public" }, { field = "background_worker", not_equals = "true" } ] }
-
-[providers.gcp.blocks.args]
-name     = { self_block = "main", attr = "name" }
-location = { var = "region" }
-role     = { value = "roles/run.invoker" }
-member   = { value = "allUsers" }
-
-# Least-privilege IAM members for the service account, one per linked resource.
-[[providers.gcp.blocks]]
 key = "publish"
 resource = "google_pubsub_topic_iam_member"
 for_each_relation = "sends_to"
+when = { relation = "iam_binding" }
 
 [providers.gcp.blocks.args]
 topic  = { target = "id" }
@@ -1067,30 +847,31 @@ key = "consume"
 resource = "google_pubsub_subscription_iam_member"
 for_each_relation = "attribute_reference"
 for_each_target_type = "event_queue"
+when = { relation = "iam_binding" }
 
 [providers.gcp.blocks.args]
 subscription = { target = "id", block = "sub" }
 role         = { value = "roles/pubsub.subscriber" }
 member       = { relation = "iam_binding", attr = "member" }
 
-# Cloud Run reads injected secrets with the service's own account, so the secrets the
-# app injects and the ones its code reads are granted the same way.
 [[providers.gcp.blocks]]
 key = "secret_read"
 resource = "google_secret_manager_secret_iam_member"
 for_each_relation = "reads"
 for_each_target_type = "secret"
+when = { any = [ { relation = "iam_binding" }, { relation = "attribute_reference", target_type = "iam_role" } ] }
 
 [providers.gcp.blocks.args]
 secret_id = { target = "id" }
 role      = { value = "roles/secretmanager.secretAccessor" }
-member    = { relation = "iam_binding", attr = "member" }
+member    = { relation = "iam_binding", attr = "member", fallback = { relation = "attribute_reference", target_type = "iam_role", attr = "member" } }
 
 [[providers.gcp.blocks]]
 key = "bucket_read"
 resource = "google_storage_bucket_iam_member"
 for_each_relation = "reads"
 for_each_target_type = "object_storage"
+when = { relation = "iam_binding" }
 
 [providers.gcp.blocks.args]
 bucket = { target = "name" }
@@ -1102,6 +883,7 @@ key = "bucket_rw"
 resource = "google_storage_bucket_iam_member"
 for_each_relation = "attribute_reference"
 for_each_target_type = "object_storage"
+when = { relation = "iam_binding" }
 
 [providers.gcp.blocks.args]
 bucket = { target = "name" }
@@ -1113,7 +895,7 @@ key = "bucket_rw_read"
 resource = "google_storage_bucket_iam_member"
 for_each_relation = "attribute_reference"
 for_each_target_type = "object_storage"
-when = { field = "delete_objects", not_equals = "true" }
+when = { all = [ { relation = "iam_binding" }, { field = "delete_objects", not_equals = "true" } ] }
 
 [providers.gcp.blocks.args]
 bucket = { target = "name" }
@@ -1121,24 +903,21 @@ role   = { value = "roles/storage.objectViewer" }
 member = { relation = "iam_binding", attr = "member" }
 
 [providers.gcp.outputs]
-uri = { attr = "uri", description = "Service URL" }
+name = { attr = "name", description = "Job name (gcloud run jobs execute)" }
 
 [[providers.gcp.manual_steps]]
 title = "Secret Manager secrets hold one value each"
 when = { field = "secrets" }
 body = """
-Each secret variable reads the latest version of a Secret Manager secret with the
-service's own account. A secret is a single value: a row's **JSON key** — how ECS picks
-one field of a JSON secret — has no counterpart, so the variable receives the whole
-secret. Store one secret per value, draw a Secret for each, and name it in the row's
+Each secret variable reads the latest version of a whole Secret Manager secret: a row's
+**JSON key** has no counterpart. Store one secret per value and name it in the row's
 **Secret** column.
 """
 
 [[providers.gcp.manual_steps]]
-title = "Database access is not an IAM grant"
-when = { relation = "attribute_reference", target_type = "relational_database" }
+title = "Start the job"
 body = """
-No IAM member is generated for the linked database. Cloud SQL accepts the service account
-through the Cloud SQL Auth Proxy (or the Cloud SQL connection Cloud Run mounts) with
-`roles/cloudsql.client`, or a password — inject the connection string from a Secret.
+Nothing runs the job by itself: start it from the pipeline with
+`gcloud run jobs execute <job> --region <region> --wait`, which also waits for it to
+finish and fails when it does.
 """

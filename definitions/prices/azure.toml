@@ -16,6 +16,7 @@ basis = "Azure pay-as-you-go retail prices (Linux), USD, excluding tax, free gra
 
 [free]
 resource_group = "Resource groups cost nothing."
+container_environment = "A Consumption Container Apps environment costs nothing; its apps and jobs are priced on their own lines."
 virtual_network = "Virtual networks cost nothing; peering and gateways are billed separately."
 subnet = "Subnets cost nothing."
 route_table = "Route tables cost nothing."

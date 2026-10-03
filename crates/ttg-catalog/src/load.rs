@@ -86,6 +86,14 @@ const BUILTIN_RESOURCES: &[(&str, &str)] = &[
         include_str!("../../../definitions/resources/container_app.toml"),
     ),
     (
+        "resources/container_environment.toml",
+        include_str!("../../../definitions/resources/container_environment.toml"),
+    ),
+    (
+        "resources/container_job.toml",
+        include_str!("../../../definitions/resources/container_job.toml"),
+    ),
+    (
         "resources/alarm.toml",
         include_str!("../../../definitions/resources/alarm.toml"),
     ),

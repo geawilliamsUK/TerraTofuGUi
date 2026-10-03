@@ -87,6 +87,7 @@ const NETWORKED: &[&str] = &[
     "autoscaling_group",
     "function",
     "container_app",
+    "container_job",
     "file_system",
 ];
 
@@ -104,6 +105,7 @@ pub fn initiates(t: &str) -> bool {
             | "kubernetes_cluster"
             | "kubernetes_workload"
             | "container_app"
+            | "container_job"
     )
 }
 fn is_networked(t: &str) -> bool {
@@ -518,11 +520,32 @@ pub fn listening_port(e: &EntityRef) -> Option<i64> {
         ),
         "cache" => Some(6379),
         "load_balancer" => e.field("listener_port").and_then(|v| v.as_int()),
-        "container_app" => e.field("port").and_then(|v| v.as_int()),
+        // A background worker listens for nothing.
+        "container_app" if !is_worker(e) => e.field("port").and_then(|v| v.as_int()),
         "kubernetes_cluster" => Some(443),
         "file_system" => Some(2049),
         _ => None,
     }
+}
+
+/// A Container App marked as a background worker: no ingress at all.
+fn is_worker(e: &EntityRef) -> bool {
+    e.field("background_worker")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false)
+}
+
+/// What the source type calls its link to a database ("Uses"), when it has one.
+fn database_link_label(cat: &Catalog, source_type: &str) -> Option<String> {
+    let def = cat.resource(source_type)?;
+    let r = def
+        .relations
+        .iter()
+        .find(|r| r.targets.iter().any(|t| t == "relational_database"))?;
+    let label = r.label.clone().unwrap_or_else(|| r.kind.clone());
+    // "Uses (read / write): queue, database, ..." is called "Uses" in a sentence.
+    let short = label.split([' ', ':']).next().unwrap_or(&label);
+    Some(short.to_string())
 }
 
 fn subnet_cidr(p: &Project, subnet: &str) -> Option<String> {
@@ -696,7 +719,7 @@ fn exposure(
         "load_balancer" if e.field("scheme").map(|v| v.display()) == Some("internet_facing".into()) => {
             return Some("internet-facing load balancer".into());
         }
-        "container_app" if e.field("public").and_then(|v| v.as_bool()).unwrap_or(false) => {
+        "container_app" if e.field("public").and_then(|v| v.as_bool()).unwrap_or(false) && !is_worker(e) => {
             return Some("public ingress".into());
         }
         "relational_database" | "cache" if provider == "azure" && subnets.is_empty() => {
@@ -1068,10 +1091,16 @@ fn direct_path(
         ),
     };
     if status == Status::Ok && !linked && tgt.resource_type == "relational_database" {
-        notes.push(format!(
-            "no 'Uses' link from \"{}\", so it receives no host name or credentials",
-            src.name
-        ));
+        notes.push(match database_link_label(cat, src.resource_type) {
+            Some(label) => format!(
+                "no '{label}' link from \"{}\", so it receives no host name or credentials",
+                src.name
+            ),
+            None => format!(
+                "\"{}\" cannot link to a database, so nothing hands it a host name or credentials",
+                src.name
+            ),
+        });
     }
     let mut hops: Vec<Id> = Vec::new();
     if let Some(s) = sp.subnets.first() {

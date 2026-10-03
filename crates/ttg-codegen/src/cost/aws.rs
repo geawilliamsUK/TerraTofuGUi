@@ -12,6 +12,7 @@ pub(crate) fn model(type_id: &str) -> Model {
         "kubernetes_cluster" => kubernetes_cluster,
         "kubernetes_node_pool" => kubernetes_node_pool,
         "container_app" => container_app,
+        "container_job" => container_job,
         "function" => function,
         "relational_database" => relational_database,
         "cache" => cache,
@@ -134,23 +135,56 @@ fn kubernetes_node_pool(c: &mut Ctx) {
     eks_nodes(c, sku, nh, disk, spot, "node group");
 }
 
+/// The Fargate rows for the task's CPU architecture: Graviton (arm64) is priced lower.
+fn fargate_rows(c: &Ctx) -> (&'static str, &'static str, &'static str) {
+    if c.text("cpu_architecture").as_deref() == Some("arm64") {
+        ("vcpu_arm", "gb_arm", "Fargate (Graviton)")
+    } else {
+        ("vcpu", "gb", "Fargate")
+    }
+}
+
 fn container_app(c: &mut Ctx) {
     let cpu = c.arg("task", "cpu").as_ref().and_then(num).unwrap_or(256.0) / 1024.0;
     let mem = c.arg("task", "memory").as_ref().and_then(num).unwrap_or(512.0) / 1024.0;
     let replicas = c.num("replicas", 1.0).max(0.0);
     let hours = c.hours() * replicas;
+    let (vcpu, gb, what) = fargate_rows(c);
     c.charge(
-        format!("Fargate: {replicas} task(s) x {cpu} vCPU"),
+        format!("{what}: {replicas} task(s) x {cpu} vCPU"),
         "fargate",
-        "vcpu",
+        vcpu,
         cpu * hours,
     );
     c.charge(
-        format!("Fargate: {replicas} task(s) x {mem} GB"),
+        format!("{what}: {replicas} task(s) x {mem} GB"),
         "fargate",
-        "gb",
+        gb,
         mem * hours,
     );
+}
+
+/// A task definition costs nothing; each run is billed for the seconds it runs.
+fn container_job(c: &mut Ctx) {
+    let cpu = c.arg("main", "cpu").as_ref().and_then(num).unwrap_or(256.0) / 1024.0;
+    let mem = c.arg("main", "memory").as_ref().and_then(num).unwrap_or(512.0) / 1024.0;
+    let runs = c.a("job_runs");
+    let minutes = c.a("job_run_minutes");
+    let hours = runs * minutes / 60.0;
+    let (vcpu, gb, what) = fargate_rows(c);
+    c.charge(
+        format!("{what}: {} run(s) x {minutes} min x {cpu} vCPU", fmt(runs)),
+        "fargate",
+        vcpu,
+        cpu * hours,
+    );
+    c.charge(
+        format!("{what}: {} run(s) x {minutes} min x {mem} GB", fmt(runs)),
+        "fargate",
+        gb,
+        mem * hours,
+    );
+    c.note("Fargate bills a run per second with a one-minute minimum");
 }
 
 fn function(c: &mut Ctx) {

@@ -19,7 +19,7 @@
 //! | `attribute_reference` | workload → database, cache, bucket, file system, table | source → target (both ways) | uses |
 //! | `attribute_reference` | CDN → bucket or load balancer | source → target | origin |
 //! | `attachment` | anything → file system | target → source (both ways) | mounted by |
-//! | `attachment` | load balancer → instance or cluster | source → target | forwards to |
+//! | `attachment` | load balancer → instance, cluster or container app | source → target | forwards to |
 //! | `attachment` | scaling group or Kubernetes workload → load balancer | target → source | forwards to |
 //! | `attachment` | audit trail → bucket | source → target | writes to |
 //!
@@ -28,8 +28,9 @@
 //! group or certificate, a database reading its own password from a secret (wiring, not
 //! traffic), a function's code bucket, what an alarm watches, a DNS alias, a firewall
 //! attached to a load balancer, route tables, and where a Kubernetes workload pulls
-//! its image from or which node pool it is scheduled on. "Workload" means a function, container
-//! app, Kubernetes workload, cluster or node pool, compute instance or scaling group.
+//! its image from or which node pool it is scheduled on, a container app's execution role and
+//! image registry. "Workload" means a function, container app or job, Kubernetes workload,
+//! cluster or node pool, compute instance or scaling group.
 //! "Both ways" marks a read/write link: the arrow is drawn in the direction of the
 //! request, but data can come back along it, which is what [`personal_data_view`]
 //! needs to know.
@@ -59,6 +60,7 @@ pub struct FlowRule {
 const WORKLOADS: &[&str] = &[
     "function",
     "container_app",
+    "container_job",
     "kubernetes_workload",
     "kubernetes_cluster",
     "kubernetes_node_pool",
@@ -121,7 +123,11 @@ pub fn rule(rel: Relation, source: &str, target: &str) -> Option<FlowRule> {
             ..fwd("mounted by")
         }),
         Relation::Attachment
-            if source == "load_balancer" && matches!(target, "compute_instance" | "kubernetes_cluster") =>
+            if source == "load_balancer"
+                && matches!(
+                    target,
+                    "compute_instance" | "kubernetes_cluster" | "container_app"
+                ) =>
         {
             Some(fwd("forwards to"))
         }
@@ -442,10 +448,32 @@ mod tests {
             ),
             (
                 Relation::Attachment,
+                "load_balancer",
+                "container_app",
+                Some((false, "forwards to")),
+            ),
+            (
+                Relation::Attachment,
                 "autoscaling_group",
                 "load_balancer",
                 Some((true, "forwards to")),
             ),
+            // A container app's or job's links behave like any workload's.
+            (
+                Relation::AttributeReference,
+                "container_job",
+                "relational_database",
+                Some((false, "uses")),
+            ),
+            (
+                Relation::Reads,
+                "container_app",
+                "secret",
+                Some((true, "read by")),
+            ),
+            // Its execution role and image registry are wiring.
+            (Relation::AttributeReference, "container_app", "iam_role", None),
+            (Relation::Attachment, "container_app", "container_registry", None),
             (
                 Relation::Attachment,
                 "kubernetes_workload",
