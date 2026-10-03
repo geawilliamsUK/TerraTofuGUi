@@ -30,6 +30,15 @@ express (an Azure database's network access, for example) are reported as manual
 never papered over. Every example passes `tofu validate` for all three providers and
 both tools in CI.
 
+The edge is built for applications as well as files: a **CDN** can be a dynamic site
+(every method, nothing cached by default) with path behaviours that pick AWS managed cache
+and origin-request policies, origin timeouts, origin headers and a generated secret header
+the load balancer insists on. A load-balancer origin is reached by a DNS name its
+certificate covers (or the export says how to add one), a **Web Application Firewall**
+carries per-path rate rules and builds only the Web ACL scopes something links to, DNS
+Records include AAAA, and on Azure the CDN is Front Door Standard/Premium with its WAF
+policy attached. See `examples/edge-dynamic.ttg.json`.
+
 Day-two operations are part of the vocabulary too: a queue can **dead-letter** into
 another one (an SQS redrive policy, Service Bus forwarding inside a namespace, a Pub/Sub
 dead-letter policy with the IAM the service agent needs); an **Alarm** picks its metric

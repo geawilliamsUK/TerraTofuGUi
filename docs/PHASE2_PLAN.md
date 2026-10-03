@@ -848,6 +848,88 @@ the timeout bullet of TF-022).
   undo step, refusing to replace a non-empty project without `replace` and asking the
   user first when it would discard unsaved changes.
 
+## Round 4: edge (zipOS feedback TF-009, TF-010, TF-011, TF-016 item 5, the AAAA note)
+
+The zipOS staging graph put CloudFront in front of an HTTPS ALB serving a Next.js app and
+had to override the whole distribution in `extra`: POST was refused at the edge, there were
+no path behaviours, timeouts or origin headers, and the origin was the ALB's own DNS name,
+which the ALB's certificate cannot cover (a 502 on every request). The firewall left an
+unused REGIONAL Web ACL behind and rate-limited everything with one rule, there was no
+AAAA record, and Azure's `cdn` was classic Microsoft CDN, which cannot carry a WAF.
+
+- **Mapping language** (MAPPING_FORMAT §2.6). `hop` takes a second step from the entities
+  a relation reached (the CDN's origin load balancer, then the DNS Records that alias it),
+  with `certificate_covers` keeping only names a certificate linked from the first hop
+  covers (domain or alternative names, one-label wildcards). `for_each_item` emits a
+  nested block per entry of a list item of the current row, `{ item = "…", min_count = n }`
+  counts one, and `{ not = … }` negates. A link the *target's* mapping reads with
+  `incoming` is expressed there: the source gets no `depends_on` (which would point the
+  wrong way) and no "cannot express" warning.
+- **Web ACL scopes** (TF-009). The REGIONAL `aws_wafv2_web_acl` is emitted only with a
+  'Protects' link to a load balancer, the CLOUDFRONT one only when a CDN links here; a
+  firewall that protects nothing is a warning on every provider and generates nothing.
+  Azure likewise: an Application Gateway policy for a protected load balancer, a Front Door
+  policy for a CDN. Google Cloud keeps one Cloud Armor policy, now attached by the global
+  HTTPS load balancer's backend service (directly, or through the CDN in front of it).
+- **Rate rules by path** (TF-011). `rate_rules` rows (name, limit per 5 minutes, path
+  prefixes, method, block / count) replace `rate_limit_per_5min`, which older files load
+  as one all-paths row (`ttg_core::project::load_str`). AWS: a rate-based rule per row
+  whose scope-down statement is a `byte_match_statement` on `uri_path` STARTS_WITH, an
+  `or_statement` of them for several prefixes, a method match, or an `and_statement` of
+  both — with a `regex_match_statement` over the escaped prefixes when several prefixes
+  meet a method, since a scope-down statement nests three levels at most. Cloud Armor: a
+  `rate_based_ban` per row matched by `request.path.startsWith(…) || …` and
+  `request.method`. Azure: `RateLimitRule` custom rules — `RequestUri` BeginsWith on an
+  Application Gateway policy, a regex anchored after the host on Front Door, whose
+  RequestUri is the full URL.
+- **CDN for a dynamic site** (TF-010). `dynamic_site` (all seven methods, CachingDisabled),
+  `allowed_methods` (read_only / all), path behaviours (pattern, managed cache policy,
+  managed origin-request policy, methods, compress) as `ordered_cache_behavior`, origin read
+  and keep-alive timeouts, origin headers, and a generated **secret origin header**. The
+  managed policies are `data "aws_cloudfront_cache_policy"` /
+  `"aws_cloudfront_origin_request_policy"` lookups by managed name, one per policy used,
+  referenced as `…_cache["CachingOptimized"].id`. A load-balancer origin gets
+  **AllViewerExceptHostHeader**: CloudFront then asks the origin for the origin's own name,
+  which is the one item 3 makes sure the certificate covers, so TLS to the origin always
+  works. AllViewer forwards the viewer's Host, which the origin's certificate must cover as
+  well (and which an app that checks Host against Origin — Next.js Server Actions — wants);
+  that is the `forward_host_header` option, checked against the certificate (an error when
+  it does not cover the custom domain). With the secret header on, the ALB listener's
+  default action becomes a 403 fixed response and an `aws_lb_listener_rule` forwards only
+  requests carrying the header (a `random_password` without special characters, which a
+  listener rule would read as wildcards).
+- **Origin name the certificate covers** (TF-010). An https load balancer origin is reached
+  by the `fqdn` of a DNS Record that aliases it and whose name the load balancer's
+  certificate covers; without one it is an error that says to add `origin.<domain>` and the
+  matching alternative name. An http load balancer is reached by its own name, http-only,
+  with a warning. A built-in check also warns when a record points at a CDN under a name
+  that is not the CDN's custom domain.
+- **AAAA** (§5 table). `dns_record` takes AAAA: a Route 53 alias of a CloudFront
+  distribution, an `azurerm_dns_aaaa_record` alias of the Front Door endpoint, and on Google
+  Cloud an IPv6 global forwarding rule on the HTTPS load balancer's proxy (`grule6`) or an
+  IPv6 address a bucket CDN reserves. An AAAA alias of an AWS or Azure load balancer is an
+  error: both are IPv4-only here.
+- **Azure Front Door** (TF-016 item 5). `cdn` on Azure is Front Door Standard/Premium:
+  profile, endpoint, origin group, origin, a default route and one route per path behaviour
+  (CloudFront's cache policies become a route `cache` block or none), a managed-certificate
+  custom domain and its association, and a rule set that adds the origin headers. The tier
+  follows the firewall: managed rule sets need **Premium**, so the profile and the
+  `azurerm_cdn_frontdoor_firewall_policy` are Premium exactly when a linked firewall has
+  managed rule groups (the type requires them), Standard without a firewall; an
+  `azurerm_cdn_frontdoor_security_policy` attaches it. A DNS Record aliasing the CDN is an
+  A / AAAA alias of the endpoint or a CNAME to its host name, plus the `_dnsauth` TXT record
+  holding the custom domain's validation token. The cost estimate prices Front Door's base
+  fee by tier, data out and requests (`front_door` rows in `definitions/prices/azure.toml`).
+- **Google Cloud CDN**. In front of a load balancer, Cloud CDN is `enable_cdn` plus a
+  `cdn_policy` (USE_ORIGIN_HEADERS for a dynamic site, CACHE_ALL_STATIC otherwise) on the
+  global HTTPS load balancer's backend service, whose timeout follows the CDN's origin
+  timeout. Path behaviours, origin headers and the secret header have no counterpart there
+  and say so.
+
+`examples/edge-dynamic.ttg.json` is the zipOS edge in miniature (dynamic site, a static
+path behaviour, per-path rate rules, a secret origin header, an `origin.` record the
+certificate covers, A and AAAA aliases) and validates on all three providers.
+
 ## Explicitly still out of scope
 
 Running `plan`/`apply`, live-account access, multi-user collaboration, drift detection
