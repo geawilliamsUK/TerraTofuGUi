@@ -116,6 +116,7 @@ pub fn command_from_json(tool: &str, args: serde_json::Value) -> Result<AgentCom
                 x: a.x,
                 y: a.y,
                 providers: a.providers,
+                verbose: a.verbose,
             }
         }
         "entity_update" => parse::<EntityUpdateArgs>(args)?.into_command()?,
@@ -352,6 +353,10 @@ pub struct EntityAddArgs {
         description = "Provider layers this entity belongs to, e.g. [\"azure\"]; omit for every provider"
     )]
     pub providers: Option<Vec<String>>,
+    #[schemars(
+        description = "false: reply with only status, id and changed instead of the whole entity (settings_set { verbose } sets the default for the session)"
+    )]
+    pub verbose: Option<bool>,
 }
 
 #[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
@@ -394,6 +399,10 @@ pub struct EntityUpdateArgs {
         description = "Team or person who looks after it. Emitted as an Owner tag (AWS, Azure) or owner label (Google Cloud); \"\" clears it"
     )]
     pub owner: Option<String>,
+    #[schemars(
+        description = "false: reply with only status, id and changed instead of the whole entity (settings_set { verbose } sets the default for the session)"
+    )]
+    pub verbose: Option<bool>,
 }
 
 impl EntityUpdateArgs {
@@ -416,6 +425,7 @@ impl EntityUpdateArgs {
                 extra_provider: self.extra_provider,
                 extra_block: self.extra_block,
                 meta,
+                verbose: self.verbose,
             }),
             (None, Some(select)) => {
                 if self.name.is_some() {
@@ -539,6 +549,10 @@ pub struct LinkAddArgs {
     pub relation: String,
     #[schemars(description = "Provider layers this link belongs to; omit for every provider")]
     pub providers: Option<Vec<String>>,
+    #[schemars(
+        description = "false: reply with only status, id and changed instead of the whole entity (settings_set { verbose } sets the default for the session)"
+    )]
+    pub verbose: Option<bool>,
 }
 
 impl LinkAddArgs {
@@ -550,6 +564,7 @@ impl LinkAddArgs {
                 target: self.target,
                 relation: self.relation,
                 providers: self.providers,
+                verbose: self.verbose,
             }),
             (None, Some(select)) => Ok(AgentCommand::BulkLink {
                 select: select.into(),
@@ -811,6 +826,14 @@ pub struct SettingsArgs {
         description = "Provider version constraints for required_providers: { \"aws\": \"~> 6.0\" }. Merged into the existing pins; null or \"\" removes a pin (back to the definition's default)"
     )]
     pub provider_versions: Option<serde_json::Map<String, serde_json::Value>>,
+    #[schemars(
+        description = "Rename the project. The name heads the export's README and is the default state key prefix"
+    )]
+    pub name: Option<String>,
+    #[schemars(
+        description = "Session default for entity_add / entity_update / link_add replies: false returns only status, id and changed (a call's own verbose wins). Not saved with the project"
+    )]
+    pub verbose: Option<bool>,
     /// Anything else the caller sent: refused with the list of valid keys.
     #[serde(flatten)]
     #[schemars(skip)]
@@ -834,6 +857,8 @@ pub const SETTINGS_KEYS: &[&str] = &[
     "state_encryption",
     "state_encryption_key",
     "provider_versions",
+    "name",
+    "verbose",
 ];
 
 impl SettingsArgs {
@@ -858,6 +883,8 @@ impl SettingsArgs {
             state_encryption: self.state_encryption,
             state_encryption_key: self.state_encryption_key,
             provider_versions: self.provider_versions,
+            name: self.name,
+            verbose: self.verbose,
         })
     }
 }
@@ -1331,6 +1358,7 @@ impl TtgServer {
             x: a.x,
             y: a.y,
             providers: a.providers,
+            verbose: a.verbose,
         })
         .await
     }
@@ -1913,6 +1941,8 @@ impl ServerHandler for TtgServer {
              meanwhile. Every reply says whether anything was applied: a call that comes back \
              \"the app is busy\" was never queued, and one that times out was withdrawn before it \
              ran, so either is safe to retry once; nothing is ever applied twice. \
+             Pass `verbose: false` to entity_add, entity_update or link_add (or settings_set \
+             { verbose: false } once) to get only status, id and changed back. \
              The .ttg.json file is the interchange format (docs/FILE_FORMAT.md, JSON schema at \
              https://raw.githubusercontent.com/geawilliamsUK/TerraTofuGUi/master/schemas/project.schema.json): \
              project_import {json, replace} loads one in memory, checking it against the schema \

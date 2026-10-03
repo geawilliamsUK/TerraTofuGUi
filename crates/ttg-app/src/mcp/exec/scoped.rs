@@ -359,6 +359,7 @@ impl TtgApp {
                 extra_provider: changes.extra_provider.clone(),
                 extra_block: changes.extra_block.clone(),
                 meta: changes.meta.clone(),
+                verbose: None,
             })?;
             let after = app.entity_json(id);
             Ok(json!({
@@ -403,6 +404,7 @@ impl TtgApp {
                 target: t.clone(),
                 relation: relation.clone(),
                 providers: providers.clone(),
+                verbose: None,
             }) {
                 Ok(v) if v["status"] == json!("linked") => Ok((id.clone(), "linked", None)),
                 Ok(_) => Ok((id.clone(), "already_linked", None)),

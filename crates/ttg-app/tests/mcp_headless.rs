@@ -2816,3 +2816,81 @@ fn headless_project_import_and_approval_status() {
     assert!(!err, "{list}");
     assert_eq!(list["tickets"], json!([]), "headless never prompts");
 }
+
+/// Terse replies, renaming over MCP, a saved untitled project taking its file's name,
+/// subnets that do not collide, and numeric `extra` values stored as the schema wants.
+#[test]
+fn headless_terse_replies_rename_and_defaults() {
+    let server = start("managed-data.ttg.json");
+    let mut c = Client::new(&server);
+    c.initialize();
+
+    // A new subnet in the network takes the first free /24, the next one the one after.
+    let (err, a) = c.call(
+        "entity_add",
+        json!({"type_id": "subnet", "name": "extra a", "parent": "core"}),
+    );
+    assert!(!err, "{a}");
+    assert_eq!(a["entity"]["config"]["cidr_block"], json!("10.50.2.0/24"), "{a}");
+    let (err, b) = c.call(
+        "entity_add",
+        json!({"type_id": "subnet", "name": "extra b", "parent": "core", "verbose": false}),
+    );
+    assert!(!err, "{b}");
+    // verbose: false answers with the status, the id and whether anything changed.
+    assert_eq!(b.as_object().unwrap().len(), 3, "{b}");
+    assert_eq!(b["changed"], json!(true), "{b}");
+    let id = b["id"].as_str().unwrap().to_string();
+    let p = project_of(&mut c);
+    assert_eq!(p["nodes"][&id]["config"]["cidr_block"], json!("10.50.3.0/24"));
+
+    // The session default, and a call's own verbose winning over it.
+    let (err, s) = c.call("settings_set", json!({"verbose": false, "name": "zip staging"}));
+    assert!(!err, "{s}");
+    assert_eq!(s["name"], json!("zip staging"), "{s}");
+    let (err, u) = c.call(
+        "entity_update",
+        json!({"entity": "app db", "config": {"storage": "40"}}),
+    );
+    assert!(!err, "{u}");
+    assert_eq!(u, json!({"status": "updated", "id": "db-app", "changed": true}));
+    let p = project_of(&mut c);
+    assert_eq!(p["name"], json!("zip staging"));
+    assert_eq!(
+        p["nodes"]["db-app"]["config"]["storage"],
+        json!(40),
+        "stored as a number"
+    );
+    let (err, l) = c.call(
+        "link_add",
+        json!({"source": "app db", "target": "app config", "relation": "reads"}),
+    );
+    assert!(!err, "{l}");
+    assert_eq!(l["id"], json!("db-app -reads-> sec-app"), "{l}");
+    let (err, full) = c.call(
+        "entity_update",
+        json!({"entity": "web lb", "extra": {"deregistration_delay": 30}, "extra_block": "tg", "extra_provider": "aws", "verbose": true}),
+    );
+    assert!(!err, "{full}");
+    assert!(
+        full.get("entity").is_some(),
+        "verbose: true gives the whole entity: {full}"
+    );
+    let p = project_of(&mut c);
+    assert_eq!(
+        p["nodes"]["lb-web"]["extra"]["aws"]["tg"]["deregistration_delay"],
+        json!("30"),
+        "a number for a string argument is stored as the string"
+    );
+
+    // An untitled project saved to a named file takes the file's name.
+    let (err, _) = c.call("settings_set", json!({"name": "untitled"}));
+    assert!(!err);
+    let dir = std::env::temp_dir().join(format!("ttg-save-name-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let path = dir.join("zipos-aws-staging.ttg.json");
+    let (err, saved) = c.call("project_save", json!({"path": path.to_string_lossy()}));
+    assert!(!err, "{saved}");
+    assert_eq!(project_of(&mut c)["name"], json!("zipos-aws-staging"));
+    let _ = std::fs::remove_dir_all(&dir);
+}

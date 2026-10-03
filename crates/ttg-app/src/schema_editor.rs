@@ -365,6 +365,14 @@ fn value_editor(
                     match serde_json::from_str::<J>(&text) {
                         Ok(v) => {
                             err = None;
+                            let resource = app
+                                .project
+                                .entity(id)
+                                .and_then(|e| app.catalog.mapping(e.resource_type, provider))
+                                .and_then(|m| m.blocks.iter().find(|b| b.key == block))
+                                .map(|b| b.resource.clone())
+                                .unwrap_or_default();
+                            let v = ttg_codegen::diagnostics::canonical_extra(provider, &resource, name, v);
                             if let Some(m) = app.project.extra_args_mut(id, provider, block) {
                                 m.insert(name.to_string(), v);
                             }

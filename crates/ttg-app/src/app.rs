@@ -633,12 +633,60 @@ impl TtgApp {
                 );
             }
         }
+        self.assign_free_subnet_cidr(&id);
         self.finish(before);
         self.reveal_new(&id);
         self.selection.clear();
         self.selection.insert(id.clone());
         self.selected_edge = None;
         Some(id)
+    }
+
+    /// Give a subnet the first block its network has free (a /24 in most networks;
+    /// 10.0.0.0/16 stands in for the network while it is drawn outside one), so subnets
+    /// added one after another do not all start on the definition's default and collide.
+    pub fn assign_free_subnet_cidr(&mut self, id: &str) {
+        let Some(n) = self.project.nodes.get(id) else {
+            return;
+        };
+        if n.resource_type != "subnet" {
+            return;
+        }
+        let network = self.project.ancestor_of_type(id, "virtual_network");
+        let network_id = network.map(|c| c.id.clone());
+        let range = network
+            .and_then(|c| c.config.get("cidr_block"))
+            .and_then(|v| v.as_str())
+            .filter(|s| ttg_core::cidr::parse(s).is_some())
+            .unwrap_or("10.0.0.0/16")
+            .to_string();
+        let taken: Vec<String> = self
+            .project
+            .nodes
+            .values()
+            .filter(|x| x.id != id && x.resource_type == "subnet")
+            .filter(|x| {
+                self.project
+                    .ancestor_of_type(&x.id, "virtual_network")
+                    .map(|c| &c.id)
+                    == network_id.as_ref()
+            })
+            .filter_map(|x| {
+                x.config
+                    .get("cidr_block")
+                    .and_then(|v| v.as_str())
+                    .map(str::to_string)
+            })
+            .collect();
+        let taken: Vec<&str> = taken.iter().map(String::as_str).collect();
+        let Some(prefix) = ttg_core::cidr::subnet_prefix(&range) else {
+            return;
+        };
+        if let Some(free) = ttg_core::cidr::next_free(&range, prefix, &taken) {
+            if let Some(n) = self.project.nodes.get_mut(id) {
+                n.config.insert("cidr_block".into(), ttg_core::Value::Str(free));
+            }
+        }
     }
 
     pub fn delete_selection(&mut self) {
@@ -897,6 +945,19 @@ impl TtgApp {
     }
 
     pub fn save_to(&mut self, p: PathBuf) {
+        // A project still called "untitled" takes the name of the file it is saved as.
+        if self.project.name.trim().is_empty() || self.project.name == "untitled" {
+            if let Some(stem) = p.file_name().and_then(|f| f.to_str()) {
+                let stem = stem
+                    .strip_suffix(".ttg.json")
+                    .or_else(|| stem.strip_suffix(".json"))
+                    .unwrap_or(stem);
+                if !stem.trim().is_empty() {
+                    self.project.name = stem.to_string();
+                    self.diag_dirty = true;
+                }
+            }
+        }
         match ttg_core::project::save(&self.project, &p) {
             Ok(()) => {
                 self.path = Some(p.clone());

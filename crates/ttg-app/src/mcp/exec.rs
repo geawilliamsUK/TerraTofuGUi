@@ -395,6 +395,7 @@ impl TtgApp {
                 x,
                 y,
                 providers,
+                verbose: _,
             } => {
                 self.check_providers(providers.as_deref())?;
                 let r = self.agent_entity_add(&type_id, name, parent, x, y)?;
@@ -421,6 +422,7 @@ impl TtgApp {
                 extra_provider,
                 extra_block,
                 meta,
+                verbose: _,
             } => {
                 self.check_providers(providers.as_deref())?;
                 // Checked before anything is written, like every other field.
@@ -454,11 +456,15 @@ impl TtgApp {
                         ));
                     }
                     let before = self.snapshot();
+                    let resource = m.blocks.iter().find(|b| b.key == block).map(|b| b.resource.clone()).unwrap_or_default();
                     if let Some(map) = self.project.extra_args_mut(&id, &prov, &block) {
                         for (k, v) in extra {
                             if v.is_null() {
                                 map.remove(&k);
                             } else {
+                                // Stored in the form the schema declares: `30` for a
+                                // string argument is kept as "30".
+                                let v = ttg_codegen::diagnostics::canonical_extra(&prov, &resource, &k, v);
                                 map.insert(k, v);
                             }
                         }
@@ -640,6 +646,7 @@ impl TtgApp {
                 target,
                 relation,
                 providers,
+                verbose: _,
             } => {
                 self.check_providers(providers.as_deref())?;
                 let s = self.resolve(&source)?;
@@ -1121,7 +1128,14 @@ impl TtgApp {
                 state_encryption,
                 state_encryption_key,
                 provider_versions,
+                name,
+                verbose,
             } => {
+                if let Some(n) = &name {
+                    if n.trim().is_empty() {
+                        return Err("name must not be empty".into());
+                    }
+                }
                 // Everything is checked before anything changes, so a refused call leaves
                 // the settings as they were.
                 let tool: Option<Tool> = match tool {
@@ -1226,10 +1240,18 @@ impl TtgApp {
                         }
                     }
                 }
+                if let Some(n) = name {
+                    self.project.name = n.trim().to_string();
+                }
+                if let Some(v) = verbose {
+                    self.mcp.terse_replies = !v;
+                }
                 self.finish(before);
                 let s = &self.project.settings;
                 Ok(json!({
                     "status": "settings updated",
+                    "name": self.project.name,
+                    "verbose": !self.mcp.terse_replies,
                     "tool": s.tool,
                     "provider": s.target_provider,
                     "kubernetes_manifests": s.kubernetes_manifests,
@@ -1526,6 +1548,8 @@ impl TtgApp {
         }
         if let Some(p) = &pid {
             self.project.set_parent(&id, Some(p));
+            // The network is known only now: pick the subnet's range inside it.
+            self.assign_free_subnet_cidr(&id);
         }
         self.finish(before);
         self.flash(&id);

@@ -2120,6 +2120,70 @@ fn nested_self_block_refs(n: &NestedBlockDef, out: &mut Vec<String>) {
     }
 }
 
+/// An extra argument in the form the provider schema declares, for storing it that way:
+/// `30` for a string argument becomes `"30"` (HCL would convert it anyway), `"30"` for a
+/// number becomes `30` and `"true"` for a bool becomes `true`. Nested blocks (an object,
+/// or a list of objects) are converted argument by argument. Anything else, references
+/// and raw expressions included, is returned as it is.
+pub fn canonical_extra(provider: &str, resource: &str, key: &str, v: serde_json::Value) -> serde_json::Value {
+    match ttg_schema::index().resource(provider, resource) {
+        Some(schema) => canonical_in(schema, key, v),
+        None => v,
+    }
+}
+
+fn canonical_in(schema: &ttg_schema::BlockSchema, key: &str, v: serde_json::Value) -> serde_json::Value {
+    use serde_json::Value as J;
+    use ttg_schema::TypeKind as K;
+    if let Some(a) = schema.attributes.get(key) {
+        return match (a.kind(), v) {
+            (K::String, J::Number(n)) => J::String(n.to_string()),
+            (K::String, J::Bool(b)) => J::String(b.to_string()),
+            (K::Number, J::String(s)) => match s.trim().parse::<i64>() {
+                Ok(i) => J::from(i),
+                Err(_) => match s
+                    .trim()
+                    .parse::<f64>()
+                    .ok()
+                    .and_then(serde_json::Number::from_f64)
+                {
+                    Some(n) => J::Number(n),
+                    None => J::String(s),
+                },
+            },
+            (K::Bool, J::String(s)) if s == "true" || s == "false" => J::Bool(s == "true"),
+            (_, other) => other,
+        };
+    }
+    let Some(nested) = schema.blocks.get(key) else {
+        return v;
+    };
+    let block = nested.block();
+    let fix = |o: serde_json::Map<String, J>| -> J {
+        J::Object(
+            o.into_iter()
+                .map(|(k, x)| {
+                    let x = canonical_in(block, &k, x);
+                    (k, x)
+                })
+                .collect(),
+        )
+    };
+    match v {
+        J::Object(o) if !o.contains_key("$ref") && !o.contains_key("$raw") => fix(o),
+        J::Array(items) => J::Array(
+            items
+                .into_iter()
+                .map(|i| match i {
+                    J::Object(o) => fix(o),
+                    other => other,
+                })
+                .collect(),
+        ),
+        other => other,
+    }
+}
+
 fn json_matches(kind: ttg_schema::TypeKind, v: &serde_json::Value) -> bool {
     use ttg_schema::TypeKind as K;
     if v.as_object()
@@ -2128,7 +2192,8 @@ fn json_matches(kind: ttg_schema::TypeKind, v: &serde_json::Value) -> bool {
         return true;
     }
     match kind {
-        K::String => v.is_string(),
+        // HCL turns a number or bool into the string an argument wants.
+        K::String => v.is_string() || v.is_number() || v.is_boolean(),
         K::Number => v.is_number() || v.is_string(),
         K::Bool => v.is_boolean() || v.is_string(),
         K::List | K::Set => v.is_array(),

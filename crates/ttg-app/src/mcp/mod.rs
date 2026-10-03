@@ -341,6 +341,9 @@ pub enum AgentCommand {
         x: Option<i32>,
         y: Option<i32>,
         providers: Option<Vec<String>>,
+        /// `Some(false)`: reply with only `status`, `id` and `changed`; `None`: the
+        /// session default (`settings_set { verbose }`).
+        verbose: Option<bool>,
     },
     EntityUpdate {
         entity: String,
@@ -354,6 +357,9 @@ pub enum AgentCommand {
         extra_block: Option<String>,
         /// Classification, description and owner.
         meta: EntityMeta,
+        /// `Some(false)`: reply with only `status`, `id` and `changed`; `None`: the
+        /// session default (`settings_set { verbose }`).
+        verbose: Option<bool>,
     },
     SchemaSearch {
         provider: Option<String>,
@@ -393,6 +399,9 @@ pub enum AgentCommand {
         target: String,
         relation: String,
         providers: Option<Vec<String>>,
+        /// `Some(false)`: reply with only `status`, `id` and `changed`; `None`: the
+        /// session default (`settings_set { verbose }`).
+        verbose: Option<bool>,
     },
     LinkRemove {
         source: String,
@@ -527,6 +536,11 @@ pub enum AgentCommand {
         state_encryption_key: Option<serde_json::Value>,
         /// Merged into the pins; a null or empty value removes one.
         provider_versions: Option<serde_json::Map<String, serde_json::Value>>,
+        /// The project's name (used in the export's README and the default state key).
+        name: Option<String>,
+        /// Session default for entity_add / entity_update / link_add replies: `false`
+        /// returns only status, id and changed. Not saved with the project.
+        verbose: Option<bool>,
     },
     ProjectSave {
         path: Option<String>,
@@ -662,6 +676,17 @@ impl AgentCommand {
             _ => None,
         }
     }
+    /// Whether this command's reply is cut down to status, id and changed: an explicit
+    /// `verbose: false`, or the session default for the three commands that take it.
+    pub fn terse(&self, default: bool) -> bool {
+        match self {
+            AgentCommand::EntityAdd { verbose, .. }
+            | AgentCommand::EntityUpdate { verbose, .. }
+            | AgentCommand::LinkAdd { verbose, .. } => verbose.map(|v| !v).unwrap_or(default),
+            _ => false,
+        }
+    }
+
     pub fn is_write(&self) -> bool {
         !matches!(
             self,
@@ -689,6 +714,26 @@ impl AgentCommand {
                 | AgentCommand::CostEstimate { .. }
         )
     }
+}
+
+/// The short form of an entity_add / entity_update / link_add reply. A link's id is
+/// `<source> -<relation>-> <target>`.
+fn terse_reply(r: &serde_json::Value, changed: bool) -> serde_json::Value {
+    let id = r
+        .get("id")
+        .cloned()
+        .or_else(|| r.get("entity").and_then(|e| e.get("id")).cloned())
+        .or_else(|| {
+            let (s, t, rel) = (r.get("source")?, r.get("target")?, r.get("relation")?);
+            Some(serde_json::Value::String(format!(
+                "{} -{}-> {}",
+                s.as_str()?,
+                rel.as_str()?,
+                t.as_str()?
+            )))
+        })
+        .unwrap_or(serde_json::Value::Null);
+    serde_json::json!({"status": r["status"], "id": id, "changed": changed})
 }
 
 /// Events pushed from the UI thread to the server runtime (fan-out to subscribed
@@ -731,6 +776,9 @@ pub struct LogEntry {
 /// Everything the app keeps for the MCP feature.
 pub struct McpState {
     pub settings: McpSettings,
+    /// entity_add / entity_update / link_add answer with only status, id and changed
+    /// unless a call asks for more (`settings_set { verbose: false }`; this session only).
+    pub terse_replies: bool,
     pub running: Option<Running>,
     /// Commands queued by the server thread.
     pub rx: mpsc::Receiver<(AgentCommand, AgentReply)>,
@@ -784,6 +832,7 @@ impl Default for McpState {
         let (tx, rx) = mpsc::channel();
         McpState {
             settings: McpSettings::default(),
+            terse_replies: false,
             running: None,
             rx,
             tx,
@@ -1251,9 +1300,15 @@ impl TtgApp {
     fn exec_logged(&mut self, cmd: AgentCommand) -> Result<serde_json::Value, String> {
         let label = cmd.label();
         let is_write = cmd.is_write();
+        let terse = cmd.terse(self.mcp.terse_replies);
+        let before = terse.then(|| self.project.clone());
         self.mcp.in_agent = true;
         let result = self.agent_exec(cmd);
         self.mcp.in_agent = false;
+        let result = match (result, before) {
+            (Ok(r), Some(before)) => Ok(terse_reply(&r, before != self.project)),
+            (other, _) => other,
+        };
         if is_write {
             self.status = match &result {
                 Ok(_) => format!("Agent: {label}"),
@@ -1496,6 +1551,7 @@ mod tests {
             x: None,
             y: None,
             providers: None,
+            verbose: None,
         }
     }
 
@@ -1672,6 +1728,7 @@ mod tests {
                 x: None,
                 y: None,
                 providers: None,
+                verbose: None,
             },
         );
         drop(abandoned);
@@ -1684,6 +1741,7 @@ mod tests {
                 x: None,
                 y: None,
                 providers: None,
+                verbose: None,
             },
         );
 
