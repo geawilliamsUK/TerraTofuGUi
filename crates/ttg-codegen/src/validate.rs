@@ -99,7 +99,7 @@ pub fn plugin_cache_dir() -> std::path::PathBuf {
 
 /// Write (or refresh) the private CLI config next to the cache. Returns `None` if the
 /// file cannot be written, in which case init still works, just without the cache.
-fn cli_config_file(cache: &Path) -> Option<std::path::PathBuf> {
+pub(crate) fn cli_config_file(cache: &Path) -> Option<std::path::PathBuf> {
     let path = cache.parent()?.join("validate.tfrc");
     let cache_str = cache.to_string_lossy().replace('\\', "/");
     let body = format!(

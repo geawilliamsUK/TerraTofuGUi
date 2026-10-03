@@ -22,10 +22,21 @@ pub struct Args<'a> {
     pub by: By,
     /// Also print every charge of every line.
     pub detail: bool,
+    /// Price this named environment's values (`Project::for_environment`).
+    pub environment: Option<String>,
 }
 
 pub fn run(cat: &mut Catalog, a: Args) -> Result<()> {
-    let p = ttg_core::project::load(a.project)?;
+    let raw = ttg_core::project::load(a.project)?;
+    if let Some(e) = &a.environment {
+        if !raw.settings.environments.contains(e) {
+            bail!(
+                "no environment \"{e}\" (environments: {})",
+                raw.settings.environments.join(", ")
+            );
+        }
+    }
+    let p = raw.resolved(a.environment.as_deref()).into_owned();
     cat.ensure_native_types(&p);
     let provider = a.provider.unwrap_or(p.settings.target_provider.clone());
     let est = match cost::estimate(&p, cat, &provider, a.region.as_deref()) {

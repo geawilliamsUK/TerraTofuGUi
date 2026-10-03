@@ -24,6 +24,7 @@ pub mod k8s;
 pub mod layers;
 pub mod owned;
 pub mod plan;
+pub mod plan_run;
 pub mod reach;
 pub mod refs;
 pub mod state;

@@ -164,6 +164,34 @@ enum Cmd {
         /// The whole estimate as JSON.
         #[arg(long)]
         json: bool,
+        /// Price one named environment's values (default: the base values).
+        #[arg(long)]
+        environment: Option<String>,
+    },
+    /// Export, then `init` and `plan` the result, and report the planned changes per
+    /// entity. Without --real-backend the plan runs in a scratch copy with local state,
+    /// so it shows what applying would create from nothing. Exits 1 when no plan was made.
+    Plan {
+        project: PathBuf,
+        #[arg(long)]
+        provider: Option<String>,
+        #[arg(long)]
+        tool: Option<ToolArg>,
+        /// Export directory (default: a directory under the system's temporary one).
+        #[arg(long)]
+        out: Option<PathBuf>,
+        /// The environment whose `.tfvars` to plan with (default: the first).
+        #[arg(long)]
+        environment: Option<String>,
+        /// Plan against the configured backend, with the environment's backend file.
+        #[arg(long)]
+        real_backend: bool,
+        /// A value for a variable the files leave unset, `NAME=VALUE` (repeatable).
+        #[arg(long = "var", value_name = "NAME=VALUE")]
+        vars: Vec<String>,
+        /// The whole report as JSON.
+        #[arg(long)]
+        json: bool,
     },
     /// Re-lay out a project file automatically (columns by dependency, containers fitted).
     Tidy {
@@ -548,6 +576,7 @@ fn main() -> Result<()> {
             by,
             detail,
             json,
+            environment,
         } => cost::run(
             &mut cat,
             cost::Args {
@@ -557,8 +586,57 @@ fn main() -> Result<()> {
                 json,
                 by,
                 detail,
+                environment,
             },
         )?,
+        Cmd::Plan {
+            project,
+            provider,
+            tool,
+            out,
+            environment,
+            real_backend,
+            vars,
+            json,
+        } => {
+            let p = ttg_core::project::load(&project)?;
+            cat.ensure_native_types(&p);
+            let provider = provider.unwrap_or(p.settings.target_provider.clone());
+            let tool: Tool = tool.map(Into::into).unwrap_or(p.settings.tool);
+            let out = out.unwrap_or_else(|| {
+                std::env::temp_dir()
+                    .join("terratofu-plan")
+                    .join(ttg_core::slugify(&p.name))
+                    .join(&provider)
+            });
+            let mut opts = ttg_codegen::plan_run::PlanOptions {
+                real_backend,
+                ..Default::default()
+            };
+            for v in vars {
+                let (k, val) = v
+                    .split_once('=')
+                    .with_context(|| format!("--var {v}: expected NAME=VALUE"))?;
+                opts.vars.insert(k.trim().to_string(), val.to_string());
+            }
+            let rep = ttg_codegen::plan_run::export_and_plan(
+                &p,
+                &cat,
+                &provider,
+                tool,
+                &out,
+                environment.as_deref(),
+                opts,
+            )?;
+            if json {
+                println!("{}", serde_json::to_string_pretty(&rep)?);
+            } else {
+                print_plan(&rep);
+            }
+            if rep.status != ttg_codegen::plan_run::PlanStatus::Planned {
+                std::process::exit(1);
+            }
+        }
         Cmd::Tidy { project, out } => {
             let mut p = ttg_core::project::load(&project)?;
             cat.ensure_native_types(&p);
@@ -837,6 +915,57 @@ fn print_report(rep: &ttg_codegen::ExportReport) {
             "  {} manual step(s) — see MANUAL_STEPS.md",
             rep.manual_steps.len()
         );
+    }
+}
+
+fn print_plan(rep: &ttg_codegen::plan_run::PlanReport) {
+    println!(
+        "[{}] {} in {}{}",
+        serde_json::to_value(rep.status)
+            .ok()
+            .and_then(|v| v.as_str().map(str::to_string))
+            .unwrap_or_default(),
+        rep.tool.display_name(),
+        rep.dir.display(),
+        rep.var_file
+            .as_deref()
+            .map(|v| format!(" with {v}"))
+            .unwrap_or_default()
+    );
+    println!("{}", rep.summary);
+    for e in &rep.entities {
+        let mut parts = Vec::new();
+        for (n, what) in [
+            (e.create, "create"),
+            (e.update, "update"),
+            (e.replace, "replace"),
+            (e.delete, "delete"),
+            (e.read, "read"),
+        ] {
+            if n > 0 {
+                parts.push(format!("{n} to {what}"));
+            }
+        }
+        println!(
+            "  {} {:<28} {}",
+            e.badge().unwrap_or(" "),
+            e.name,
+            parts.join(", ")
+        );
+    }
+    for u in &rep.unattributed {
+        println!("  ? {:<28} {}", u.address, u.change);
+    }
+    for d in &rep.diagnostics {
+        let at = match (&d.entity_name, &d.file, d.line) {
+            (Some(n), _, _) => format!(" [{n}]"),
+            (None, Some(f), Some(l)) => format!(" [{f}:{l}]"),
+            _ => String::new(),
+        };
+        println!("  {}{at}: {}", d.severity, d.summary);
+        if let Some(def) = &d.definition {
+            println!("      mapping: {def}");
+        }
     }
 }
 
