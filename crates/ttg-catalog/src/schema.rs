@@ -508,6 +508,12 @@ pub struct CondRelation {
     /// `min_count` then apply to what the hop reaches.
     #[serde(default)]
     pub hop: Option<Hop>,
+    /// Only count targets (or, with `incoming`, sources) for which this condition holds
+    /// when it is evaluated on *them* (v2): "an app that links me as its role and has no
+    /// execution role of its own". Needs `target_type`, which says whose fields and
+    /// relations the condition may name.
+    #[serde(default, rename = "where")]
+    pub where_: Option<Box<Condition>>,
 }
 #[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -528,6 +534,15 @@ pub struct CondItem {
     /// scalar counts as one) (v2).
     #[serde(default)]
     pub min_count: Option<usize>,
+    /// `{ item = "secret", linked = "reads" }` — the `entity_ref` item points at one of
+    /// this entity's targets of that relation (v2), so a row can be held to the links
+    /// that grant access to what it names.
+    #[serde(default)]
+    pub linked: Option<String>,
+    /// Invert the test (v2): `{ item = "key", absent = true }` holds when the row has no
+    /// value for the item.
+    #[serde(default)]
+    pub absent: bool,
 }
 #[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -662,6 +677,9 @@ pub enum ArgSource {
     EntityVar(SrcEntityVar),
     /// `{ if = <condition>, then = <source>, else = <source> }` (v2).
     If(SrcIf),
+    /// `{ for_each_field = "env", each = <source> }` — a list with one element per row of
+    /// a table field, `each` resolved with that row as the `item` (v2).
+    Rows(SrcRows),
     /// `{ raw = "..." }` — raw HCL expression, optionally with `refs` spliced in at
     /// `@name@`. Last resort.
     Raw(SrcRaw),
@@ -770,6 +788,11 @@ pub struct SrcRelation {
     /// Take a second step from each target and reference what it reaches instead (v2).
     #[serde(default)]
     pub hop: Option<Hop>,
+    /// Resolve the target's own `connection` value of this key (v2): what a client needs
+    /// to reach it, as its mapping declares it for the provider — a registry's host, a
+    /// bucket's name. Alternative to `attr`, `field` and `block`.
+    #[serde(default)]
+    pub connection: Option<String>,
 }
 #[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -878,6 +901,18 @@ pub struct SrcIf {
     pub then: Box<ArgSource>,
     #[serde(rename = "else", default)]
     pub otherwise: Option<Box<ArgSource>>,
+}
+/// A list built from a table field: one element per row (or per entry of a string_list,
+/// whose row has the single item `value`), the rows `when` rejects left out, and rows
+/// whose `each` resolves to nothing skipped. What `for_each_field` is to a block, this is
+/// to an argument value — a container's environment inside `jsonencode`, say.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SrcRows {
+    pub for_each_field: String,
+    pub each: Box<ArgSource>,
+    #[serde(default)]
+    pub when: Option<Condition>,
 }
 #[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]

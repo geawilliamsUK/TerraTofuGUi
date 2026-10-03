@@ -939,6 +939,13 @@ pub fn condition_holds_for(
                 .iter()
                 .filter(|t| {
                     let Some(te) = p.entity(t) else { return false };
+                    // `where` asks the entity at the other end a question of its own.
+                    if r.where_
+                        .as_ref()
+                        .is_some_and(|w| !condition_holds(p, cat, provider, &te, w, None))
+                    {
+                        return false;
+                    }
                     let v = if let Some(f) = &r.target_field {
                         field_or_default(cat, provider, &te, f, false)
                     } else if let Some(f) = &r.target_provider_field {
@@ -1021,28 +1028,33 @@ pub fn condition_holds_for(
             let Some((record, _)) = item else {
                 return false;
             };
-            if let Some(ty) = &i.ref_type {
-                return record
+            let holds = if let Some(ty) = &i.ref_type {
+                record
                     .get(&i.item)
                     .and_then(|v| v.as_str())
                     .and_then(|id| p.entity(id))
-                    .is_some_and(|t| t.resource_type == ty);
-            }
-            if let Some(other) = &i.equals_item {
+                    .is_some_and(|t| t.resource_type == ty)
+            } else if let Some(rel) = &i.linked {
+                let id = record.get(&i.item).and_then(|v| v.as_str()).unwrap_or_default();
+                !id.is_empty()
+                    && Relation::from_key(rel)
+                        .is_some_and(|k| relation_targets(p, cat, e, k).iter().any(|t| t == id))
+            } else if let Some(other) = &i.equals_item {
                 let a = record.get(&i.item).map(|v| v.display());
                 let b = record.get(other).map(|v| v.display());
-                return a.is_some() && a == b;
-            }
-            if let Some(n) = i.min_count {
+                a.is_some() && a == b
+            } else if let Some(n) = i.min_count {
                 let count = match record.get(&i.item) {
                     Some(Value::List(l)) => l.len(),
                     Some(Value::Records(r)) => r.len(),
                     Some(v) if !v.is_empty() => 1,
                     _ => 0,
                 };
-                return count >= n;
-            }
-            cond_value(record.get(&i.item), &i.equals, &i.not_equals)
+                count >= n
+            } else {
+                cond_value(record.get(&i.item), &i.equals, &i.not_equals)
+            };
+            holds != i.absent
         }
         Condition::Not(n) => !condition_holds_for(p, cat, provider, e, &n.not, item, target),
         Condition::All(a) => a
@@ -1417,6 +1429,12 @@ fn scan_source(s: &ArgSource, rel: &mut HashSet<Consumed>, anc: &mut HashSet<Str
                 scan_source(o, rel, anc);
             }
         }
+        ArgSource::Rows(r) => {
+            if let Some(c) = &r.when {
+                scan_cond(c, rel);
+            }
+            scan_source(&r.each, rel, anc);
+        }
         ArgSource::Raw(r) => r.refs.values().for_each(|x| scan_source(x, rel, anc)),
         ArgSource::Object(o) => o.object.values().for_each(|x| scan_source(x, rel, anc)),
         ArgSource::List(l) => l.list.iter().for_each(|x| scan_source(x, rel, anc)),
@@ -1679,12 +1697,12 @@ fn network_checks(p: &Project, cat: &Catalog, provider: &str, out: &mut Vec<Diag
         }
     }
 
-    // Functions and container apps in subnets need an outbound route to reach queues,
-    // secrets and storage, unless every such link goes over a private endpoint in the
-    // same network.
+    // Functions, container apps and jobs in subnets need an outbound route to reach
+    // queues, secrets and storage, unless every such link goes over a private endpoint in
+    // the same network.
     for f in entities
         .iter()
-        .filter(|e| e.resource_type == "function" || e.resource_type == "container_app")
+        .filter(|e| matches!(e.resource_type, "function" | "container_app" | "container_job"))
     {
         let subnets = relation_targets(p, cat, f, Relation::NetworkMembership);
         let Some(s) = subnets.iter().find(|s| !egress_subnets.contains(*s)) else {
@@ -1898,6 +1916,9 @@ fn extra_checks(p: &Project, cat: &Catalog, provider: &str, out: &mut Vec<Diagno
                     }
                 }
             }
+            if let Some(extra) = extra {
+                orphaned_by_extra(p, cat, provider, &e, m, b, extra, out);
+            }
             if native {
                 let have = extra.cloned().unwrap_or_default();
                 let missing: Vec<&str> = schema
@@ -1916,6 +1937,123 @@ fn extra_checks(p: &Project, cat: &Catalog, provider: &str, out: &mut Vec<Diagno
                 }
             }
         }
+    }
+}
+
+/// An `extra` argument that replaces the mapping's reference to another of the entity's
+/// own blocks can leave that block created and used by nothing: a service pointed at a
+/// shared cluster by hand still gets a cluster of its own. Reported when the replaced
+/// argument was the block's only use inside the mapping — whatever else is derived from
+/// it (an output, another resource's reference to it) still points at the orphan.
+#[allow(clippy::too_many_arguments)]
+fn orphaned_by_extra(
+    p: &Project,
+    cat: &Catalog,
+    provider: &str,
+    e: &EntityRef,
+    m: &ProviderMapping,
+    b: &BlockDef,
+    extra: &ttg_core::ExtraArgs,
+    out: &mut Vec<Diagnostic>,
+) {
+    // (block it referred to, the argument that now replaces the reference)
+    let mut replaced: Vec<(String, String)> = Vec::new();
+    for k in extra.keys() {
+        if let Some(src) = b.args.get(k) {
+            let mut refs = Vec::new();
+            self_block_refs(src, &mut refs);
+            replaced.extend(refs.into_iter().map(|r| (r, k.clone())));
+        }
+    }
+    replaced.retain(|(k, _)| k != &b.key);
+    replaced.sort();
+    replaced.dedup_by(|a, b| a.0 == b.0);
+    for (key, arg) in replaced {
+        let Some(orphan) = m.blocks.iter().find(|x| x.key == key) else {
+            continue;
+        };
+        // Only a block that is actually emitted, once, can be orphaned.
+        if orphan.for_each_field.is_some() || orphan.for_each_relation.is_some() {
+            continue;
+        }
+        if orphan
+            .when
+            .as_ref()
+            .is_some_and(|c| !condition_holds(p, cat, provider, e, c, None))
+        {
+            continue;
+        }
+        let still_used = m.blocks.iter().any(|other| {
+            let overridden = |arg: &str| {
+                e.extra_args(provider, &other.key)
+                    .is_some_and(|x| x.contains_key(arg))
+            };
+            let mut refs = Vec::new();
+            for (k, src) in &other.args {
+                if !overridden(k) {
+                    self_block_refs(src, &mut refs);
+                }
+            }
+            for n in other.nested.iter().filter(|n| !overridden(&n.block)) {
+                nested_self_block_refs(n, &mut refs);
+            }
+            refs.iter().any(|r| r == &key)
+        });
+        if !still_used {
+            out.push(Diagnostic {
+                entity: Some(e.id.to_string()),
+                severity: Severity::Warning,
+                code: Code::Extra,
+                message: format!(
+                    "extra argument {}.{arg} replaces the only reference to this resource's own {} ({}), which is still created but used by nothing; outputs and other resources' references derived from it still point at it",
+                    b.key, orphan.key, orphan.resource
+                ),
+                provider: None,
+            });
+        }
+    }
+}
+
+/// Every `self_block` a source reads, at any depth.
+fn self_block_refs(src: &ArgSource, out: &mut Vec<String>) {
+    match src {
+        ArgSource::SelfBlock(s) => out.push(s.self_block.clone()),
+        ArgSource::If(i) => {
+            self_block_refs(&i.then, out);
+            if let Some(o) = &i.otherwise {
+                self_block_refs(o, out);
+            }
+        }
+        ArgSource::Field(f) => {
+            if let Some(fb) = &f.fallback {
+                self_block_refs(fb, out);
+            }
+        }
+        ArgSource::ProviderField(f) => {
+            if let Some(fb) = &f.fallback {
+                self_block_refs(fb, out);
+            }
+        }
+        ArgSource::Relation(r) => {
+            if let Some(fb) = &r.fallback {
+                self_block_refs(fb, out);
+            }
+        }
+        ArgSource::Rows(r) => self_block_refs(&r.each, out),
+        ArgSource::Raw(r) => r.refs.values().for_each(|x| self_block_refs(x, out)),
+        ArgSource::Object(o) => o.object.values().for_each(|x| self_block_refs(x, out)),
+        ArgSource::List(l) => l.list.iter().for_each(|x| self_block_refs(x, out)),
+        ArgSource::Func(f) => f.args.iter().for_each(|x| self_block_refs(x, out)),
+        _ => {}
+    }
+}
+
+fn nested_self_block_refs(n: &NestedBlockDef, out: &mut Vec<String>) {
+    for src in n.args.values() {
+        self_block_refs(src, out);
+    }
+    for inner in &n.nested {
+        nested_self_block_refs(inner, out);
     }
 }
 

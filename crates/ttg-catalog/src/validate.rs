@@ -349,8 +349,8 @@ pub fn catalog(cat: &Catalog) -> Vec<String> {
             errs.push(where_(
                 "uses schema_version 2 features (struct_list, for_each_field, data, item, \
                  item_index, self_data, if, fallback, target_type, for_each_relation, target, \
-                 provider_alias, setting, connection, manifests, env_prefix) but declares \
-                 schema_version = 1",
+                 provider_alias, setting, connection, manifests, env_prefix, where, linked) \
+                 but declares schema_version = 1",
             ));
         }
     }
@@ -540,6 +540,10 @@ fn check_condition(ctx: &mut SourceCtx, c: &Condition, errs: &mut Vec<String>) {
                     ctx.what
                 ));
             }
+            if let Some(w) = &r.where_ {
+                ctx.v2 = true;
+                check_where(ctx, r.target_type.as_deref(), w, errs);
+            }
             if r.incoming {
                 // The relation belongs to whoever links *here*, so it is not one of this
                 // type's own declarations: only the kind and the other end's type exist
@@ -648,6 +652,15 @@ fn check_condition(ctx: &mut SourceCtx, c: &Condition, errs: &mut Vec<String>) {
             if let Some(ty) = &i.ref_type {
                 check_ref_type(ctx, &i.item, ty, errs);
             }
+            if let Some(rel) = &i.linked {
+                if !entity_ref_item(ctx, &i.item) {
+                    errs.push(format!(
+                        "{}when linked: item '{}' is not an entity_ref",
+                        ctx.what, i.item
+                    ));
+                }
+                check_relation_ref(ctx, "when linked", rel, None, errs);
+            }
             if i.min_count == Some(0) {
                 errs.push(format!(
                     "{}when item '{}': min_count must be at least 1",
@@ -683,6 +696,45 @@ fn check_condition(ctx: &mut SourceCtx, c: &Condition, errs: &mut Vec<String>) {
             }
         }
     }
+}
+
+/// Is `item` an `entity_ref` sub-field of some table field of this type?
+fn entity_ref_item(ctx: &SourceCtx, item: &str) -> bool {
+    ctx.fields
+        .iter()
+        .chain(ctx.provider_fields.iter())
+        .flat_map(|f| f.items.iter())
+        .any(|sub| sub.name == item && sub.field_type == FieldType::EntityRef)
+}
+
+/// A relation condition's `where` is evaluated on the entity at the other end, so it is
+/// checked against *that* type's fields and relations, which `target_type` names.
+fn check_where(ctx: &mut SourceCtx, target_type: Option<&str>, w: &Condition, errs: &mut Vec<String>) {
+    let Some(tt) = target_type else {
+        errs.push(format!(
+            "{}when where: needs target_type, which says whose fields and links it reads",
+            ctx.what
+        ));
+        return;
+    };
+    let Some(other) = ctx.cat.resources.get(tt) else {
+        return; // reported as an unknown target_type
+    };
+    let mut sub = SourceCtx {
+        what: format!("{}when where ({tt}): ", ctx.what),
+        fields: &other.fields,
+        provider_fields: &[],
+        relations: &other.relations,
+        blocks: &[],
+        data: &[],
+        vars: &[],
+        aliases: &[],
+        item_fields: None,
+        in_relation: false,
+        cat: ctx.cat,
+        v2: true,
+    };
+    check_condition(&mut sub, w, errs);
 }
 
 /// `ref_type` asks what an `entity_ref` item points at, so the item must be one and the
@@ -1062,6 +1114,39 @@ fn check_source(ctx: &mut SourceCtx, at: &str, src: &ArgSource, errs: &mut Vec<S
                     "transform on a relation source only applies together with field".into(),
                 ));
             }
+            if let Some(key) = &r.connection {
+                ctx.v2 = true;
+                if !r.attr.is_empty() || r.field.is_some() || r.block.is_some() {
+                    errs.push(e(
+                        "connection reads the target's own connection value, so it cannot be combined with attr, field or block"
+                            .into(),
+                    ));
+                }
+                // The value belongs to the entity at the other end: some provider mapping of
+                // a type it can be must declare the key.
+                let candidates: Vec<&str> = match &r.target_type {
+                    Some(tt) => vec![tt.as_str()],
+                    None if r.incoming => Vec::new(),
+                    None => ctx
+                        .relations
+                        .iter()
+                        .filter(|x| x.kind == r.relation)
+                        .flat_map(|x| x.targets.iter().map(String::as_str))
+                        .collect(),
+                };
+                let declared = candidates.iter().any(|t| {
+                    ctx.cat
+                        .resources
+                        .get(*t)
+                        .is_some_and(|d| d.providers.values().any(|m| m.connection.contains_key(key)))
+                });
+                if !candidates.is_empty() && !declared {
+                    errs.push(e(format!(
+                        "connection '{key}' is not declared by any mapping of {}",
+                        candidates.join(" / ")
+                    )));
+                }
+            }
             check_no_map_wrap(ctx, at, r.wrap, errs);
             if let Some(anc) = &r.ancestor {
                 ctx.v2 = true;
@@ -1128,6 +1213,21 @@ fn check_source(ctx: &mut SourceCtx, at: &str, src: &ArgSource, errs: &mut Vec<S
             if let Some(o) = &i.otherwise {
                 check_source(ctx, &format!("{at}.else"), o, errs);
             }
+        }
+        ArgSource::Rows(r) => {
+            ctx.v2 = true;
+            // The rows become the `item` of `each` and `when`, exactly as in a repeated
+            // block; an enclosing block's row is out of reach inside.
+            let outer = ctx.item_fields.clone();
+            match for_each_items(ctx, &r.for_each_field) {
+                Ok(items) => ctx.item_fields = Some(items),
+                Err(msg) => errs.push(e(format!("for_each_field: {msg}"))),
+            }
+            if let Some(c) = &r.when {
+                check_condition(ctx, c, errs);
+            }
+            check_source(ctx, &format!("{at}.each"), &r.each, errs);
+            ctx.item_fields = outer;
         }
         ArgSource::Object(o) => {
             for (k, s) in &o.object {

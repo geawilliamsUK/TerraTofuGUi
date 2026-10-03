@@ -490,6 +490,11 @@ pub fn generate(p: &Project, cat: &Catalog, provider: &str, tool: Tool) -> Resul
         }
     }
 
+    // Two apps that share an execution identity and read the same secret each ask for the
+    // same grant; Azure refuses the second identical role assignment, so it is written
+    // once and whatever depended on a copy depends on the one kept.
+    dedupe_grants(&mut emitted);
+
     // The Kubernetes manifests (`k8s/`): their values come from outputs added here, and
     // the one step they add (installing the controllers they use) joins the others.
     let manifests = if p.settings.kubernetes_manifests {
@@ -967,6 +972,122 @@ fn merge_tags(block: &Block, arg: &str, tags: &[(String, String)]) -> Block {
     b.build()
 }
 
+/// Resource types whose arguments are their whole identity: a grant of a role to a
+/// principal on a scope. Two identical ones are the same grant, which Azure refuses to
+/// create twice and the other providers would let two configurations fight over.
+fn is_grant(resource_type: &str) -> bool {
+    resource_type == "azurerm_role_assignment"
+        || resource_type == "aws_iam_role_policy_attachment"
+        || (resource_type.starts_with("google_") && resource_type.ends_with("_iam_member"))
+}
+
+/// Keep the first of each set of identical grants (same type, same arguments) and point
+/// every reference to a dropped copy — a `depends_on`, in practice — at the one kept.
+fn dedupe_grants(emitted: &mut Vec<Emitted>) {
+    let mut renamed: HashMap<(String, String), String> = HashMap::new();
+    let mut kept: Vec<(String, hcl::Body, String)> = Vec::new();
+    emitted.retain(|b| {
+        if b.kind != "resource" || !is_grant(&b.resource_type) {
+            return true;
+        }
+        match kept
+            .iter()
+            .find(|(t, body, _)| t == &b.resource_type && body == &b.block.body)
+        {
+            Some((_, _, local)) => {
+                renamed.insert((b.resource_type.clone(), b.local.clone()), local.clone());
+                false
+            }
+            None => {
+                kept.push((b.resource_type.clone(), b.block.body.clone(), b.local.clone()));
+                true
+            }
+        }
+    });
+    if renamed.is_empty() {
+        return;
+    }
+    for b in emitted.iter_mut() {
+        rename_in_body(&mut b.block.body, &renamed);
+    }
+}
+
+fn rename_in_body(body: &mut hcl::Body, renamed: &HashMap<(String, String), String>) {
+    for s in body.0.iter_mut() {
+        match s {
+            hcl::Structure::Attribute(a) => rename_in_expr(&mut a.expr, renamed),
+            hcl::Structure::Block(b) => rename_in_body(&mut b.body, renamed),
+        }
+    }
+}
+
+/// Rewrite `<type>.<dropped local>` to `<type>.<kept local>` wherever it appears.
+fn rename_in_expr(e: &mut Expression, renamed: &HashMap<(String, String), String>) {
+    match e {
+        Expression::Traversal(t) => {
+            if let (Expression::Variable(v), Some(hcl::TraversalOperator::GetAttr(local))) =
+                (&t.expr, t.operators.first())
+            {
+                if let Some(to) = renamed.get(&(v.to_string(), local.to_string())) {
+                    t.operators[0] = hcl::TraversalOperator::GetAttr(Identifier::unchecked(to.as_str()));
+                }
+            }
+            rename_in_expr(&mut t.expr, renamed);
+        }
+        Expression::Array(items) => items.iter_mut().for_each(|x| rename_in_expr(x, renamed)),
+        Expression::Object(o) => o.iter_mut().for_each(|(_, v)| rename_in_expr(v, renamed)),
+        Expression::FuncCall(f) => f.args.iter_mut().for_each(|x| rename_in_expr(x, renamed)),
+        Expression::Parenthesis(x) => rename_in_expr(x, renamed),
+        Expression::Conditional(c) => {
+            rename_in_expr(&mut c.cond_expr, renamed);
+            rename_in_expr(&mut c.true_expr, renamed);
+            rename_in_expr(&mut c.false_expr, renamed);
+        }
+        _ => {}
+    }
+}
+
+/// `concat` without its empty list literals, so a mapping can join a table field's rows to
+/// a few fixed entries without every configuration that has no rows (or no fixed entries)
+/// reading `concat([], [...])`: what is left alone is written as itself. `None` when no
+/// argument is an empty literal, which leaves the call as it was.
+fn fold_concat(args: &[Expression]) -> Option<Expression> {
+    let empty = |a: &Expression| matches!(a, Expression::Array(items) if items.is_empty());
+    if !args.iter().any(empty) {
+        return None;
+    }
+    let mut rest: Vec<Expression> = args.iter().filter(|a| !empty(a)).cloned().collect();
+    Some(match rest.len() {
+        0 => Expression::Array(Vec::new()),
+        1 => rest.remove(0),
+        _ => {
+            let mut fc = FuncCall::builder("concat");
+            for x in rest {
+                fc = fc.arg(x);
+            }
+            Expression::FuncCall(Box::new(fc.build()))
+        }
+    })
+}
+
+/// A `depends_on` value as Terraform wants it: one flat list of addresses. Nested lists
+/// (the instances of a repeated block) are spliced in place; an empty list is `None`.
+fn flat_depends_on(e: Expression) -> Option<Expression> {
+    fn walk(e: Expression, out: &mut Vec<Expression>) {
+        match e {
+            Expression::Array(items) => items.into_iter().for_each(|x| walk(x, out)),
+            other => {
+                if !out.contains(&other) {
+                    out.push(other);
+                }
+            }
+        }
+    }
+    let mut out = Vec::new();
+    walk(e, &mut out);
+    (!out.is_empty()).then_some(Expression::Array(out))
+}
+
 /// Add `depends_on` entries to a block, merging with a `depends_on` the mapping itself
 /// wrote so the attribute is never defined twice.
 fn with_depends_on(block: Block, deps: Vec<Expression>) -> Block {
@@ -1238,7 +1359,15 @@ impl<'a> Emitter<'a> {
                 continue; // an extra argument overrides what the mapping sets
             }
             let at = format!("{} \"{}\" / {}.{}", e.resource_type, e.name, b.resource, k);
-            if let Some(expr) = self.resolve(e, m, src, &at, item)? {
+            let resolved = self.resolve(e, m, src, &at, item)?;
+            // `depends_on` is a flat list of addresses: a repeated block's instances (a
+            // list of their own) are spliced in, and an empty list is no argument at all.
+            let resolved = if k == "depends_on" {
+                resolved.and_then(flat_depends_on)
+            } else {
+                resolved
+            };
+            if let Some(expr) = resolved {
                 builder = builder.add_attribute((k.as_str(), expr));
             }
         }
@@ -1740,6 +1869,14 @@ impl<'a> Emitter<'a> {
                     // `field = "..."` reads a field off the other entity as a literal, so
                     // the value carries no reference to its resource and cannot create a
                     // cycle. `attr` is the usual traversal.
+                    // `connection = "KEY"` is what the target's own mapping says a client
+                    // needs to reach it, resolved on the target.
+                    if let Some(key) = &r.connection {
+                        if let Some(x) = self.connection_value(&subject, key)? {
+                            exprs.push(x);
+                        }
+                        continue;
+                    }
                     if let Some(name) = &r.field {
                         let Some(te) = self.p.entity(&subject) else {
                             continue;
@@ -1826,13 +1963,43 @@ impl<'a> Emitter<'a> {
                 Some(Expression::Array(items))
             }
             ArgSource::Func(f) => {
-                let mut fc = FuncCall::builder(f.func.as_str());
+                let mut args = Vec::new();
                 for (i, s) in f.args.iter().enumerate() {
                     if let Some(x) = self.resolve(e, m, s, &format!("{at}.{}({i})", f.func), item)? {
-                        fc = fc.arg(x);
+                        args.push(x);
                     }
                 }
+                if f.func == "concat" {
+                    if let Some(folded) = fold_concat(&args) {
+                        return Ok(Some(folded));
+                    }
+                }
+                let mut fc = FuncCall::builder(f.func.as_str());
+                for x in args {
+                    fc = fc.arg(x);
+                }
                 Some(Expression::FuncCall(Box::new(fc.build())))
+            }
+            ArgSource::Rows(r) => {
+                // One element per row, resolved with that row as the `item`, the way a
+                // `for_each_field` block resolves its arguments.
+                let mut items = Vec::new();
+                for (n, row) in self
+                    .rows(e, Some(&r.for_each_field), None, None)
+                    .iter()
+                    .enumerate()
+                {
+                    let ctx = row.ctx(n);
+                    if let Some(c) = &r.when {
+                        if !self.cond_holds(e, c, ctx) {
+                            continue;
+                        }
+                    }
+                    if let Some(x) = self.resolve(e, m, &r.each, &format!("{at}[{n}]"), ctx)? {
+                        items.push(x);
+                    }
+                }
+                Some(Expression::Array(items))
             }
             ArgSource::Raw(r) => {
                 let mut text = r.raw.clone();
@@ -1860,26 +2027,31 @@ impl<'a> Emitter<'a> {
                 self.used_vars.insert(name.to_string());
                 var_ref(name)
             })),
-            Want::Connection { target, key } => {
-                let Some(t) = self.p.entity(target) else {
-                    return Ok(None);
-                };
-                let Some(declared) = self.cat.mapping(t.resource_type, self.provider) else {
-                    return Ok(None);
-                };
-                let Some(src) = declared.connection.get(key) else {
-                    return Ok(None);
-                };
-                let at = format!("{} \"{}\" / connection {key}", t.resource_type, t.name);
-                match self.status(&t) {
-                    Status::Emit(m) => self.resolve(&t, m, src, &at, None),
-                    Status::Manual | Status::Unmapped => {
-                        let attr = key.to_lowercase();
-                        self.reference(target, None, &attr, &at)
-                    }
-                    Status::Logical(_) => Ok(None),
-                }
+            Want::Connection { target, key } => self.connection_value(target, key),
+        }
+    }
+
+    /// One `connection` entry of another entity, resolved on that entity: what a client
+    /// needs to reach it. A manual or unmapped target becomes an input variable named
+    /// after the key, the same way any other reference to it does.
+    fn connection_value(&mut self, target: &str, key: &str) -> Result<Option<Expression>, GenError> {
+        let Some(t) = self.p.entity(target) else {
+            return Ok(None);
+        };
+        let Some(declared) = self.cat.mapping(t.resource_type, self.provider) else {
+            return Ok(None);
+        };
+        let Some(src) = declared.connection.get(key) else {
+            return Ok(None);
+        };
+        let at = format!("{} \"{}\" / connection {key}", t.resource_type, t.name);
+        match self.status(&t) {
+            Status::Emit(m) => self.resolve(&t, m, src, &at, None),
+            Status::Manual | Status::Unmapped => {
+                let attr = key.to_lowercase();
+                self.reference(target, None, &attr, &at)
             }
+            Status::Logical(_) => Ok(None),
         }
     }
 

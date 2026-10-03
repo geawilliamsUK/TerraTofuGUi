@@ -214,6 +214,15 @@ Modifiers accepted by `field`, `provider_field`, `relation`, `self_block`:
 Deep structures can be written as TOML tables instead of inline (see `iam_role.toml`'s
 `assume_role_policy`).
 
+Two arguments are tidied after they resolve. A **`depends_on`** value is always a flat
+list of addresses: a source that yields the instances of a repeated block (a list of its
+own) is spliced into it, duplicates are dropped, and an empty list is no argument at all,
+so `depends_on = { list = [ { self_block = "secret_read", attr = "", wrap = "list" },
+{ self_block = "acr_pull", attr = "" } ] }` waits for every role assignment that exists and
+for nothing that does not. A **`concat`** drops its empty list literals, and one argument
+left is written as itself, so joining a table's rows to a few fixed entries does not leave
+`concat([], [...])` behind when the table (or the fixed part) is empty.
+
 ### 2.4 Conditions (`when`)
 
 - `{ relation = "iam_binding" }` — at least one target exists (edge or `via_parent`).
@@ -358,6 +367,20 @@ no dependency: the log group above is named after its cluster while the cluster
 `depends_on` the log group, which an `attr` reference would turn into a cycle. When
 `target_type` is given the field name is checked against that type.
 
+**Asking the other end.** `where = <condition>` on a relation condition counts only the
+targets — or, with `incoming`, the sources — for which that condition holds when it is
+evaluated *on them*. It needs `target_type`, because the nested condition names that
+type's fields and relations and is checked against them at load time. An IAM Role uses it
+to attach the ECS task-execution policy only for an app that links it as its role *and*
+has no execution role of its own:
+
+```toml
+when = { relation = "iam_binding", incoming = true, target_type = "container_app", where = { relation = "attribute_reference", target_type = "iam_role", absent = true } }
+```
+
+and a Container App asks whether a load balancer forwarding to it is internet-facing with
+`{ relation = "attachment", incoming = true, target_type = "load_balancer", where = { field = "scheme", equals = "internet_facing" } }`.
+
 **Counting targets.** `min_count = 2` on a relation condition holds when at least that many
 targets (or sources, with `incoming`) match, rather than "at least one". It is how a check
 says *more than one*: a Log Group with two incoming clusters cannot be named after both, so
@@ -446,6 +469,44 @@ without one are skipped); `{ target = "id", ancestor = "…" }` does the same in
 `for_each_relation` block. `fallback = { … }` on a relation source is used when the
 reference resolves to nothing, e.g. `block = "ns"` when the queue created its own
 namespace, falling back to the enclosing namespace container otherwise.
+
+**A list from a table field.** `{ for_each_field = "env", each = <source> }` is a list with
+one element per row of a `struct_list` field (or per entry of a `string_list`, whose row has
+the single item `value`), each resolved with that row as the `item` — what `for_each_field`
+does for a block, for an argument value. `item`, `item_ref`, `item_index`, `{item.x}`
+placeholders and `{ item = … }` conditions work inside `each`; `when = <condition>` leaves
+rows out, and a row whose `each` resolves to nothing is skipped. An enclosing block's row is
+out of reach inside. A Container App writes its environment into the ECS container
+definition this way:
+
+```toml
+environment = { func = "concat", args = [ { for_each_field = "env", each = { object = { name = { item = "name" }, value = { item = "value" } } } }, { list = [ … fixed entries … ] } ] }
+```
+
+The field must be a declared table or string list of the type; the items `each` reads are
+checked against its sub-fields at load time.
+
+**A linked resource's connection value.** `connection = "KEY"` on a relation source (with or
+without `incoming`) resolves the *target's* own `connection` entry of that key (§2.7) for
+the current provider, on the target, instead of an attribute: a Container Registry's
+`REGISTRY` host is `<account>.dkr.ecr.<region>.amazonaws.com` on AWS, the login server on
+Azure and `<region>-docker.pkg.dev/<project>/<repository>` on Google Cloud, so one source
+builds an image reference on every provider:
+
+```toml
+image = { func = "format", args = [ { value = "%s/%s:%s" }, { relation = "attachment", target_type = "container_registry", connection = "REGISTRY" }, … ] }
+```
+
+It cannot be combined with `attr`, `field` or `block`. A target that is manual or
+unmapped becomes an input variable named after the key, as with any reference. The key
+must be declared by some provider mapping of the target type (`target_type`, or every type
+the relation's declarations allow); the loader checks it.
+
+**Rows and links.** `{ item = "secret", linked = "reads" }` holds when the row's
+`entity_ref` item points at one of the entity's own targets of that relation — a check that
+a row names only what the entity is linked to (and so allowed to read). `absent = true`
+inverts any item condition: `{ item = "key", absent = true }` is a row with no key, and
+`{ item = "secret", linked = "reads", absent = true }` one that names an unlinked Secret.
 
 **Raw expressions with references (`refs`).** `{ raw = "…", refs = { <name> = <source> } }`
 resolves each source, renders it as HCL text and substitutes it for `@name@` in `raw` before
@@ -614,7 +675,12 @@ emitted. The sources are validated like block arguments at load time, and
    variable `var.<slug>_<attr>` plus a MANUAL_STEPS entry, so the output still validates.
 4. **`depends_on`** is added to the primary block for `depends_on` edges and for edges
    whose relation kind the mapping never consumes (those also become a manual step).
-5. Blocks are written to `<file>.tf` in dependency order, plus `variables.tf`,
+5. Identical grants (`azurerm_role_assignment`, `aws_iam_role_policy_attachment`,
+   `google_*_iam_member` blocks with the same arguments) are written once: two apps sharing
+   an execution identity both ask for *Key Vault Secrets User* on the same secret, and Azure
+   refuses the second identical assignment. A reference to a dropped copy (a `depends_on`)
+   points at the one kept.
+6. Blocks are written to `<file>.tf` in dependency order, plus `variables.tf`,
    `outputs.tf`, `versions.tf`, `providers.tf`, optional `backend.tf`, `README.md`,
    and `MANUAL_STEPS.md` when there is anything to say — and, with the Kubernetes
    manifests on, `k8s/` (§2.7).

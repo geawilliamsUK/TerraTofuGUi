@@ -106,6 +106,13 @@ fn scan(src: &ArgSource, set: &mut HashSet<String>) {
                 scan(o, set);
             }
         }
+        ArgSource::Rows(r) => {
+            set.insert(r.for_each_field.clone());
+            if let Some(c) = &r.when {
+                scan_cond(c, set);
+            }
+            scan(&r.each, set);
+        }
         ArgSource::Raw(r) => r.refs.values().for_each(|x| scan(x, set)),
         ArgSource::Object(o) => o.object.values().for_each(|x| scan(x, set)),
         ArgSource::List(l) => l.list.iter().for_each(|x| scan(x, set)),
