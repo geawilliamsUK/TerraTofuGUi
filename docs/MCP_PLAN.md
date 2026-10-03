@@ -52,10 +52,47 @@ view). Free entities come back summarised per type with the reason, unpriced one
 `not_estimated` with why; `views` has every saved view's total and `assumptions` every
 assumption at its project value. `view` narrows the lines and the total to what that view
 shows. `assumptions` are for the call only (`source: "call"`); unknown keys, a non-number,
-an unknown view, `group_by` or provider are refused with what would have worked. Named
-environments do not exist yet: `environment` is accepted and the reply's `notes` say it
-was ignored; the estimate takes a `&Project`, so resolving an environment first is all
-that will be needed. The budget warning (`code: "Cost"`) arrives through `diagnostics`.
+an unknown view, `group_by` or provider are refused with what would have worked.
+`environment` prices that named environment (`Project::for_environment`: overrides,
+absent entities and variables applied); without it, the environment the canvas shows, or
+the base values. An unknown environment is refused naming the right ones. The budget
+warning (`code: "Cost"`) arrives through `diagnostics`.
+
+Added 2026-10-03 (round 3, environments and plan; `exec/environments.rs`):
+
+- `settings_set { environments, rename_environment, name_prefix, variables }` (the
+  `EnvSettings` command; mixed with the other keys it runs as one batch with
+  `SettingsSet`). `environments` replaces the list — an environment no longer listed
+  takes its overrides, link tags and variable values with it, and the reply names the
+  entities that lost some — `rename_environment { from, to }` carries them across,
+  `name_prefix` may use `${var.environment}` and project variables (`null` clears it),
+  and `variables` merges `{ name: { value, environments: { env: value }, description } }`
+  (a bare value sets the base; `null` removes one). Names are checked (lowercase, no
+  clash with the built-in `environment` / `name_prefix`), everything before anything
+  changes. The valid-keys list of the refusal names all four.
+- `entity_update { environment, config?, provider_config?, present? }` writes that
+  environment's values (`EnvUpdate`), for `entity` or a `select`ion, all-or-nothing, one
+  undo step; `null` drops the environment's value (back to the base) and `present: false`
+  leaves the entity out of that environment. Names, flags, extra arguments and metadata
+  are the same everywhere, so with `environment` they are refused. Field values may be
+  `${var.<name>}` in any field type; they are checked once resolved. The reply carries the
+  entity's overrides for the environment and that environment's diagnostics for it.
+- `link_add { environments }` tags a link (new or existing) with the environments it
+  belongs to (`LinkEnvironments`).
+- `project_get` and every entity reply carry `overrides`; `diagnostics` adds
+  `environment` (the one shown) and `other_environments` (each entry with its
+  `environment`, or `null` for a difference between environments the export refuses).
+- `plan_run { provider?, environment?, dir?, tool?, real_backend?, vars? }`: the UI thread
+  exports and works out the attribution (`PlanPrepare`, which asks for approval like
+  `export_run`), the server runs `ttg_codegen::plan_run::run` under `spawn_blocking` — never
+  the UI thread, never the dispatch loop — and the finished report goes back to the canvas
+  as badges (`PlanShow`). The reply is the `PlanReport`: `status` (`planned`,
+  `no_credentials`, `failed`, `binary_not_found`), `summary`, totals, `entities` (per
+  entity `create` / `update` / `delete` / `replace` / `read` / `no_op` and the
+  `addresses` with their actions) and attributed `diagnostics`.
+- `export_run { validate: true }` now answers `validate: { summary, valid, diagnostics }`
+  with each `validate -json` error attributed to its entity, file and line, and to the
+  definition file of its type.
 
 `diagnostics` answers `{ provider, diagnostics, other_providers }`: the target provider's
 list, and separately what the *other* providers would say: their errors as warnings

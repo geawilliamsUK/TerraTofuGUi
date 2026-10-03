@@ -306,6 +306,30 @@ OpenTofu installed, so a definition change that produces invalid HCL fails the b
   assumed. Check the provider's own calculator before committing to a budget; see
   [docs/PRICES.md](docs/PRICES.md) for the sources and how the list is refreshed.
 
+- **Environments** (*Settings ▸ Environments*, and the *Env* selector at the left of the
+  view bar). One diagram serves `staging` and `prod`: pick an environment and the
+  inspector shows and edits its values (a purple badge marks a field it overrides, with
+  *reset* back to the base), the canvas fades what it leaves out ("In this environment"),
+  and the diagnostics, reachability and cost answer for it — a check that fails only in
+  prod says `[prod]`. Links can be tagged with the environments they belong to, a **name
+  prefix** such as `zipos-${var.environment}` goes in front of every generated resource
+  name so environments can share an account, and **project variables** declared once
+  with a value per environment can be used in any field as `${var.db_class}`. The export
+  stays one configuration per provider: values that differ become variables set in
+  `environments/<env>.tfvars`, a resource only prod has gets a `count`, and each
+  environment keeps its own state (`environments/<env>.backend.hcl`); what cannot be said
+  that way is refused by name. A subnet's zone may be just its letter (`a`), written as
+  `"${var.region}a"` so the diagram follows the region.
+
+- **Plan** (the *Plan* button of the export window, `ttg plan <project> [--environment
+  prod]`, or the agent's `plan_run`). Exports, runs `init` and `plan`, and reports the
+  changes per resource — `+`, `~`, `−`, `±` badges on the canvas until the next edit and
+  a list in the window — with every error attached to the resource whose blocks it is
+  about. By default it plans in a scratch copy with local state (what applying would
+  create from nothing; the real state is never touched); a plan reads the cloud account,
+  so the provider needs credentials, and their absence is reported as such. *Run
+  validate* attributes its errors the same way.
+
 ![Reachability overlay from the job runner](docs/screenshot-reachability.png)
 
 ![Concrete display of the fan-out example with the "Messaging" view active](docs/screenshot-concrete.png)
@@ -396,12 +420,14 @@ watch it happen. It is off until you switch it on:
    shows what the agent did. Saving to disk only happens when a tool is explicitly asked
    to, and opening another file goes through the same unsaved-changes prompt as the menu.
 
-The 54 tools cover reading (project, catalog, catalog relations, diagnostics,
+The 55 tools cover reading (project, catalog, catalog relations, diagnostics,
 reachability, export preview, one entity's HCL with `entity_preview`, export diff,
 `view_get`, `view_export`, screenshot, `approval_status`) and editing (add/update/move/resize/
 reparent/delete entities, links, selection, views, tidy/align/distribute, settings,
 save/open/new, `project_import` of a `.ttg.json` given as JSON, export with optional
-validate, undo/redo). An agent documents a view the
+validate, undo/redo) and, for environments,
+`settings_set { environments, name_prefix, variables }`, `entity_update { environment }`
+and `plan_run`, which returns the planned changes grouped by resource. An agent documents a view the
 way you would: `view_group_add`, `view_flow_add` (with `step` and `color`),
 `view_note_add`, `view_logical_add` and `view_annotation_remove` all take an optional
 `view`, so a whole map can be drawn in one `project_apply` without switching tabs, and

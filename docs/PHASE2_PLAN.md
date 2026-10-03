@@ -1087,6 +1087,62 @@ secret (or flagging it external) gives one error per `$raw` that names it.
 spliced into a `$raw`, and a log group referenced only from a `$raw`, so the validate
 suite exercises them on every provider.
 
+## Round 3: environments and plan (gap report R3.11, R3.13; zipOS TF-012)
+
+A pilot and a production CallScope differed in about ten values and were two diagrams;
+the zipOS staging graph had every sizing value, the NAT count and the zones as literals,
+names prefixed by hand through `extra.name`, and no way to plan from the app.
+
+- **Environments in the project** — `settings.environments`, per entity `overrides`
+  (`config`, `provider_config`, `absent`), `environments` tags on links, a `name_prefix`
+  and `settings.variables` (project variables, `${var.<name>}` in any field or `extra`
+  string, with `${var.environment}` and `${var.name_prefix}` built in).
+  `Project::for_environment` (`ttg_core::environment`) resolves an environment into an
+  ordinary project, which is what diagnostics, reachability, the cost estimate (WP19's
+  `cost_estimate { environment }`, `ttg cost --environment`) and the GUI use.
+- **One root per provider** — `ttg_codegen::environments` generates once per environment
+  and merges: literal differences become variables named after their field (or argument),
+  project variables and prefixed names stay templates, differing references choose on
+  `var.environment`, nested blocks and whole resources only some environments have become
+  `dynamic` blocks and `count`s (references through `one(…[*]…)`), and anything else is a
+  diagnostic naming the entity, address and fields. `environments/<env>.tfvars` and
+  `.backend.hcl` (partial backend, one state per environment, local when no backend is
+  set) are owned by the export; the README has an Environments section.
+- **Zones from the region** — `zone_of` on a provider field (validator rule, MAPPING_FORMAT
+  §2.3): the AWS subnet's `availability_zone` may be a letter, written `"${var.region}a"`.
+- **Plan** — `ttg_codegen::plan_run`: init / plan -json / show -json in a scratch copy with local
+  state (or the real backend), changes and errors attributed to entities through the
+  export's address map and per-entity line ranges; `no_credentials` recognised. `ttg plan`,
+  MCP `plan_run` (off the UI thread and the dispatch loop), and the export window's Plan
+  button with `+ ~ − ±` badges. `validate` errors are attributed the same way in the app
+  and in `export_run { validate }`.
+- **GUI** — the *Env* selector in the view bar; the inspector shows and edits the
+  selected environment's values with a badge and *reset*, and "In this environment";
+  Settings ▸ Environments edits the list, the prefix and the variables; the diagnostics
+  panel has "Other environments (N)".
+- **Tests** — `tests/environments.rs` (variables, dynamic blocks, counts and `one()`,
+  project variables and the prefix, refusals, per-environment diagnostics),
+  `tests/plan.rs` (the real CLI path on `terraform_data`, which needs no cloud), the
+  parsers on recorded `show -json` / `validate -json` / `plan -json`, the headless MCP
+  test `headless_environments`, and the validate suite: `examples/three-tier.ttg.json` has
+  `pilot` and `prod` (the database highly available and kept longer in prod), plus an
+  `environments` variant with an absent NAT, a prefix, a project variable and a zone
+  letter, on all three providers with both tools.
+
+Acceptance (scratch copies, never the originals): CallScope with `pilot` / `prod`
+(database instance class, high availability, deletion protection and backup retention;
+cluster node counts; GPU pool maximum; log retention; WAF mode; budget; bucket names and
+the `Environment` tag from `${var.environment}`) exports for AWS, validates, and both
+`.tfvars` plan: 182 resources across 86 entities each, grouped by entity, with the budget
+warning tagged `[pilot]`. Those plans (and the zipOS ones below) ran with the AWS
+credentials of the machine they were made on — read-only plans, nothing applied; further
+runs are made with the credentials hidden or against the `terraform_data` fixture. With
+the credentials hidden the plan stops at the provider with status `no_credentials`. zipOS
+with `staging` / `prod` (instance class and task counts through project variables,
+Multi-AZ and deletion protection by override, a second NAT and route table in prod only,
+the prefix `zipos-${var.environment}`, zone letters) validates and plans 97 resources for
+staging and 101 for prod.
+
 ## Explicitly still out of scope
 
 Running `plan`/`apply`, live-account access, multi-user collaboration, drift detection

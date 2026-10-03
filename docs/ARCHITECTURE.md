@@ -113,7 +113,10 @@ All types live in `ttg-core::ir`. Field names below are the serialized names.
     "state_encryption_key": "key-main", // optional: the Encryption Key entity that encrypts the state
     "provider_versions": { "aws": "~> 6.0" },  // optional pins; default = the definition's constraint
     "tags": { "Project": "demo" },      // put on every generated resource (see MAPPING_FORMAT §4.3)
-    "kubernetes_manifests": false       // also write k8s/ (§6.4); omitted from the file while false
+    "kubernetes_manifests": false,      // also write k8s/ (§6.4); omitted from the file while false
+    "environments": ["staging", "prod"],          // optional: named environments (§6.9)
+    "name_prefix": "zipos-${var.environment}",    // optional: in front of every generated resource name
+    "variables": { "db_class": { "value": "db.t4g.small", "environments": { "prod": "db.r6g.large" } } }
   },
   "containers": { "<id>": Container, ... },
   "nodes":      { "<id>": Node, ... },
@@ -201,6 +204,8 @@ payment.
   "manual": false,                      // "external / manage by hand" flag
   "providers": ["azure"],               // optional: provider layers this entity is part of (absent = all)
   "extra": { "aws": { "main": { "force_destroy": true } } },  // optional: extra provider arguments per block
+  "overrides": { "prod": { "config": { "high_availability": true } },   // optional: per-environment values
+                 "staging": { "absent": true } },                        //   and presence (§6.9)
   "classification": "personal",         // optional: public | internal | confidential | personal | payment
   "description": "Call recordings",     // optional: why it exists
   "owner": "Platform team"              // optional: who looks after it
@@ -244,6 +249,16 @@ diagnostics and reachability all run on the layer (`Project::layer`,
 divergence between providers is explicit. The GUI's concrete display mode dims
 off-layer entities and tags anything that is not on every provider.
 
+**Environments.** With `settings.environments`, an entity's `overrides` give the values
+that replace its own in one environment (`config`, `provider_config`) and whether it
+exists there (`absent`); a link's `environments` say which environments it belongs to.
+Any string in a field or an `extra` argument may use a project variable, `${var.<name>}`,
+declared in `settings.variables` with a base value and a value per environment;
+`${var.environment}` and `${var.name_prefix}` are built in. `Project::for_environment`
+(`ttg_core::environment`) resolves all of it into an ordinary project — the one
+diagnostics, reachability, the cost estimate and the GUI work on — and the code generator
+turns the differences into variables (§6.9).
+
 Values in `config` / `provider_config` are a small tagged-free JSON subset: string, bool, integer,
 float, list of strings. Field *types* (including `cidr`, `enum`) live in the definition, not the
 project file.
@@ -279,7 +294,8 @@ There is no project container: on GCP the project is the `project` provider vari
 
 ```jsonc
 { "source": "vm-0d1f", "target": "role-9a2c", "relation": "iam_binding",
-  "layout": { "source": { "side": "right", "offset": 40 }, "target": {} } }   // optional
+  "layout": { "source": { "side": "right", "offset": 40 }, "target": {} },   // optional
+  "environments": ["prod"] }                                                 // optional: absent = every environment
 ```
 
 `layout` is purely visual: each end may pin a `side` (`left|right|top|bottom`; absent =
@@ -402,6 +418,8 @@ produce silently wrong HCL.
 ```
 Project + Catalog + provider + tool
   │
+  ├─ environments::generate    with named environments: everything below once per
+  │                            environment, then merged into one root (§6.9)
   ├─ diagnostics::run          gate: errors abort, warnings become MANUAL_STEPS entries
   ├─ emit (plan phase)         evaluate `when` -> the set of (entity, block) pairs to emit
   ├─ emit (resolve phase)      ArgSource -> hcl::Expression, collects variables + manual steps;
@@ -563,6 +581,14 @@ UI thread: `TtgApp::run_validate` starts one background thread for the exported 
 per provider meanwhile. A frozen UI is not just an unresponsive window — it also stops the MCP
 command queue draining, which is what made an agent's timed-out call get applied late.
 
+The app's *Run validate* and the agent's `export_run { validate }` run `validate -json`
+through `ttg_codegen::plan_run::validate` instead, so every error comes back attributed: the
+`range` (file and line) is looked up in the export's per-entity line ranges
+(`EntityBlocks::lines`, recorded as the resource files are rendered) and names the entity
+and the definition file of its type; an error in `variables.tf` or `versions.tf` belongs
+to no entity and says so. `validate::run` (plain text) remains for the CLI's
+`export --validate` and the validate suite.
+
 ### 6.4 Kubernetes manifests (`ttg-codegen::k8s`)
 
 With `settings.kubernetes_manifests` on (Settings ▸ Output, `ttg export --k8s`, MCP
@@ -615,8 +641,9 @@ check the settings panel, the MCP `settings_set` tool and the export gate all ap
 unknown type, a key that type does not take, or a required key left blank is refused with
 the list of what would be right. The state object is `<key_prefix>/terraform.tfstate`
 (`key_prefix` defaulting to the project name), and `state::state_key` takes an environment
-that goes between the two — `None` today; named environments slot in there without
-changing a project file. The `backend` block goes into the one `terraform {}` block in
+that goes between the two: with named environments the `backend` block is partial and
+each environment's key (or `gcs` prefix, or local path) is in
+`environments/<env>.backend.hcl` (§6.9). The `backend` block goes into the one `terraform {}` block in
 `versions.tf`, every argument a literal (backends are configured before anything is
 evaluated). S3 locks with a lock file (`use_lockfile = true`), so there is no DynamoDB
 table, and `required_version` rises to what the features need: OpenTofu 1.10 / Terraform
@@ -735,9 +762,14 @@ values, state files, `.terraform/` and its lock file, the render scripts' `k8s/r
 `owned` is one table of `(directory, how deep, which file names)`: the top level's `.tf`
 files, `README.md` and `MANUAL_STEPS.md`; the files directly inside `k8s/` (`.yaml`,
 `.sh`, `.ps1`, `README.md`; shallow, so `rendered/` is never visited); and the same
-Terraform files at every level of `bootstrap/` except hidden directories. `export` removes
-the stale ones and then any owned directory left empty (one still holding a state file
-stays); `diff::against_dir` lists the same stale files as removed.
+Terraform files at every level of `bootstrap/` except hidden directories; and the files
+directly inside `environments/` (§6.9): each environment's `.tfvars`, `.backend.hcl` and,
+when the steps differ, `.MANUAL_STEPS.md` — but never a `*.auto.tfvars`, which is the
+user's. Hand edits to `environments/<env>.tfvars` are overwritten (the README says so and
+points at a second `-var-file` or an `*.auto.tfvars`). `export` removes the stale ones and
+then any owned directory left empty (one still holding a state file stays);
+`diff::against_dir` lists the same stale files as removed. A plan's scratch copy,
+`.ttg-plan/` (§6.10), is hidden and never visited.
 
 ### 6.8 Addresses (`ttg-codegen::plan`)
 
@@ -757,6 +789,86 @@ the planned names after emission: `dedupe_grants` writes an identical grant only
 (§6.7a), so `entity_blocks` and the files list the copy kept, and a dropped copy gets no
 `moved` block (its address is not declared; the kept one has its own).
 
+### 6.9 Environments (`ttg_core::environment`, `ttg-codegen::environments`)
+
+One diagram, several environments; one configuration per provider, with a `.tfvars` and
+a state per environment — the "one module plus `envs/`" layout, with the module still
+flat. `emit::generate` sends a project with `settings.environments` to
+`environments::generate`, which generates it once per environment on
+`Project::for_environment(env)` with the ordinary pipeline (`emit::generate_one`) and
+merges the results block by block:
+
+- a value the same everywhere stays as it is;
+- a value that is a project variable, or a string built from them (`/zipos/${var.environment}/web`,
+  found by instantiating the entity's own `${var.…}` strings per environment), or a name
+  behind the name prefix (as it is, snake-cased or with its hyphens dropped), is written
+  as that variable or template, and the variable declared once (`db_class`, `name_prefix`);
+- any other plain value that differs becomes a variable of its own, named after the field
+  when it *is* that field's value in every environment (`db_high_availability`; when two
+  fields fit, the one sharing words with the argument wins, and with a tie the variable is
+  named after the argument: `db_multi_az`) and after the block and argument otherwise
+  (`logs_retention_in_days`); an argument one environment leaves out is `null` there;
+- inside a list, map or call of the same shape, only the parts that differ;
+- a value that differs in references chooses on `var.environment`
+  (`var.environment == "prod" ? … : …`);
+- a nested block some environments leave out becomes a `dynamic` block, and a resource
+  some leave out (an entity `absent` there, a repeated block with fewer rows) a `count`,
+  gated by the bool field that decides it (`var.db_high_availability ? [1] : []`), by a
+  field's value (`var.waf_mode == "count"`), or else by `var.environment`; references to a
+  counted resource become `one(<address>[*].<attr>)`, outputs about it are null where it
+  does not exist, and `depends_on` lists are joined;
+- `outputs.tf`, `providers.tf`, `variables.tf` and `versions.tf` are merged the same way
+  when they differ (a provider's aliases told apart by `alias`; the `terraform {}` block
+  joined, never variable; a variable's description neutralised to `<environment>` /
+  `<name prefix>`).
+
+What cannot be said that way is refused with a `Code::Environment` error naming the entity,
+the address and the fields that differ: a repeated nested block whose count differs, a
+labelled nested block, a heredoc that names a counted resource, Kubernetes manifests or a
+bootstrap root that differ. The merged root declares `environment` (validated against the
+list), the project variables it uses and every lifted value, none with a default — a plan
+without `-var-file` asks rather than guessing — and writes
+`environments/<env>.tfvars` and `environments/<env>.backend.hcl`: the backend block in
+`versions.tf` is partial (the `local` backend when none is configured, so environments
+never share a state file), each environment's file completing it with its key
+(`<key_prefix>/<env>/terraform.tfstate`), `gcs` prefix or local path
+(`terraform.tfstate.d/<env>/terraform.tfstate`). The README gains an *Environments*
+section (the table of variables and their values per environment, and the
+`init -reconfigure -backend-config` / `plan -var-file` commands); manual steps that differ
+go to `environments/<env>.MANUAL_STEPS.md`. `Generated::lifted` lists the variables.
+
+Diagnostics: `diagnostics::run` checks environments, overrides and `${var.…}` references
+as written (`environments::checks`) and everything else on the resolved values. The app
+runs it for the environment the canvas shows; `environments::other_environments` — the
+other environments' runs, each diagnostic prefixed `[prod]`, plus the differences the
+merge would refuse — is computed only when the diagnostics panel or the agent asks, like
+the other providers'. The export blocks on any environment's errors, tagged the same way.
+
+Names: `Project::resource_name` puts the rendered prefix in front of a display name, and
+the emitter uses it wherever a mapping builds a provider name from the entity's name
+(`field = "name"`, `{name}`, a relation's `field = "name"`). Zones: a provider field
+declared with `zone_of = "region"` (MAPPING_FORMAT §2.3) writes a bare zone letter as
+`"${var.region}a"`.
+
+### 6.10 Plan (`ttg-codegen::plan_run`)
+
+`plan_run::export_and_plan` exports, then runs `<tool> init -input=false`,
+`<tool> plan -input=false -json -out=tfplan [-var-file=environments/<env>.tfvars]` and
+`<tool> show -json tfplan`. `Attribution::of(&Generated, …)` is what makes the answer
+structured: every address the emitter wrote maps to its entity (`Generated::address_map`;
+`[index]` and module parts dropped), and every file line range to the entity whose
+blocks it holds. The plan's `resource_changes` become per entity `create` / `update` /
+`delete` / `replace` / `read` / `no_op` counts with their addresses; the `plan -json`
+message stream's diagnostics are attributed by range, or by the `address` they carry.
+By default the plan runs in `.ttg-plan/`, a scratch copy of the configuration whose
+backend an override file points at a local state: what applying would create from
+nothing, without touching the real state or needing the state store. `real_backend`
+plans in the export directory with `init -reconfigure -backend-config=…`. A plan reads the
+account, so it needs the provider's credentials; errors that say they are missing make the
+status `no_credentials` rather than `failed`. `PlanReport` is the shape the CLI's
+`ttg plan --json`, the MCP `plan_run` and the GUI share; the GUI puts `+`, `~`, `−`, `±`
+badges on the entities until the next edit.
+
 ## 7. GUI architecture (`ttg-app`)
 
 | module | responsibility |
@@ -767,6 +879,7 @@ the planned names after emission: `dedupe_grants` writes an identical grant only
 | `inspector.rs` | typed property editors generated from the definition (`string`, `bool`, `int`, `cidr`, `enum`, `string_list`); provider-specific fields under a per-provider header; inline validation; the project settings (tool, state backend and encryption, default tags, provider versions, provider variables) |
 | `menu.rs` | file new/open/save/save-as, undo/redo, tool toggle, target provider, export single / export all, validate |
 | `clipboard.rs` | copy/paste of a sub-diagram as JSON (fresh ids, de-duplicated names, edges between copied items kept) |
+| `environments.rs` | the environment selector, per-environment values in the inspector (badge, reset, "In this environment"), the Environments settings (list, name prefix, project variables), the Plan button and its canvas badges, attributed validate and plan results |
 | `cost_panel.rs` | the Cost window: estimate for a chosen provider, per resource / type / view, assumptions and display currency editable in place |
 | `views.rs` | the view bar (tabs, description, legend toggle, annotation buttons), the filter menu, and the per-frame visible set (`ttg_codegen::views::visible_set` plus the "a fitted container with no visible members is not drawn" rule) |
 | `annotations.rs` | drawing and editing a view's groups, flows, notes and logical nodes; the legend panel (and the strip of the canvas "zoom to fit" leaves it); geometry delegated to `ttg_core::view`. Flows fan out along a shared side, follow `canvas::routed_path` when *Route around nodes* is on, and place their labels clear of nodes, badges and each other — along the arrow first, then stepped off it on a leader line |
@@ -783,7 +896,8 @@ a muted colour; they never reach the canvas badges, which stay about the export 
 
 ## 8. Non-goals for v1
 
-Not implemented and not designed for: running `plan`/`apply` against live accounts, real-time
+Not implemented and not designed for: running `apply` against live accounts (a `plan`
+can be run, §6.10, and only reads), real-time
 multi-user collaboration, drift detection, state-file visualisation or management. A
 list-price cost *estimate* exists (§6.0b), but it never reads a bill. The pipeline ends at
 "validated files on disk" — where the state *will* live (backend, encryption, the

@@ -239,6 +239,29 @@ Modifiers accepted by `field`, `provider_field`, `relation`, `self_block`:
 - `transform = "slug" | "kebab" | "lower" | "alnum"` (`field`, `provider_field`,
   `template`) — normalise a string, e.g. display name `App Server` → `app-server` for
   resource names that forbid spaces.
+- `zone_of = "<provider variable>"` (`provider_field` only) — the value is a zone of the
+  region that variable holds: a full zone name (`eu-west-2a`) is written as it is, a
+  bare zone letter (`a`) as `"${var.region}a"`, so the diagram deploys to another region
+  unchanged. Not with `wrap`, `transform` or `column`; the validator refuses a variable
+  the provider does not declare. The AWS subnet's `availability_zone` uses it, and the
+  zone-in-region check accepts the letter.
+
+**Names and the name prefix.** `field = "name"`, the `{name}` placeholder of a template,
+and a relation's `field = "name"` (reading another entity's name, as the EKS log group
+does) give the *resource name*: the display name behind the project's rendered name
+prefix (`zipos-staging-db` for `db` with the prefix `zipos-${var.environment}`), so two
+environments can share an account. HCL local names, manual steps and descriptions keep
+the display name. Write names through these sources, not as literals, and the prefix
+reaches them.
+
+**Environments.** A mapping needs nothing special for named environments: the export
+generates it once per environment and turns what differs into variables, `dynamic`
+blocks or `count` (ARCHITECTURE.md §6.9). Two things help: a nested block that a field
+switches on or off (`when = { field = "high_availability" }`) becomes a `dynamic` block
+gated by that field's variable; a value that is the field's value unchanged (`{ field =
+"x" }`, or `{ if = { field = "x" }, then = { value = true }, else = { value = false } }`)
+becomes a variable named after the field. A repeated nested block whose row count
+differs between environments has no variable form and is refused with a diagnostic.
 
 Deep structures can be written as TOML tables instead of inline (see `iam_role.toml`'s
 `assume_role_policy`).
