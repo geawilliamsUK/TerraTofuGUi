@@ -5,6 +5,7 @@
 //! *intent* ("a subnet inside this network, attached to that role") so that
 //! `ttg-catalog` and `ttg-codegen` can map that intent to concrete provider resources.
 
+pub mod arch_diff;
 pub mod cidr;
 pub mod cost;
 pub mod environment;

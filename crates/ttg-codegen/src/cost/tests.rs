@@ -31,6 +31,7 @@ fn one_of_everything(cat: &Catalog) -> Project {
                     classification: None,
                     description: String::new(),
                     owner: String::new(),
+                    adopt: Default::default(),
                 },
             );
         } else {
@@ -55,6 +56,7 @@ fn one_of_everything(cat: &Catalog) -> Project {
                     classification: None,
                     description: String::new(),
                     owner: String::new(),
+                    adopt: Default::default(),
                 },
             );
         }

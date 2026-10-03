@@ -1,0 +1,87 @@
+{
+  "name": "Queue with dead-letter queue and alarms",
+  "description": "A work queue that moves messages it fails to deliver five times to a dead-letter queue, with an alarm when dead letters arrive and one when the oldest message waits too long; both notify `topic` when given. On Azure both queues share one Service Bus namespace (just grouping elsewhere).",
+  "params": [
+    {
+      "name": "name",
+      "description": "Display name of the work queue; the others are named after it",
+      "default": "jobs"
+    },
+    {
+      "name": "namespace_name",
+      "description": "Globally unique Azure Service Bus namespace name",
+      "default": "{project|kebab}-{name|kebab}-bus"
+    },
+    {
+      "name": "max_age_seconds",
+      "description": "Alarm when the oldest message has waited longer than this",
+      "default": "600"
+    },
+    {
+      "name": "topic",
+      "description": "A Topic the alarms notify",
+      "entity": "topic",
+      "optional": true
+    }
+  ],
+  "entities": [
+    {
+      "key": "bus",
+      "type": "servicebus_namespace",
+      "name": "{name} bus",
+      "at": [0, 0],
+      "size": [500, 140],
+      "config": { "sku": "Standard" },
+      "provider_config": { "azure": { "namespace_name": "{namespace_name|kebab|max:50}" } }
+    },
+    {
+      "key": "queue",
+      "type": "event_queue",
+      "name": "{name}",
+      "parent": "bus",
+      "at": [30, 50],
+      "config": { "visibility_timeout_seconds": 60, "max_receives": 5 }
+    },
+    {
+      "key": "dlq",
+      "type": "event_queue",
+      "name": "{name} dead letters",
+      "parent": "bus",
+      "at": [280, 50],
+      "config": { "visibility_timeout_seconds": 60, "message_retention_seconds": 1209600 }
+    },
+    {
+      "key": "dlq_alarm",
+      "type": "alarm",
+      "name": "{name} dead letters arriving",
+      "at": [0, 180],
+      "config": {
+        "metric": "dlq_depth",
+        "comparison": "greater_than",
+        "threshold": 0,
+        "period_seconds": "300",
+        "evaluation_periods": 1
+      }
+    },
+    {
+      "key": "age_alarm",
+      "type": "alarm",
+      "name": "{name} oldest message age",
+      "at": [280, 180],
+      "config": {
+        "metric": "queue_oldest_message_age",
+        "comparison": "greater_than",
+        "threshold": "{max_age_seconds}",
+        "period_seconds": "300",
+        "evaluation_periods": 2
+      }
+    }
+  ],
+  "links": [
+    { "source": "queue", "target": "dlq", "relation": "dead_letters_to" },
+    { "source": "dlq_alarm", "target": "dlq", "relation": "attribute_reference" },
+    { "source": "age_alarm", "target": "queue", "relation": "attribute_reference" },
+    { "source": "dlq_alarm", "target": "$topic", "relation": "sends_to", "when": "topic" },
+    { "source": "age_alarm", "target": "$topic", "relation": "sends_to", "when": "topic" }
+  ]
+}

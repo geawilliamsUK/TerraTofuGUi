@@ -405,6 +405,16 @@
           "additionalProperties": {
             "$ref": "#/$defs/EnvOverride"
           }
+        },
+        "adopt": {
+          "description": "Existing cloud resources this container adopts (see `Node::adopt`).",
+          "type": "object",
+          "additionalProperties": {
+            "type": "object",
+            "additionalProperties": {
+              "type": "string"
+            }
+          }
         }
       },
       "required": [
@@ -600,6 +610,16 @@
           "type": "object",
           "additionalProperties": {
             "$ref": "#/$defs/EnvOverride"
+          }
+        },
+        "adopt": {
+          "description": "Existing cloud resources this entity adopts (`import` blocks), per provider.",
+          "type": "object",
+          "additionalProperties": {
+            "type": "object",
+            "additionalProperties": {
+              "type": "string"
+            }
           }
         }
       },

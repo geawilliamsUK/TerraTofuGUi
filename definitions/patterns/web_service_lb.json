@@ -1,0 +1,121 @@
+{
+  "name": "Web service behind a load balancer",
+  "description": "A container app in a container environment (a new one, or `environment`) behind a load balancer in `subnets` that forwards to it, with its own role and log group and an alarm when the load balancer's targets fail their health check (notifying `topic` when given).",
+  "params": [
+    {
+      "name": "name",
+      "description": "Display name of the app; the others are named after it",
+      "default": "web"
+    },
+    {
+      "name": "subnets",
+      "description": "The subnets the load balancer listens in (two, in different zones, on AWS)",
+      "entity": "subnet",
+      "list": true
+    },
+    {
+      "name": "environment",
+      "description": "An existing Container Environment to run the app in instead of creating one",
+      "entity": "container_environment",
+      "optional": true
+    },
+    {
+      "name": "app_subnets",
+      "description": "Subnets the app's tasks run in (the environment's own when left out)",
+      "entity": "subnet",
+      "list": true,
+      "optional": true
+    },
+    {
+      "name": "port",
+      "description": "Port the app listens on",
+      "default": "8080"
+    },
+    {
+      "name": "health_check_path",
+      "description": "HTTP path the load balancer checks",
+      "default": "/health"
+    },
+    {
+      "name": "topic",
+      "description": "A Topic the health alarm notifies",
+      "entity": "topic",
+      "optional": true
+    }
+  ],
+  "entities": [
+    {
+      "key": "env",
+      "type": "container_environment",
+      "name": "{name} environment",
+      "parent": "@subnets",
+      "at": [0, 0],
+      "size": [260, 130],
+      "when": "!environment",
+      "config": { "container_insights": true }
+    },
+    {
+      "key": "app",
+      "type": "container_app",
+      "name": "{name}",
+      "parent": "$environment|env",
+      "at": [40, 50],
+      "config": {
+        "port": "{port}",
+        "replicas": 2,
+        "health_check_path": "{health_check_path}"
+      }
+    },
+    {
+      "key": "lb",
+      "type": "load_balancer",
+      "name": "{name} lb",
+      "parent": "@subnets",
+      "at": [320, 50],
+      "config": {
+        "scheme": "internet_facing",
+        "protocol": "http",
+        "listener_port": 80,
+        "target_port": "{port}"
+      }
+    },
+    {
+      "key": "role",
+      "type": "iam_role",
+      "name": "{name} role",
+      "at": [0, 180],
+      "config": { "trusted_service": "container", "permissions": "none" }
+    },
+    {
+      "key": "logs",
+      "type": "log_group",
+      "name": "{name} logs",
+      "at": [240, 180],
+      "config": { "retention_days": 30 }
+    },
+    {
+      "key": "health",
+      "type": "alarm",
+      "name": "{name} unhealthy targets",
+      "at": [480, 180],
+      "config": {
+        "metric": "lb_unhealthy_hosts",
+        "statistic": "auto",
+        "comparison": "greater_than",
+        "threshold": 0,
+        "period_seconds": "60",
+        "evaluation_periods": 2
+      }
+    }
+  ],
+  "links": [
+    { "source": "lb", "target": "$subnets", "relation": "network_membership" },
+    { "source": "lb", "target": "app", "relation": "attachment" },
+    { "source": "app", "target": "role", "relation": "iam_binding" },
+    { "source": "app", "target": "logs", "relation": "logs_to" },
+    { "source": "app", "target": "$app_subnets", "relation": "network_membership", "when": "app_subnets" },
+    { "source": "env", "target": "logs", "relation": "logs_to", "when": "!environment" },
+    { "source": "health", "target": "lb", "relation": "attribute_reference" },
+    { "source": "health", "target": "$topic", "relation": "sends_to", "when": "topic" }
+  ]
+}

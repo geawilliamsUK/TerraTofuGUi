@@ -1,0 +1,92 @@
+{
+  "name": "Hardened bucket",
+  "description": "Object storage with versioning, TLS only and public access blocked, encrypted with a customer-managed key (a new one in its own Key Vault, or `key`), writing its access logs to a second locked-down bucket.",
+  "params": [
+    {
+      "name": "name",
+      "description": "Display name of the bucket; the logs bucket and the key are named after it",
+      "default": "records"
+    },
+    {
+      "name": "bucket_name",
+      "description": "Globally unique bucket / storage account name (Azure keeps letters and digits, 24 at most)",
+      "default": "{project|kebab}-{name|kebab}"
+    },
+    {
+      "name": "key",
+      "description": "An existing Encryption Key to use instead of creating one",
+      "entity": "encryption_key",
+      "optional": true
+    }
+  ],
+  "entities": [
+    {
+      "key": "bucket",
+      "type": "object_storage",
+      "name": "{name}",
+      "at": [0, 0],
+      "config": {
+        "versioning": true,
+        "block_public_access": true,
+        "tls_only": true,
+        "noncurrent_expire_days": 30,
+        "abort_multipart_days": 7
+      },
+      "provider_config": {
+        "aws": { "bucket_name": "{bucket_name|kebab|max:63}" },
+        "azure": {
+          "account_name": "{bucket_name|alnum|max:24}",
+          "container_name": "{name|kebab|max:63}",
+          "replication": "ZRS"
+        },
+        "gcp": { "bucket_name": "{bucket_name|kebab|max:63}" }
+      }
+    },
+    {
+      "key": "logs",
+      "type": "object_storage",
+      "name": "{name} access logs",
+      "at": [240, 0],
+      "config": {
+        "versioning": false,
+        "block_public_access": true,
+        "tls_only": true,
+        "expire_days": 90
+      },
+      "provider_config": {
+        "aws": { "bucket_name": "{bucket_name|kebab|max:58}-logs" },
+        "azure": {
+          "account_name": "{bucket_name|alnum|max:20}logs",
+          "container_name": "logs",
+          "replication": "LRS"
+        },
+        "gcp": { "bucket_name": "{bucket_name|kebab|max:58}-logs" }
+      }
+    },
+    {
+      "key": "vault",
+      "type": "key_vault",
+      "name": "{name} vault",
+      "at": [0, 110],
+      "size": [260, 130],
+      "when": "!key",
+      "provider_config": {
+        "azure": { "vault_name": "{bucket_name|kebab|max:18}-kv" }
+      }
+    },
+    {
+      "key": "k",
+      "type": "encryption_key",
+      "name": "{name} key",
+      "parent": "vault",
+      "at": [30, 160],
+      "when": "!key",
+      "config": { "rotation_days": "90", "deletion_window_days": 30 }
+    }
+  ],
+  "links": [
+    { "source": "bucket", "target": "k", "relation": "encrypted_with", "when": "!key" },
+    { "source": "bucket", "target": "$key", "relation": "encrypted_with", "when": "key" },
+    { "source": "bucket", "target": "logs", "relation": "logs_to" }
+  ]
+}

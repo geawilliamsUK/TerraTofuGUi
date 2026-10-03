@@ -69,6 +69,8 @@ pub enum Code {
     /// A posture rule fired (`crate::posture`): warning or info, never blocking; the
     /// message ends with the rule's id.
     Posture,
+    /// Existing resources an entity adopts (`import` blocks, `crate::adopt`).
+    Adopt,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -709,6 +711,8 @@ pub fn run(full: &Project, cat: &Catalog, provider: &str) -> Vec<Diagnostic> {
     // Posture rules: warnings and info only, each with an id the project can turn off.
     crate::posture::check(full, p, cat, provider, &mut out);
     out.extend(refs.diagnostics);
+    // Adopted entities whose ids are incomplete or name nothing (`import` blocks).
+    out.extend(crate::adopt::checks(p, cat, provider, &plan));
     out.extend(crate::state::checks(full, p, cat, provider, full.settings.tool));
     out.extend(crate::versions::checks(p, cat, provider));
     // A budget the cost estimate exceeds. Cheap enough to run with the rest (it is

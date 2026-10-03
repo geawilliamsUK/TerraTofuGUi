@@ -10,6 +10,7 @@
 //! "Export for all providers" is `export_all`, which runs the single-provider pipeline
 //! once per provider into sibling directories. The outputs share nothing.
 
+pub mod adopt;
 pub mod bundle;
 pub mod canvas;
 pub mod conflicts;
@@ -21,9 +22,11 @@ pub mod edge;
 pub mod emit;
 pub mod environments;
 pub mod files;
+pub mod import_dir;
 pub mod k8s;
 pub mod layers;
 pub mod owned;
+pub mod patterns;
 pub mod plan;
 pub mod plan_run;
 pub mod posture;

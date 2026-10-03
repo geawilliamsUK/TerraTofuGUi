@@ -99,6 +99,7 @@ mod tests {
             description: String::new(),
             owner: String::new(),
             overrides: Default::default(),
+            adopt: Default::default(),
         }
     }
 

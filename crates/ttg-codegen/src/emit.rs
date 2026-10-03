@@ -645,6 +645,15 @@ pub(crate) fn emit_unchecked(
     if !moves.is_empty() {
         files.insert("moved.tf".into(), files::render_moved(&header, &moves));
     }
+    // Existing resources the entities adopt: `import` blocks for what is written.
+    let resources_written: HashSet<String> = entity_blocks
+        .values()
+        .flat_map(|b| b.addresses.iter().filter(|a| !a.starts_with("data.")).cloned())
+        .collect();
+    let imports = crate::adopt::targets(p, &em.plan, provider, &resources_written);
+    if let Some(text) = crate::adopt::render(&header, &imports) {
+        files.insert("imports.tf".into(), text);
+    }
 
     let vars: Vec<&VarSpec> = em
         .vars

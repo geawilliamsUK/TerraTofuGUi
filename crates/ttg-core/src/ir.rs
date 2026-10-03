@@ -198,6 +198,12 @@ pub type ExtraArgs = serde_json::Map<String, serde_json::Value>;
 /// provider id -> block key -> extra arguments.
 pub type Extras = BTreeMap<ProviderId, BTreeMap<String, ExtraArgs>>;
 
+/// Existing cloud resources an entity takes over instead of creating them: provider id
+/// -> which generated block (`main`, a secondary block key, `<block>/<row key>` for one
+/// instance of a repeated block, or the full address) -> the resource's id in the
+/// cloud. The export writes an `import` block for each (see `ttg_codegen::adopt`).
+pub type Adoption = BTreeMap<ProviderId, BTreeMap<String, String>>;
+
 /// How sensitive the data a resource holds (or handles) is. Documentation today —
 /// views filter on it and "Where personal data goes" is built from it — and the key
 /// posture rules will read later. Absent means "not classified", not "public".
@@ -294,6 +300,9 @@ pub struct Node {
     /// environment -> the values replacing `config` / `provider_config` there.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub overrides: crate::environment::Overrides,
+    /// Existing cloud resources this entity adopts (`import` blocks), per provider.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub adopt: Adoption,
 }
 
 /// A resource that can hold other resources (VPC, Resource Group, Project).
@@ -334,6 +343,9 @@ pub struct Container {
     /// environment -> the values replacing `config` / `provider_config` there.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub overrides: crate::environment::Overrides,
+    /// Existing cloud resources this container adopts (see `Node::adopt`).
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub adopt: Adoption,
 }
 
 /// Kinds of relationship an edge can express. Direction is always
@@ -1322,6 +1334,24 @@ impl Project {
     }
 }
 
+impl Project {
+    /// The existing cloud resources an entity adopts (empty for none or no such entity).
+    pub fn adoption(&self, id: &str) -> Option<&Adoption> {
+        self.nodes
+            .get(id)
+            .map(|n| &n.adopt)
+            .or_else(|| self.containers.get(id).map(|c| &c.adopt))
+    }
+
+    /// Mutable adoption map of an entity.
+    pub fn adoption_mut(&mut self, id: &str) -> Option<&mut Adoption> {
+        if let Some(n) = self.nodes.get_mut(id) {
+            return Some(&mut n.adopt);
+        }
+        self.containers.get_mut(id).map(|c| &mut c.adopt)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1461,6 +1491,7 @@ mod tests {
                     description: String::new(),
                     owner: String::new(),
                     overrides: Default::default(),
+                    adopt: Default::default(),
                 },
             );
         }

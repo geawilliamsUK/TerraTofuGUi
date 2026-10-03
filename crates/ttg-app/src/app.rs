@@ -738,6 +738,7 @@ impl TtgApp {
                         description: String::new(),
                         owner: String::new(),
                         overrides: Default::default(),
+                        adopt: Default::default(),
                     },
                 );
             }
@@ -760,6 +761,7 @@ impl TtgApp {
                         description: String::new(),
                         owner: String::new(),
                         overrides: Default::default(),
+                        adopt: Default::default(),
                     },
                 );
             }
