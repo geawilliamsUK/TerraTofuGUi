@@ -41,7 +41,21 @@ name = "keep_last_images"
 label = "Keep only the last N images"
 type = "int"
 default = 0
-description = "Expire older images automatically. 0 keeps every image for ever, which is what most registry bills are made of."
+description = "Expire older images automatically. 0 keeps every image for ever, which is what most registry bills are made of. 'Expire which images' says which images count."
+
+[[fields]]
+name = "expire_images"
+label = "Expire which images"
+type = "enum"
+options = ["untagged", "tagged", "any"]
+default = "untagged"
+description = "Which images 'Keep only the last N images' counts and expires. 'untagged': only images no tag points at any more (what a re-pushed `latest` leaves behind), so every tagged release stays. 'tagged': tagged images, limited to the tag prefixes below when there are any, so the last N releases stay and older ones go. 'any': every image, tagged or not."
+
+[[fields]]
+name = "expire_tag_prefixes"
+label = "Tag prefixes to expire"
+type = "string_list"
+description = "With 'tagged': only images whose tag starts with one of these (e.g. `v`, `release-`) are counted and expired. Empty means every tag."
 
 [[fields]]
 name = "force_delete"
@@ -106,7 +120,7 @@ func = "jsonencode"
 [providers.aws.blocks.args.policy.args.object.rules.list.object]
 rulePriority = { value = 1 }
 description  = { template = "Keep only the last {keep_last_images} images" }
-selection    = { object = { tagStatus = { value = "any" }, countType = { value = "imageCountMoreThan" }, countNumber = { field = "keep_last_images" } } }
+selection    = { object = { tagStatus = { field = "expire_images", fallback = { value = "untagged" } }, tagPrefixList = { if = { all = [ { field = "expire_images", equals = "tagged" }, { field = "expire_tag_prefixes" } ] }, then = { field = "expire_tag_prefixes" } }, tagPatternList = { if = { all = [ { field = "expire_images", equals = "tagged" }, { field = "expire_tag_prefixes", absent = true } ] }, then = { value = ["*"] } }, countType = { value = "imageCountMoreThan" }, countNumber = { field = "keep_last_images" } } }
 action       = { object = { type = { value = "expire" } } }
 
 # One policy per listed repository. The repository is addressed by name rather than by
@@ -130,7 +144,7 @@ func = "jsonencode"
 [providers.aws.blocks.args.policy.args.object.rules.list.object]
 rulePriority = { value = 1 }
 description  = { template = "Keep only the last {keep_last_images} images" }
-selection    = { object = { tagStatus = { value = "any" }, countType = { value = "imageCountMoreThan" }, countNumber = { field = "keep_last_images" } } }
+selection    = { object = { tagStatus = { field = "expire_images", fallback = { value = "untagged" } }, tagPrefixList = { if = { all = [ { field = "expire_images", equals = "tagged" }, { field = "expire_tag_prefixes" } ] }, then = { field = "expire_tag_prefixes" } }, tagPatternList = { if = { all = [ { field = "expire_images", equals = "tagged" }, { field = "expire_tag_prefixes", absent = true } ] }, then = { value = ["*"] } }, countType = { value = "imageCountMoreThan" }, countNumber = { field = "keep_last_images" } } }
 action       = { object = { type = { value = "expire" } } }
 
 # The registry host a Kubernetes workload's image is pulled from: every repository URL is
@@ -250,7 +264,8 @@ action = { value = "DELETE" }
 block = "condition"
 
 [providers.gcp.blocks.nested.nested.args]
-tag_state = { value = "ANY" }
+tag_state    = { if = { field = "expire_images", equals = "tagged" }, then = { value = "TAGGED" }, else = { if = { field = "expire_images", equals = "any" }, then = { value = "ANY" }, else = { value = "UNTAGGED" } } }
+tag_prefixes = { if = { field = "expire_images", equals = "tagged" }, then = { field = "expire_tag_prefixes", optional = true } }
 
 # <location>-docker.pkg.dev/<project>/<repository>, the prefix of every image path in it.
 [providers.gcp.connection]
