@@ -2,17 +2,22 @@
 #
 # An edge cache in front of an Object Storage bucket or a Load Balancer.
 # AWS: aws_cloudfront_distribution. A bucket origin also gets an origin access control and
-#      the bucket policy that lets only this distribution read the objects; a load balancer
-#      origin becomes a custom origin whose protocol follows the load balancer's. The
-#      linked certificate and Web Application Firewall each grow a us-east-1 copy of
-#      themselves, because that is the only shape CloudFront accepts.
-# Azure: azurerm_cdn_profile + azurerm_cdn_endpoint (classic Microsoft CDN). Custom domains
-#      and certificates are separate resources, so they stay manual steps, and a WAF policy
-#      cannot be attached to a classic endpoint at all (that is Front Door's job).
-# GCP: google_compute_backend_bucket with enable_cdn for a bucket origin. Cloud CDN in
-#      front of a load balancer is a flag on the backend service, which belongs to the load
-#      balancer's mapping, so that case is a manual step. A DNS Record aliased to the CDN
-#      reserves a google_compute_global_address for the front end to use.
+#      the bucket policy that lets only this distribution read the objects. A load balancer
+#      origin is a custom origin reached by a name its certificate covers: a DNS Record
+#      that aliases the load balancer (origin.example.com), never the ALB's own dns_name,
+#      which no certificate can cover. Cache and origin-request policies are AWS managed
+#      policies, looked up by name. The linked certificate and Web Application Firewall each
+#      grow a us-east-1 copy of themselves, because that is the only shape CloudFront accepts.
+#      A secret origin header is a generated value the load balancer's listener checks.
+# Azure: Front Door Standard/Premium — profile, endpoint, origin group, origin and route,
+#      one more route per path behaviour, a managed-certificate custom domain, and a rule
+#      set for origin headers. A linked Web Application Firewall becomes a Front Door WAF
+#      policy attached with a security policy; managed rule sets need Premium, so the
+#      profile is Premium exactly when the firewall has managed rule groups.
+# GCP: google_compute_backend_bucket with enable_cdn for a bucket origin. In front of a load
+#      balancer Cloud CDN is part of the load balancer's own backend service, which turns it
+#      on when a CDN links to it (global HTTPS load balancer only). A DNS Record aliased to a
+#      bucket CDN reserves a google_compute_global_address for the front end to use.
 
 schema_version = 2
 
@@ -34,6 +39,114 @@ description = "Alias served by the CDN, e.g. cdn.example.com. Needs a matching c
 pattern = "^([a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?\\.)+[a-z]{2,}$"
 pattern_hint = "a fully qualified domain such as cdn.example.com"
 
+[[fields]]
+name = "dynamic_site"
+label = "Dynamic site"
+type = "bool"
+default = false
+description = "An application rather than files: every HTTP method reaches the origin and nothing is cached by default (CachingDisabled). Add path behaviours for what can be cached."
+
+[[fields]]
+name = "allowed_methods"
+label = "Allowed methods"
+type = "enum"
+options = ["read_only", "all"]
+default = "read_only"
+description = "Methods the default behaviour passes on: read_only = GET, HEAD, OPTIONS; all = also PUT, POST, PATCH, DELETE. A dynamic site always allows all."
+
+[[fields]]
+name = "forward_host_header"
+label = "Forward Host header"
+type = "bool"
+default = false
+description = "Send the viewer's Host header to a load balancer origin (AllViewer) instead of the origin's own name (AllViewerExceptHostHeader). The origin's certificate must then also cover the custom domain."
+
+[[fields]]
+name = "origin_read_timeout"
+label = "Origin timeout (s)"
+type = "int"
+description = "How long the edge waits for the origin to respond. CloudFront: 1-60 (more with a quota increase), load balancer origins only; Front Door: 16-240; Google Cloud: the backend service timeout."
+
+[[fields]]
+name = "origin_keepalive_timeout"
+label = "Origin keep-alive (s)"
+type = "int"
+description = "How long CloudFront keeps an idle connection to a load balancer origin open (1-60). AWS only."
+
+[[fields]]
+name = "behaviors"
+label = "Path behaviours"
+type = "struct_list"
+description = "Paths that are cached or forwarded differently from the default, e.g. /_next/static/* with CachingOptimized. Most specific first."
+
+[[fields.items]]
+name = "path_pattern"
+label = "Path pattern"
+type = "string"
+required = true
+default = "/static/*"
+
+[[fields.items]]
+name = "cache_policy"
+label = "Cache policy"
+type = "enum"
+required = true
+options = ["CachingOptimized", "CachingDisabled", "CachingOptimizedForUncompressedObjects", "UseOriginCacheControlHeaders", "Elemental-MediaPackage"]
+default = "CachingOptimized"
+
+[[fields.items]]
+name = "origin_request_policy"
+label = "Origin request policy"
+type = "enum"
+options = ["None", "AllViewer", "AllViewerExceptHostHeader", "AllViewerAndCloudFrontHeaders-2022-06", "CORS-CustomOrigin", "CORS-S3Origin", "UserAgentRefererHeaders", "Elemental-MediaTailor-PersonalizedManifests"]
+default = "None"
+
+[[fields.items]]
+name = "allowed_methods"
+label = "Methods"
+type = "enum"
+options = ["read_only", "all"]
+default = "read_only"
+
+[[fields.items]]
+name = "compress"
+type = "bool"
+default = true
+
+[[fields]]
+name = "origin_headers"
+label = "Origin headers"
+type = "struct_list"
+description = "Headers the edge adds to every request it sends to the origin."
+
+[[fields.items]]
+name = "name"
+type = "string"
+required = true
+pattern = "^[A-Za-z0-9-]+$"
+pattern_hint = "letters, digits and '-'"
+
+[[fields.items]]
+name = "value"
+type = "string"
+required = true
+
+[[fields]]
+name = "secret_origin_header"
+label = "Secret origin header"
+type = "bool"
+default = false
+state_secret = true
+description = "Add a header with a generated secret value to every origin request. On AWS a load balancer origin then answers 403 to anything without it, so only the CDN can reach it."
+
+[[fields]]
+name = "secret_header_name"
+label = "Secret header name"
+type = "string"
+default = "X-Origin-Verify"
+pattern = "^[A-Za-z0-9-]+$"
+pattern_hint = "letters, digits and '-'"
+
 [[relations]]
 kind = "attribute_reference"
 label = "Origin"
@@ -47,19 +160,38 @@ targets = ["tls_certificate"]
 cardinality = "optional"
 providers = ["aws"]
 
-# Azure's classic CDN endpoint cannot carry a WAF policy at all (that is Front Door's
-# job), so the link is not its business; Google Cloud can use the same Cloud Armor policy
-# but only from the backend service, which is a manual step.
 [[relations]]
 kind = "attribute_reference"
 label = "Protected by"
 targets = ["web_application_firewall"]
 cardinality = "optional"
-providers = ["aws", "gcp"]
 
 # ---------------------------------------------------------------- AWS
 [providers.aws]
 status = "partial"
+
+# AWS managed cache policies used by the default behaviour and the path behaviours, looked
+# up by name once each: data.aws_cloudfront_cache_policy.<cdn>_cache["CachingOptimized"].
+[[providers.aws.data]]
+key = "cache"
+resource = "aws_cloudfront_cache_policy"
+
+[providers.aws.data.args]
+for_each = { func = "toset", args = [ { func = "concat", args = [ { list = [ { if = { all = [ { relation = "attribute_reference", target_type = "object_storage" }, { not = { field = "dynamic_site" } } ] }, then = { value = "CachingOptimized" }, else = { value = "CachingDisabled" } } ] }, { field = "behaviors", column = "cache_policy" } ] } ] }
+name     = { func = "format", args = [ { value = "Managed-%s" }, { raw = "each.key" } ] }
+
+# The same for origin-request policies. A load balancer origin gets every viewer header,
+# cookie and query string except Host (AllViewerExceptHostHeader), so CloudFront asks the
+# origin for the origin's own name — the one its certificate covers. AllViewer (Host
+# forwarded) is the 'Forward Host header' option, checked against the certificate.
+[[providers.aws.data]]
+key = "origin_request"
+resource = "aws_cloudfront_origin_request_policy"
+when = { any = [ { relation = "attribute_reference", target_type = "load_balancer" }, { field = "behaviors" } ] }
+
+[providers.aws.data.args]
+for_each = { func = "setsubtract", args = [ { func = "toset", args = [ { func = "concat", args = [ { list = [ { if = { relation = "attribute_reference", target_type = "load_balancer" }, then = { if = { field = "forward_host_header" }, then = { value = "AllViewer" }, else = { value = "AllViewerExceptHostHeader" } } } ] }, { field = "behaviors", column = "origin_request_policy" } ] } ] }, { value = ["None"] } ] }
+name     = { func = "format", args = [ { value = "Managed-%s" }, { raw = "each.key" } ] }
 
 [[providers.aws.blocks]]
 key = "oac"
@@ -72,6 +204,17 @@ origin_access_control_origin_type = { value = "s3" }
 signing_behavior                  = { value = "always" }
 signing_protocol                  = { value = "sigv4" }
 
+# The secret origin header's value. No special characters: an ALB listener rule treats
+# `*` and `?` in a header value as wildcards.
+[[providers.aws.blocks]]
+key = "origin_secret"
+resource = "random_password"
+when = { field = "secret_origin_header" }
+
+[providers.aws.blocks.args]
+length  = { value = 32 }
+special = { value = false }
+
 [[providers.aws.blocks]]
 key = "main"
 resource = "aws_cloudfront_distribution"
@@ -80,7 +223,7 @@ resource = "aws_cloudfront_distribution"
 enabled             = { value = true }
 is_ipv6_enabled     = { value = true }
 comment             = { template = "{name} (managed by TerraTofu GUI)" }
-default_root_object = { if = { relation = "attribute_reference", target_type = "object_storage" }, then = { value = "index.html" } }
+default_root_object = { if = { all = [ { relation = "attribute_reference", target_type = "object_storage" }, { not = { field = "dynamic_site" } } ] }, then = { value = "index.html" } }
 aliases             = { field = "domain", wrap = "list", optional = true }
 # The Web Application Firewall's CLOUDFRONT-scoped copy, which is the only kind of Web ACL
 # a distribution accepts.
@@ -96,36 +239,88 @@ origin_id                = { value = "origin" }
 domain_name              = { relation = "attribute_reference", target_type = "object_storage", attr = "bucket_regional_domain_name" }
 origin_access_control_id = { self_block = "oac", attr = "id" }
 
+[[providers.aws.blocks.nested.nested]]
+block = "custom_header"
+for_each_field = "origin_headers"
+
+[providers.aws.blocks.nested.nested.args]
+name  = { item = "name" }
+value = { item = "value" }
+
+[[providers.aws.blocks.nested.nested]]
+block = "custom_header"
+when = { field = "secret_origin_header" }
+
+[providers.aws.blocks.nested.nested.args]
+name  = { field = "secret_header_name", fallback = { value = "X-Origin-Verify" } }
+value = { self_block = "origin_secret", attr = "result" }
+
+# A load balancer origin is reached by the name of a DNS Record that aliases it and that
+# the load balancer's certificate covers; an https load balancer without one is an error
+# (see the checks), an http one is reached by its own dns_name over plain HTTP.
 [[providers.aws.blocks.nested]]
 block = "origin"
 when = { relation = "attribute_reference", target_type = "load_balancer" }
 
 [providers.aws.blocks.nested.args]
 origin_id   = { value = "origin" }
-domain_name = { relation = "attribute_reference", target_type = "load_balancer", attr = "dns_name" }
+domain_name = { relation = "attribute_reference", target_type = "load_balancer", hop = { relation = "attribute_reference", incoming = true, target_type = "dns_record", certificate_covers = true }, attr = "fqdn", fallback = { relation = "attribute_reference", target_type = "load_balancer", attr = "dns_name" } }
 
 [[providers.aws.blocks.nested.nested]]
 block = "custom_origin_config"
 
 [providers.aws.blocks.nested.nested.args]
-http_port              = { value = 80 }
-https_port             = { value = 443 }
-origin_protocol_policy = { if = { relation = "attribute_reference", target_type = "load_balancer", target_field = "protocol", equals = "https" }, then = { value = "https-only" }, else = { value = "http-only" } }
-origin_ssl_protocols   = { value = ["TLSv1.2"] }
+http_port                = { value = 80 }
+https_port               = { value = 443 }
+origin_protocol_policy   = { if = { relation = "attribute_reference", target_type = "load_balancer", target_field = "protocol", equals = "https" }, then = { value = "https-only" }, else = { value = "http-only" } }
+origin_ssl_protocols     = { value = ["TLSv1.2"] }
+origin_read_timeout      = { field = "origin_read_timeout", optional = true }
+origin_keepalive_timeout = { field = "origin_keepalive_timeout", optional = true }
 
+[[providers.aws.blocks.nested.nested]]
+block = "custom_header"
+for_each_field = "origin_headers"
+
+[providers.aws.blocks.nested.nested.args]
+name  = { item = "name" }
+value = { item = "value" }
+
+[[providers.aws.blocks.nested.nested]]
+block = "custom_header"
+when = { field = "secret_origin_header" }
+
+[providers.aws.blocks.nested.nested.args]
+name  = { field = "secret_header_name", fallback = { value = "X-Origin-Verify" } }
+value = { self_block = "origin_secret", attr = "result" }
+
+# The default behaviour. A bucket is cached (CachingOptimized); a load balancer or a
+# dynamic site is not (CachingDisabled), and gets the viewer's headers, cookies and query
+# strings.
 [[providers.aws.blocks.nested]]
 block = "default_cache_behavior"
 
 [providers.aws.blocks.nested.args]
-target_origin_id       = { value = "origin" }
-viewer_protocol_policy = { value = "redirect-to-https" }
-allowed_methods        = { value = ["GET", "HEAD", "OPTIONS"] }
-cached_methods         = { value = ["GET", "HEAD"] }
-compress               = { value = true }
-# AWS managed policies: CachingOptimized for a bucket, CachingDisabled + AllViewer for a
-# load balancer (dynamic content must reach the origin with the viewer's headers).
-cache_policy_id          = { if = { relation = "attribute_reference", target_type = "object_storage" }, then = { value = "658327ea-f89d-4fab-a63d-7e88639e58f6" }, else = { value = "4135ea2d-6df8-44a3-9df3-4b5a84be39ad" } }
-origin_request_policy_id = { if = { relation = "attribute_reference", target_type = "load_balancer" }, then = { value = "216adef6-5c7f-47e4-b989-5492eafa07d3" } }
+target_origin_id         = { value = "origin" }
+viewer_protocol_policy   = { value = "redirect-to-https" }
+allowed_methods          = { if = { any = [ { field = "dynamic_site" }, { field = "allowed_methods", equals = "all" } ] }, then = { value = ["DELETE", "GET", "HEAD", "OPTIONS", "PATCH", "POST", "PUT"] }, else = { value = ["GET", "HEAD", "OPTIONS"] } }
+cached_methods           = { value = ["GET", "HEAD"] }
+compress                 = { value = true }
+cache_policy_id          = { raw = "@policies@[@policy@].id", refs = { policies = { self_data = "cache", attr = "" }, policy = { if = { all = [ { relation = "attribute_reference", target_type = "object_storage" }, { not = { field = "dynamic_site" } } ] }, then = { value = "CachingOptimized" }, else = { value = "CachingDisabled" } } } }
+origin_request_policy_id = { if = { relation = "attribute_reference", target_type = "load_balancer" }, then = { raw = "@policies@[@policy@].id", refs = { policies = { self_data = "origin_request", attr = "" }, policy = { if = { field = "forward_host_header" }, then = { value = "AllViewer" }, else = { value = "AllViewerExceptHostHeader" } } } } }
+
+[[providers.aws.blocks.nested]]
+block = "ordered_cache_behavior"
+for_each_field = "behaviors"
+
+[providers.aws.blocks.nested.args]
+path_pattern             = { item = "path_pattern" }
+target_origin_id         = { value = "origin" }
+viewer_protocol_policy   = { value = "redirect-to-https" }
+allowed_methods          = { if = { item = "allowed_methods", equals = "all" }, then = { value = ["DELETE", "GET", "HEAD", "OPTIONS", "PATCH", "POST", "PUT"] }, else = { value = ["GET", "HEAD", "OPTIONS"] } }
+cached_methods           = { value = ["GET", "HEAD"] }
+compress                 = { item = "compress" }
+cache_policy_id          = { raw = "@policies@[@policy@].id", refs = { policies = { self_data = "cache", attr = "" }, policy = { item = "cache_policy" } } }
+origin_request_policy_id = { if = { item = "origin_request_policy", not_equals = "None" }, then = { raw = "@policies@[@policy@].id", refs = { policies = { self_data = "origin_request", attr = "" }, policy = { item = "origin_request_policy" } } } }
 
 [[providers.aws.blocks.nested]]
 block = "restrictions"
@@ -182,6 +377,22 @@ Condition = { object = { StringEquals = { object = { "AWS:SourceArn" = { self_bl
 domain_name = { attr = "domain_name", description = "CloudFront domain name to point DNS at" }
 hosted_zone = { attr = "hosted_zone_id", description = "Hosted zone id for an alias record" }
 
+[[providers.aws.checks]]
+severity = "error"
+when = { all = [
+  { relation = "attribute_reference", target_type = "load_balancer", target_field = "protocol", equals = "https" },
+  { relation = "attribute_reference", target_type = "load_balancer", hop = { relation = "attribute_reference", incoming = true, target_type = "dns_record", certificate_covers = true }, absent = true },
+] }
+message = "\"{name}\": CloudFront must reach its https load balancer origin by a name the load balancer's certificate covers, and the load balancer's own DNS name never is one (the connection would fail with a 502). Add a DNS Record of type A with an 'Alias of' link to the load balancer (origin.<your domain>, say) and add that name to the certificate's alternative names"
+
+[[providers.aws.checks]]
+when = { relation = "attribute_reference", target_type = "load_balancer", target_field = "protocol", not_equals = "https" }
+message = "\"{name}\": the origin load balancer has no HTTPS listener, so CloudFront reaches it over plain HTTP (http-only); set its protocol to https with a certificate to encrypt that leg"
+
+[[providers.aws.checks]]
+when = { all = [ { field = "secret_origin_header" }, { relation = "attribute_reference", target_type = "object_storage" } ] }
+message = "\"{name}\": a bucket origin is already private to this distribution (origin access control), so the secret origin header is sent but nothing checks it"
+
 [[providers.aws.manual_steps]]
 title = "Point the custom domain at the distribution"
 when = { all = [
@@ -190,96 +401,316 @@ when = { all = [
 ] }
 body = """
 `aliases` names the custom domain, but CloudFront only serves it once DNS sends the name to
-the distribution. Add a DNS Record of type A with an **Alias of** link to this CDN (or a
-CNAME to its `domain_name`), and make sure the linked certificate covers the alias — the
-us-east-1 copy of it is generated for you.
+the distribution. Add a DNS Record of type A (and AAAA, for IPv6) with an **Alias of** link
+to this CDN (or a CNAME to its `domain_name`), and make sure the linked certificate covers
+the alias — the us-east-1 copy of it is generated for you.
 """
 
 # ---------------------------------------------------------------- Azure
 [providers.azure]
 status = "partial"
-notes = "A classic CDN endpoint has no firewall of its own — 'Protected by' is an AWS and Google Cloud link. Azure WAF in front of a CDN means Front Door, which is a different service from the azurerm_cdn_profile this type maps to."
+notes = "Front Door Standard, or Premium when the linked Web Application Firewall has managed rule groups (only Premium runs managed rule sets; its base fee is about ten times Standard's). Path behaviours are extra routes; origin headers are a rule set; the custom domain gets a Front Door managed certificate."
 
 [[providers.azure.blocks]]
 key = "profile"
-resource = "azurerm_cdn_profile"
+resource = "azurerm_cdn_frontdoor_profile"
 
 [providers.azure.blocks.args]
-name                = { template = "{name}-profile", transform = "kebab" }
-location            = { var = "location" }
-resource_group_name = { ancestor = "resource_group", attr = "name" }
-sku                 = { value = "Standard_Microsoft" }
-tags                = { object = { Name = { field = "name" } } }
+name                     = { template = "{name}-fd", transform = "kebab" }
+resource_group_name      = { ancestor = "resource_group", attr = "name" }
+sku_name                 = { if = { relation = "attribute_reference", target_type = "web_application_firewall", target_field = "managed_rules" }, then = { value = "Premium_AzureFrontDoor" }, else = { value = "Standard_AzureFrontDoor" } }
+response_timeout_seconds = { field = "origin_read_timeout", optional = true }
+tags                     = { object = { Name = { field = "name" } } }
 
 [[providers.azure.blocks]]
 key = "main"
-resource = "azurerm_cdn_endpoint"
+resource = "azurerm_cdn_frontdoor_endpoint"
 
 [providers.azure.blocks.args]
-name                          = { field = "name", transform = "kebab" }
-profile_name                  = { self_block = "profile", attr = "name" }
-location                      = { var = "location" }
-resource_group_name           = { ancestor = "resource_group", attr = "name" }
-is_https_allowed              = { value = true }
-is_compression_enabled        = { value = true }
-querystring_caching_behaviour = { value = "IgnoreQueryString" }
-origin_host_header            = { relation = "attribute_reference", target_type = "object_storage", attr = "primary_blob_host", optional = true }
+name                     = { field = "name", transform = "kebab" }
+cdn_frontdoor_profile_id = { self_block = "profile", attr = "id" }
+tags                     = { object = { Name = { field = "name" } } }
+
+[[providers.azure.blocks]]
+key = "group"
+resource = "azurerm_cdn_frontdoor_origin_group"
+
+[providers.azure.blocks.args]
+name                     = { template = "{name}-origins", transform = "kebab" }
+cdn_frontdoor_profile_id = { self_block = "profile", attr = "id" }
+session_affinity_enabled = { value = false }
 
 [[providers.azure.blocks.nested]]
-block = "origin"
-when = { relation = "attribute_reference", target_type = "object_storage" }
+block = "load_balancing"
 
 [providers.azure.blocks.nested.args]
-name      = { value = "origin" }
-host_name = { relation = "attribute_reference", target_type = "object_storage", attr = "primary_blob_host" }
+sample_size                 = { value = 4 }
+successful_samples_required = { value = 3 }
 
 [[providers.azure.blocks.nested]]
-block = "origin"
-when = { relation = "attribute_reference", target_type = "load_balancer" }
+block = "health_probe"
 
 [providers.azure.blocks.nested.args]
-name      = { value = "origin" }
-host_name = { relation = "attribute_reference", target_type = "load_balancer", block = "pip", attr = "ip_address" }
+protocol            = { if = { relation = "attribute_reference", target_type = "load_balancer", target_field = "protocol", not_equals = "https" }, then = { value = "Http" }, else = { value = "Https" } }
+interval_in_seconds = { value = 100 }
+request_type        = { value = "HEAD" }
+path                = { value = "/" }
+
+# A bucket is reached by its blob host. A load balancer by the name of an A record that
+# aliases its public IP when there is one, else by the address itself (a manual step).
+[[providers.azure.blocks]]
+key = "origin"
+resource = "azurerm_cdn_frontdoor_origin"
+
+[providers.azure.blocks.args]
+name                           = { template = "{name}-origin", transform = "kebab" }
+cdn_frontdoor_origin_group_id  = { self_block = "group", attr = "id" }
+enabled                        = { value = true }
+host_name                      = { relation = "attribute_reference", target_type = "object_storage", attr = "primary_blob_host", fallback = { if = { relation = "attribute_reference", target_type = "load_balancer", hop = { relation = "attribute_reference", incoming = true, target_type = "dns_record" }, target_field = "record_type", equals = "A" }, then = { func = "trimsuffix", args = [ { relation = "attribute_reference", target_type = "load_balancer", hop = { relation = "attribute_reference", incoming = true, target_type = "dns_record" }, block = "a", attr = "fqdn" }, { value = "." } ] }, else = { relation = "attribute_reference", target_type = "load_balancer", block = "pip", attr = "ip_address" } } }
+origin_host_header             = { relation = "attribute_reference", target_type = "object_storage", attr = "primary_blob_host", fallback = { if = { all = [ { not = { field = "forward_host_header" } }, { relation = "attribute_reference", target_type = "load_balancer", hop = { relation = "attribute_reference", incoming = true, target_type = "dns_record" }, target_field = "record_type", equals = "A" } ] }, then = { func = "trimsuffix", args = [ { relation = "attribute_reference", target_type = "load_balancer", hop = { relation = "attribute_reference", incoming = true, target_type = "dns_record" }, block = "a", attr = "fqdn" }, { value = "." } ] } } }
+certificate_name_check_enabled = { if = { any = [ { relation = "attribute_reference", target_type = "object_storage" }, { relation = "attribute_reference", target_type = "load_balancer", hop = { relation = "attribute_reference", incoming = true, target_type = "dns_record" }, target_field = "record_type", equals = "A" } ] }, then = { value = true }, else = { value = false } }
+http_port                      = { value = 80 }
+https_port                     = { value = 443 }
+priority                       = { value = 1 }
+weight                         = { value = 1000 }
+
+[[providers.azure.blocks]]
+key = "secret"
+resource = "random_password"
+when = { field = "secret_origin_header" }
+
+[providers.azure.blocks.args]
+length  = { value = 32 }
+special = { value = false }
+
+# Origin headers: a rule set with one rule that sets every header on every request.
+[[providers.azure.blocks]]
+key = "rules"
+resource = "azurerm_cdn_frontdoor_rule_set"
+when = { any = [ { field = "origin_headers" }, { field = "secret_origin_header" } ] }
+
+[providers.azure.blocks.args]
+name                     = { template = "{name}rules", transform = "alnum" }
+cdn_frontdoor_profile_id = { self_block = "profile", attr = "id" }
+
+[[providers.azure.blocks]]
+key = "headers"
+resource = "azurerm_cdn_frontdoor_rule"
+when = { any = [ { field = "origin_headers" }, { field = "secret_origin_header" } ] }
+
+[providers.azure.blocks.args]
+name                      = { value = "originheaders" }
+cdn_frontdoor_rule_set_id = { self_block = "rules", attr = "id" }
+order                     = { value = 1 }
+behavior_on_match         = { value = "Continue" }
+# A rule is validated against the origin group, so it waits for it.
+depends_on                = { list = [ { self_block = "group", attr = "" }, { self_block = "origin", attr = "" } ] }
+
+[[providers.azure.blocks.nested]]
+block = "actions"
+
+[[providers.azure.blocks.nested.nested]]
+block = "request_header_action"
+for_each_field = "origin_headers"
+
+[providers.azure.blocks.nested.nested.args]
+header_action = { value = "Overwrite" }
+header_name   = { item = "name" }
+value         = { item = "value" }
+
+[[providers.azure.blocks.nested.nested]]
+block = "request_header_action"
+when = { field = "secret_origin_header" }
+
+[providers.azure.blocks.nested.nested.args]
+header_action = { value = "Overwrite" }
+header_name   = { field = "secret_header_name", fallback = { value = "X-Origin-Verify" } }
+value         = { self_block = "secret", attr = "result" }
+
+[[providers.azure.blocks]]
+key = "domain"
+resource = "azurerm_cdn_frontdoor_custom_domain"
+when = { field = "domain" }
+
+[providers.azure.blocks.args]
+name                     = { template = "{name}-domain", transform = "kebab" }
+cdn_frontdoor_profile_id = { self_block = "profile", attr = "id" }
+host_name                = { field = "domain" }
+
+[[providers.azure.blocks.nested]]
+block = "tls"
+
+[providers.azure.blocks.nested.args]
+certificate_type = { value = "ManagedCertificate" }
+
+# The default route: everything the path behaviours do not claim. Cached only for a bucket
+# that is not a dynamic site, like CloudFront's default behaviour.
+[[providers.azure.blocks]]
+key = "route"
+resource = "azurerm_cdn_frontdoor_route"
+
+[providers.azure.blocks.args]
+name                            = { template = "{name}-default", transform = "kebab" }
+cdn_frontdoor_endpoint_id       = { self_block = "main", attr = "id" }
+cdn_frontdoor_origin_group_id   = { self_block = "group", attr = "id" }
+cdn_frontdoor_origin_ids        = { self_block = "origin", attr = "id", wrap = "list" }
+cdn_frontdoor_rule_set_ids      = { self_block = "rules", attr = "id", wrap = "list" }
+cdn_frontdoor_custom_domain_ids = { self_block = "domain", attr = "id", wrap = "list" }
+supported_protocols             = { value = ["Http", "Https"] }
+patterns_to_match               = { value = ["/*"] }
+forwarding_protocol             = { if = { relation = "attribute_reference", target_type = "load_balancer", target_field = "protocol", not_equals = "https" }, then = { value = "HttpOnly" }, else = { value = "HttpsOnly" } }
+https_redirect_enabled          = { value = true }
+link_to_default_domain          = { value = true }
+
+[[providers.azure.blocks.nested]]
+block = "cache"
+when = { all = [ { relation = "attribute_reference", target_type = "object_storage" }, { not = { field = "dynamic_site" } } ] }
+
+[providers.azure.blocks.nested.args]
+query_string_caching_behavior = { value = "IgnoreQueryString" }
+compression_enabled           = { value = true }
+content_types_to_compress     = { value = ["application/javascript", "application/json", "application/xml", "image/svg+xml", "text/css", "text/html", "text/plain"] }
+
+# One more route per path behaviour. CloudFront's managed cache policies become a cache
+# block (or none, for CachingDisabled); Front Door forwards every method on every route,
+# so the methods column has no counterpart.
+[[providers.azure.blocks]]
+key = "behavior"
+resource = "azurerm_cdn_frontdoor_route"
+for_each_field = "behaviors"
+
+[providers.azure.blocks.args]
+name                            = { template = "{name}-path-{item.index}", transform = "kebab" }
+cdn_frontdoor_endpoint_id       = { self_block = "main", attr = "id" }
+cdn_frontdoor_origin_group_id   = { self_block = "group", attr = "id" }
+cdn_frontdoor_origin_ids        = { self_block = "origin", attr = "id", wrap = "list" }
+cdn_frontdoor_rule_set_ids      = { self_block = "rules", attr = "id", wrap = "list" }
+cdn_frontdoor_custom_domain_ids = { self_block = "domain", attr = "id", wrap = "list" }
+supported_protocols             = { value = ["Http", "Https"] }
+patterns_to_match               = { item = "path_pattern", wrap = "list" }
+forwarding_protocol             = { if = { relation = "attribute_reference", target_type = "load_balancer", target_field = "protocol", not_equals = "https" }, then = { value = "HttpOnly" }, else = { value = "HttpsOnly" } }
+https_redirect_enabled          = { value = true }
+link_to_default_domain          = { value = true }
+
+[[providers.azure.blocks.nested]]
+block = "cache"
+when = { item = "cache_policy", not_equals = "CachingDisabled" }
+
+[providers.azure.blocks.nested.args]
+query_string_caching_behavior = { map = "cache_policy", table = { CachingOptimized = "IgnoreQueryString", CachingOptimizedForUncompressedObjects = "IgnoreQueryString", UseOriginCacheControlHeaders = "UseQueryString", "Elemental-MediaPackage" = "UseQueryString" } }
+compression_enabled           = { if = { all = [ { item = "compress" }, { item = "cache_policy", not_equals = "CachingOptimizedForUncompressedObjects" } ] }, then = { value = true }, else = { value = false } }
+content_types_to_compress     = { if = { all = [ { item = "compress" }, { item = "cache_policy", not_equals = "CachingOptimizedForUncompressedObjects" } ] }, then = { value = ["application/javascript", "application/json", "application/xml", "image/svg+xml", "text/css", "text/html", "text/plain"] } }
+
+[[providers.azure.blocks]]
+key = "domain_assoc"
+resource = "azurerm_cdn_frontdoor_custom_domain_association"
+when = { field = "domain" }
+
+[providers.azure.blocks.args]
+cdn_frontdoor_custom_domain_id = { self_block = "domain", attr = "id" }
+cdn_frontdoor_route_ids        = { func = "concat", args = [ { self_block = "route", attr = "id", wrap = "list" }, { self_block = "behavior", attr = "id" } ] }
+
+# The linked firewall's Front Door policy, on the endpoint and the custom domain.
+[[providers.azure.blocks]]
+key = "security"
+resource = "azurerm_cdn_frontdoor_security_policy"
+when = { relation = "attribute_reference", target_type = "web_application_firewall" }
+
+[providers.azure.blocks.args]
+name                     = { template = "{name}-waf", transform = "kebab" }
+cdn_frontdoor_profile_id = { self_block = "profile", attr = "id" }
+
+[[providers.azure.blocks.nested]]
+block = "security_policies"
+
+[[providers.azure.blocks.nested.nested]]
+block = "firewall"
+
+[providers.azure.blocks.nested.nested.args]
+cdn_frontdoor_firewall_policy_id = { relation = "attribute_reference", target_type = "web_application_firewall", block = "fd", attr = "id" }
+
+[[providers.azure.blocks.nested.nested.nested]]
+block = "association"
+
+[providers.azure.blocks.nested.nested.nested.args]
+patterns_to_match = { value = ["/*"] }
+
+[[providers.azure.blocks.nested.nested.nested.nested]]
+block = "domain"
+
+[providers.azure.blocks.nested.nested.nested.nested.args]
+cdn_frontdoor_domain_id = { self_block = "main", attr = "id" }
+
+[[providers.azure.blocks.nested.nested.nested.nested]]
+block = "domain"
+when = { field = "domain" }
+
+[providers.azure.blocks.nested.nested.nested.nested.args]
+cdn_frontdoor_domain_id = { self_block = "domain", attr = "id" }
 
 [providers.azure.outputs]
-fqdn = { attr = "fqdn", description = "Endpoint host name (*.azureedge.net)" }
+host_name = { attr = "host_name", description = "Front Door endpoint host name (*.azurefd.net) to point DNS at" }
 
-[[providers.azure.manual_steps]]
-title = "Add the custom domain and its certificate"
-when = { field = "domain" }
-body = """
-The classic CDN endpoint only serves `*.azureedge.net` out of the box. Add an
-`azurerm_cdn_endpoint_custom_domain` for the custom domain (after a CNAME points it at the
-endpoint's `fqdn`) and enable HTTPS on it with a CDN-managed certificate or one from a Key
-Vault. There is no provider-neutral way to express that, so it is left to you.
-"""
+[[providers.azure.checks]]
+severity = "error"
+when = { relation = "attribute_reference", target_type = "load_balancer", target_field = "scheme", equals = "internal" }
+message = "\"{name}\": Front Door reaches its origins over the internet, and an internal load balancer has no public address; make the load balancer internet-facing (Private Link origins need a native Premium setup)"
 
 [[providers.azure.manual_steps]]
 title = "Give the load balancer origin a host name"
-when = { relation = "attribute_reference", target_type = "load_balancer" }
+when = { all = [
+  { relation = "attribute_reference", target_type = "load_balancer" },
+  { relation = "attribute_reference", target_type = "load_balancer", hop = { relation = "attribute_reference", incoming = true, target_type = "dns_record" }, target_field = "record_type", equals = "A", absent = true },
+] }
 body = """
-The endpoint origin was set to the load balancer's public IP address because an
-`azurerm_lb` has no DNS name. Azure CDN expects a host name and will not send a usable Host
-header to an IP origin: create a DNS Record for the load balancer and set the endpoint's
-`origin.host_name` and `origin_host_header` to it.
+The Front Door origin was set to the load balancer's public IP address because nothing
+names it: an `azurerm_lb` has no DNS name of its own. With an IP origin Front Door cannot
+check the backend's certificate (the check is turned off) and sends the viewer's Host
+header. Add a DNS Record of type A with an **Alias of** link to the load balancer; the
+origin then uses that name and checks the certificate against it.
+"""
+
+[[providers.azure.manual_steps]]
+title = "Check the secret origin header at the backends"
+when = { all = [ { field = "secret_origin_header" }, { relation = "attribute_reference", target_type = "load_balancer" } ] }
+body = """
+Front Door adds the secret header to every origin request, but the layer-4 `azurerm_lb`
+cannot look at headers, so nothing rejects requests that skip Front Door. Check the header
+in the application (its value is the `random_password` in this configuration's state), or
+check the `X-Azure-FDID` header Front Door always sends against the profile's
+`resource_guid`, and restrict the backends' security group to the `AzureFrontDoor.Backend`
+service tag.
 """
 
 # ---------------------------------------------------------------- GCP
 [providers.gcp]
 status = "partial"
+notes = "In front of a load balancer, Cloud CDN is part of the global HTTPS load balancer's backend service, which turns it on when a CDN links to it; nothing is generated for this node then. Path behaviours, origin headers and the secret header have no counterpart there."
 
 # Cloud DNS has no alias record type, so a DNS Record pointing here needs an address to
 # write into `rrdatas`. A backend bucket has none of its own: reserve a global one for the
-# forwarding rule that will front it, and hand the record that.
+# forwarding rule that will front it, and hand the record that. In front of a load
+# balancer the record uses the load balancer's own address instead.
 [[providers.gcp.blocks]]
 key = "addr"
 resource = "google_compute_global_address"
-when = { relation = "attribute_reference", incoming = true, target_type = "dns_record" }
+when = { all = [ { relation = "attribute_reference", incoming = true, target_type = "dns_record" }, { relation = "attribute_reference", target_type = "object_storage" } ] }
 
 [providers.gcp.blocks.args]
 name         = { template = "{name}-address", transform = "kebab" }
 description  = { template = "Front-end address for {name} (managed by TerraTofu GUI)" }
 address_type = { value = "EXTERNAL" }
+
+[[providers.gcp.blocks]]
+key = "addr6"
+resource = "google_compute_global_address"
+when = { all = [ { relation = "attribute_reference", incoming = true, target_type = "dns_record", target_field = "record_type", equals = "AAAA" }, { relation = "attribute_reference", target_type = "object_storage" } ] }
+
+[providers.gcp.blocks.args]
+name         = { template = "{name}-address-v6", transform = "kebab" }
+description  = { template = "IPv6 front-end address for {name} (managed by TerraTofu GUI)" }
+address_type = { value = "EXTERNAL" }
+ip_version   = { value = "IPV6" }
 
 [[providers.gcp.blocks]]
 key = "main"
@@ -304,6 +735,15 @@ max_ttl     = { value = 86400 }
 [providers.gcp.outputs]
 self_link = { attr = "self_link", description = "Backend bucket to use as a URL map target" }
 address   = { block = "addr", attr = "address", description = "Reserved global address the DNS record points at" }
+address6  = { block = "addr6", attr = "address", description = "Reserved global IPv6 address the AAAA record points at" }
+
+[[providers.gcp.checks]]
+when = { relation = "attribute_reference", target_type = "load_balancer", target_field = "protocol", not_equals = "https" }
+message = "\"{name}\": Cloud CDN only runs on the global HTTPS load balancer, and the origin load balancer is a regional passthrough one; set its protocol to https, or nothing is cached on Google Cloud"
+
+[[providers.gcp.checks]]
+when = { any = [ { field = "behaviors" }, { field = "secret_origin_header" }, { field = "origin_headers" } ] }
+message = "\"{name}\": path behaviours, origin headers and the secret origin header are not generated on Google Cloud (one backend has one cdn_policy, and Cloud CDN is part of the load balancer rather than a separate client of it)"
 
 [[providers.gcp.manual_steps]]
 title = "Put the backend bucket behind a load balancer"
@@ -317,19 +757,8 @@ bucket's `self_link`.
 """
 
 [[providers.gcp.manual_steps]]
-title = "Enable Cloud CDN on the load balancer's backend service"
-when = { relation = "attribute_reference", target_type = "load_balancer" }
-body = """
-Nothing was generated: in front of a load balancer, Cloud CDN is not a resource of its own
-but `enable_cdn = true` (plus a `cdn_policy`) on the
-`google_compute_backend_service` the load balancer creates. Set it there — for example as an
-extra argument on the Load Balancer node's backend-service block — and delete this node, or
-keep it as documentation of intent.
-"""
-
-[[providers.gcp.manual_steps]]
 title = "Give the reserved address to the front end"
-when = { relation = "attribute_reference", incoming = true, target_type = "dns_record" }
+when = { all = [ { relation = "attribute_reference", incoming = true, target_type = "dns_record" }, { relation = "attribute_reference", target_type = "object_storage" } ] }
 body = """
 A DNS Record aliases this CDN, and Cloud DNS can only hold an address, so a
 `google_compute_global_address` was reserved and the record points at it. Nothing listens on
@@ -340,7 +769,7 @@ or the name will resolve to an address that answers nothing.
 
 [[providers.gcp.manual_steps]]
 title = "Attach the Cloud Armor policy to the backend service"
-when = { relation = "attribute_reference", target_type = "web_application_firewall" }
+when = { all = [ { relation = "attribute_reference", target_type = "web_application_firewall" }, { relation = "attribute_reference", target_type = "object_storage" } ] }
 body = """
 The linked Web Application Firewall's `google_compute_security_policy` is the right object
 for this CDN, but Cloud Armor attaches from the *backend service* side, and a backend bucket

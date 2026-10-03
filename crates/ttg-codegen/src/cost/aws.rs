@@ -377,18 +377,19 @@ fn cdn(c: &mut Ctx) {
 }
 
 fn web_application_firewall(c: &mut Ctx) {
-    let acls = if c.emits("global") { 2.0 } else { 1.0 };
-    let rules = c.list_len("managed_rules") as f64
-        + if c.num("rate_limit_per_5min", 0.0) > 0.0 {
-            1.0
-        } else {
-            0.0
-        };
+    // The regional ACL exists for protected load balancers, the CloudFront one for CDNs.
+    let (regional, global) = (c.emits("main"), c.emits("global"));
+    let acls = regional as u8 as f64 + global as u8 as f64;
+    if acls == 0.0 {
+        c.note("protects nothing yet, so no web ACL is generated");
+        return;
+    }
+    let rules = (c.list_len("managed_rules") + c.list_len("rate_rules")) as f64;
     let req = c.a("waf_requests");
-    let what = if acls > 1.0 {
-        "2 web ACLs (regional, and CloudFront-scoped for the CDN)"
-    } else {
-        "web ACL"
+    let what = match (regional, global) {
+        (true, true) => "2 web ACLs (regional, and CloudFront-scoped for the CDN)",
+        (false, true) => "web ACL (CloudFront-scoped, for the CDN)",
+        _ => "web ACL",
     };
     c.charge(what, "wafv2", "web_acl", acls);
     c.charge(format!("{rules} rule(s) in each"), "wafv2", "rule", rules * acls);

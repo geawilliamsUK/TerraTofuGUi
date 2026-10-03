@@ -437,7 +437,14 @@ AZURE = {
         "hour": meter("Virtual Network", "Standard Private Endpoint", where="Global"),
         "data": meter("Virtual Network", "Standard Data Processed - Ingress", where="Global"),
     },
-    "cdn": {"data_out": meter("Content Delivery Network", "Standard Data Transfer", product="Azure CDN from Microsoft", where="Zone 1")},
+    "front_door": {
+        "standard_base": meter("Azure Front Door Service", "Standard Base Fees", product="Azure Front Door", where="Zone 1"),
+        "premium_base": meter("Azure Front Door Service", "Premium Base Fees", product="Azure Front Door", where="Zone 1"),
+        "standard_data_out": meter("Azure Front Door Service", "Standard Data Transfer Out", product="Azure Front Door", where="Zone 1"),
+        "premium_data_out": meter("Azure Front Door Service", "Premium Data Transfer Out", product="Azure Front Door", where="Zone 1"),
+        "standard_requests": meter("Azure Front Door Service", "Standard Requests", product="Azure Front Door", where="Zone 1"),
+        "premium_requests": meter("Azure Front Door Service", "Premium Requests", product="Azure Front Door", where="Zone 1"),
+    },
     "dns": {
         "zone": meter("Azure DNS", "Public Zone", where="Zone 1"),
         "queries": meter("Azure DNS", "Public Queries", where="Zone 1"),

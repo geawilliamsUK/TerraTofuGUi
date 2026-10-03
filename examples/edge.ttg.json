@@ -291,7 +291,15 @@
           "AWSManagedRulesKnownBadInputsRuleSet",
           "AWSManagedRulesSQLiRuleSet"
         ],
-        "rate_limit_per_5min": 2000,
+        "rate_rules": [
+          {
+            "name": "rate-limit",
+            "limit": 2000,
+            "paths": [],
+            "method": "ANY",
+            "action": "block"
+          }
+        ],
         "mode": "block"
       },
       "provider_config": {},

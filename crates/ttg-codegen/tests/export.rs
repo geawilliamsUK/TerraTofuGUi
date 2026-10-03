@@ -2371,7 +2371,8 @@ fn edge_azure_is_honest_about_what_it_cannot_do() {
         "{net}"
     );
     assert!(net.contains("rate_limit_threshold = 2000"));
-    assert!(net.contains("resource \"azurerm_cdn_endpoint\" \"assets_cdn\""));
+    // The CDN is a Front Door endpoint whose origin is the bucket's blob host.
+    assert!(net.contains("resource \"azurerm_cdn_frontdoor_endpoint\" \"assets_cdn\""));
     assert!(net.contains("host_name = azurerm_storage_account.assets.primary_blob_host"));
 
     // The layer-4 load balancer passes 443 through and says so.
@@ -2389,7 +2390,7 @@ fn edge_azure_is_honest_about_what_it_cannot_do() {
         "{steps}"
     );
     assert!(steps.contains("TLS is not terminated on an Azure Load Balancer"));
-    assert!(steps.contains("Attach the policy to an Application Gateway or Front Door"));
+    assert!(steps.contains("Attach the policy to an Application Gateway"));
 }
 
 #[test]
@@ -2428,15 +2429,15 @@ fn edge_gcp_builds_a_global_https_load_balancer() {
     assert!(norm(&g.files["dns.tf"])
         .contains("rrdatas = [ google_compute_global_forwarding_rule.web_lb_grule.ip_address ]"));
 
-    // The redirect and the Cloud Armor attachment are reported, not pretended.
+    // The protected load balancer's backend service attaches the Cloud Armor policy.
+    assert!(
+        lb.contains("security_policy = google_compute_security_policy.edge_waf.id"),
+        "{lb}"
+    );
+    // The redirect is reported, not pretended.
     assert!(g.diagnostics.iter().any(|d| d
         .message
         .contains("HTTP-to-HTTPS redirect is not generated on Google Cloud")));
-    let steps = &g.files["MANUAL_STEPS.md"];
-    assert!(
-        steps.contains("Attach the policy to the load balancer's backend service"),
-        "{steps}"
-    );
 }
 
 #[test]
@@ -2576,14 +2577,23 @@ fn a_record_aliases_a_cdn_on_every_provider() {
         "{aws}"
     );
 
-    // Azure: the endpoint is the alias target of the A record set.
+    // Azure: the Front Door endpoint is the alias target of the A record set, and the
+    // custom domain is validated with a `_dnsauth` TXT record.
     let azure = norm(&generate(&p, &cat, "azure", Tool::OpenTofu).unwrap().files["dns.tf"]);
     assert!(
         azure.contains("resource \"azurerm_dns_a_record\" \"assets_record_a\""),
         "{azure}"
     );
     assert!(
-        azure.contains("target_resource_id = azurerm_cdn_endpoint.assets_cdn.id"),
+        azure.contains("target_resource_id = azurerm_cdn_frontdoor_endpoint.assets_cdn.id"),
+        "{azure}"
+    );
+    assert!(
+        azure.contains("name = \"_dnsauth.assets\" zone_name = azurerm_dns_zone.public_zone.name"),
+        "{azure}"
+    );
+    assert!(
+        azure.contains("value = azurerm_cdn_frontdoor_custom_domain.assets_cdn_domain.validation_token"),
         "{azure}"
     );
     assert!(
@@ -2635,8 +2645,9 @@ fn azure_accepts_a_cname_alias_of_a_cdn_but_not_of_a_load_balancer() {
         dns.contains("resource \"azurerm_dns_cname_record\" \"assets_record_cname\""),
         "{dns}"
     );
+    // Front Door's onboarding wants a CNAME to the endpoint's host name.
     assert!(
-        dns.contains("target_resource_id = azurerm_cdn_endpoint.assets_cdn.id"),
+        dns.contains("record = azurerm_cdn_frontdoor_endpoint.assets_cdn.host_name"),
         "{dns}"
     );
     assert!(
@@ -2650,6 +2661,527 @@ fn azure_accepts_a_cname_alias_of_a_cdn_but_not_of_a_load_balancer() {
     p.add_edge("rec-assets", "lb-web", ttg_core::Relation::AttributeReference);
     let err = generate(&p, &cat, "azure", Tool::OpenTofu).unwrap_err();
     assert!(err.to_string().contains("set the type to A"), "{err}");
+}
+
+// ---------------------------------------------------------------- the edge, round 4
+
+fn has_warning(g: &ttg_codegen::Generated, needle: &str) -> bool {
+    g.diagnostics
+        .iter()
+        .any(|d| d.severity == Severity::Warning && d.message.contains(needle))
+}
+
+/// A Web ACL is scoped once and for all, so each scope is generated only for what it can
+/// protect: the regional one for linked load balancers, the CloudFront one for CDNs. A
+/// firewall that protects nothing generates nothing and says so.
+#[test]
+fn each_web_acl_scope_exists_only_for_what_it_protects() {
+    let cat = Catalog::builtin();
+    let mut p = example("edge.ttg.json");
+    // Only the CDN links to the firewall: no regional ACL, no association.
+    p.edges
+        .retain(|e| !(e.source == "waf-edge" && e.target == "lb-web"));
+    let g = generate(&p, &cat, "aws", Tool::OpenTofu).unwrap();
+    let net = norm(&g.files["network.tf"]);
+    assert!(!net.contains("scope = \"REGIONAL\""), "{net}");
+    assert!(!net.contains("aws_wafv2_web_acl_association"), "{net}");
+    assert!(net.contains("resource \"aws_wafv2_web_acl\" \"edge_waf_global\""));
+    assert!(!g.files["outputs.tf"].contains("output \"edge_waf_arn\""));
+    // Azure: the Front Door policy only, no Application Gateway policy or its step.
+    let az = generate(&p, &cat, "azure", Tool::OpenTofu).unwrap();
+    let net = norm(&az.files["network.tf"]);
+    assert!(!net.contains("azurerm_web_application_firewall_policy"), "{net}");
+    assert!(net.contains("resource \"azurerm_cdn_frontdoor_firewall_policy\" \"edge_waf_fd\""));
+    assert!(!az.files["MANUAL_STEPS.md"].contains("Attach the policy to an Application Gateway"));
+
+    // Linked from nothing: no ACL anywhere, and a warning on every provider.
+    p.edges
+        .retain(|e| !(e.source == "cdn-assets" && e.target == "waf-edge"));
+    for provider in ["aws", "azure", "gcp"] {
+        let g = generate(&p, &cat, provider, Tool::OpenTofu).unwrap();
+        assert!(
+            !g.entity_blocks.contains_key("waf-edge"),
+            "{provider}: {:?}",
+            g.entity_blocks.get("waf-edge").map(|b| &b.addresses)
+        );
+        assert!(has_warning(&g, "\"edge waf\" protects nothing"), "{provider}");
+    }
+}
+
+/// Every rate rule is its own rate-based rule, narrowed to its path prefixes and method:
+/// one prefix is a byte match, several an OR of byte matches (or, together with a method,
+/// one regex match, since a scope-down statement nests three levels deep at most).
+#[test]
+fn rate_rules_are_scoped_by_path_and_method_on_every_provider() {
+    let cat = Catalog::builtin();
+    let p = example("edge-dynamic.ttg.json");
+    let g = generate(&p, &cat, "aws", Tool::OpenTofu).unwrap();
+    let net = norm(&g.files["network.tf"]);
+    // Only a CDN links to this firewall: one CloudFront-scoped ACL.
+    assert!(!net.contains("scope = \"REGIONAL\""));
+    assert!(net.contains(
+        "name = \"app-waf-auth\" priority = 100 action { block {} } statement { rate_based_statement { limit = 100 aggregate_key_type = \"IP\" evaluation_window_sec = 300 scope_down_statement { byte_match_statement { search_string = \"/api/auth/\" positional_constraint = \"STARTS_WITH\" field_to_match { uri_path {} }"
+    ), "{net}");
+    assert!(net.contains(
+        "scope_down_statement { and_statement { statement { byte_match_statement { search_string = \"/contact\" positional_constraint = \"STARTS_WITH\""
+    ), "{net}");
+    assert!(net.contains(
+        "statement { byte_match_statement { search_string = \"POST\" positional_constraint = \"EXACTLY\" field_to_match { method {} }"
+    ), "{net}");
+    // Several prefixes with a method: a regex over the escaped prefixes; counted only.
+    assert!(
+        net.contains("name = \"app-waf-forms\" priority = 102 action { count {} }"),
+        "{net}"
+    );
+    assert!(
+        net.contains("regex_string = format(\"^(%s)\", join(\"|\", [for p in [\"/contact\", \"/sales\"] :"),
+        "{net}"
+    );
+    // Several prefixes, any method: an OR of byte matches.
+    assert!(net.contains(
+        "scope_down_statement { or_statement { statement { byte_match_statement { search_string = \"/api/\""
+    ), "{net}");
+    assert!(net.contains("statement { byte_match_statement { search_string = \"/trpc/\""));
+    // A method on every path.
+    assert!(net.contains(
+        "limit = 500 aggregate_key_type = \"IP\" evaluation_window_sec = 300 scope_down_statement { byte_match_statement { search_string = \"POST\""
+    ), "{net}");
+
+    // Cloud Armor: a CEL expression per rule.
+    let gcp = norm(&generate(&p, &cat, "gcp", Tool::OpenTofu).unwrap().files["network.tf"]);
+    assert!(
+        gcp.contains(
+            "expression = join(\" || \", formatlist(\"request.path.startsWith('%s')\", [\"/api/auth/\"]))"
+        ),
+        "{gcp}"
+    );
+    assert!(gcp.contains(
+        "expression = format(\"(%s) && request.method == '%s'\", join(\" || \", formatlist(\"request.path.startsWith('%s')\", [\"/contact\"])), \"POST\")"
+    ), "{gcp}");
+    assert!(
+        gcp.contains("expression = format(\"request.method == '%s'\", \"POST\")"),
+        "{gcp}"
+    );
+    assert!(gcp.contains("count = 2000 interval_sec = 300"), "{gcp}");
+
+    // Front Door: RateLimitRule custom rules, the prefix as a regex after the host
+    // (RequestUri is the full URL there), the method as its own condition.
+    let az = norm(&generate(&p, &cat, "azure", Tool::OpenTofu).unwrap().files["network.tf"]);
+    assert!(az.contains(
+        "custom_rule { name = \"contact\" enabled = true priority = 2 type = \"RateLimitRule\" rate_limit_duration_in_minutes = 5 rate_limit_threshold = 20 action = \"Block\" match_condition { match_variable = \"RequestUri\" operator = \"RegEx\" match_values = formatlist(\"^[a-z]+://[^/]+%s\", [\"/contact\"]) } match_condition { match_variable = \"RequestMethod\" operator = \"Equal\" match_values = [ \"POST\" ] } }"
+    ), "{az}");
+    assert!(
+        az.contains("name = \"forms\" enabled = true priority = 3"),
+        "{az}"
+    );
+    assert!(az.contains("rate_limit_threshold = 50 action = \"Log\""), "{az}");
+}
+
+/// Projects saved before rate rules carried one global limit; it loads as the first row.
+#[test]
+fn the_single_rate_limit_loads_as_one_rate_rule() {
+    let old =
+        std::fs::read_to_string(Path::new(env!("CARGO_MANIFEST_DIR")).join("../../examples/edge.ttg.json"))
+            .unwrap()
+            .replace("\r\n", "\n");
+    let rules = r#""rate_rules": [
+          {
+            "name": "rate-limit",
+            "limit": 2000,
+            "paths": [],
+            "method": "ANY",
+            "action": "block"
+          }
+        ],"#;
+    assert!(old.contains(rules));
+    let legacy = old.replace(rules, "\"rate_limit_per_5min\": 2000,");
+    let p = ttg_core::project::load_str(&legacy).unwrap();
+    assert_eq!(p, example("edge.ttg.json"), "the old field becomes the same row");
+    // 0 meant "no rate limit".
+    let off = ttg_core::project::load_str(&old.replace(rules, "\"rate_limit_per_5min\": 0,")).unwrap();
+    let waf = &off.nodes["waf-edge"].config;
+    assert!(!waf.contains_key("rate_rules") && !waf.contains_key("rate_limit_per_5min"));
+}
+
+/// A dynamic site: every method reaches the origin, nothing is cached by default, and each
+/// path behaviour picks its AWS managed policies by name.
+#[test]
+fn a_dynamic_site_allows_every_method_and_caches_by_path() {
+    let cat = Catalog::builtin();
+    let p = example("edge-dynamic.ttg.json");
+    let g = generate(&p, &cat, "aws", Tool::OpenTofu).unwrap();
+    assert!(g.diagnostics.iter().all(|d| d.severity != Severity::Error));
+    let net = norm(&g.files["network.tf"]);
+    assert!(net.contains(
+        "default_cache_behavior { target_origin_id = \"origin\" viewer_protocol_policy = \"redirect-to-https\" allowed_methods = [ \"DELETE\", \"GET\", \"HEAD\", \"OPTIONS\", \"PATCH\", \"POST\", \"PUT\" ]"
+    ), "{net}");
+    assert!(
+        net.contains(
+            "cache_policy_id = data.aws_cloudfront_cache_policy.app_cdn_cache[\"CachingDisabled\"].id"
+        ),
+        "{net}"
+    );
+    // 'Forward Host header' is on, and the certificate covers the custom domain.
+    assert!(net.contains(
+        "origin_request_policy_id = data.aws_cloudfront_origin_request_policy.app_cdn_origin_request[\"AllViewer\"].id"
+    ), "{net}");
+    assert!(net.contains(
+        "ordered_cache_behavior { path_pattern = \"/_next/static/*\" target_origin_id = \"origin\" viewer_protocol_policy = \"redirect-to-https\" allowed_methods = [ \"GET\", \"HEAD\", \"OPTIONS\" ] cached_methods = [ \"GET\", \"HEAD\" ] compress = true cache_policy_id = data.aws_cloudfront_cache_policy.app_cdn_cache[\"CachingOptimized\"].id }"
+    ), "{net}");
+    // One lookup per managed policy, by its managed name.
+    assert!(net.contains(
+        "data \"aws_cloudfront_cache_policy\" \"app_cdn_cache\" { for_each = toset(concat([\"CachingDisabled\"], [\"CachingOptimized\", \"UseOriginCacheControlHeaders\"])) name = format(\"Managed-%s\", each.key) }"
+    ), "{net}");
+    assert!(
+        net.contains("origin_read_timeout = 60 origin_keepalive_timeout = 60"),
+        "{net}"
+    );
+    assert!(
+        net.contains("custom_header { name = \"X-Edge\" value = \"cdn\" }"),
+        "{net}"
+    );
+    assert!(net.contains(
+        "custom_header { name = \"X-Origin-Verify\" value = random_password.app_cdn_origin_secret.result }"
+    ), "{net}");
+
+    // Without the option the Host header stays behind: AllViewerExceptHostHeader.
+    let mut q = p.clone();
+    q.nodes
+        .get_mut("cdn-app")
+        .unwrap()
+        .config
+        .insert("forward_host_header".into(), ttg_core::Value::Bool(false));
+    let net = norm(&generate(&q, &cat, "aws", Tool::OpenTofu).unwrap().files["network.tf"]);
+    assert!(net.contains(
+        "origin_request_policy_id = data.aws_cloudfront_origin_request_policy.app_cdn_origin_request[\"AllViewerExceptHostHeader\"].id"
+    ), "{net}");
+
+    // A bucket CDN keeps its defaults: read-only methods, CachingOptimized, no lookup of
+    // origin-request policies at all.
+    let edge = norm(
+        &generate(&example("edge.ttg.json"), &cat, "aws", Tool::OpenTofu)
+            .unwrap()
+            .files["network.tf"],
+    );
+    assert!(edge.contains("allowed_methods = [ \"GET\", \"HEAD\", \"OPTIONS\" ]"));
+    assert!(edge.contains(
+        "cache_policy_id = data.aws_cloudfront_cache_policy.assets_cdn_cache[\"CachingOptimized\"].id"
+    ));
+    assert!(!edge.contains("aws_cloudfront_origin_request_policy"), "{edge}");
+}
+
+/// CloudFront reaches an https load balancer by a name its certificate covers: the DNS
+/// Record that aliases it, never the ALB's own DNS name.
+#[test]
+fn a_load_balancer_origin_is_reached_by_a_name_its_certificate_covers() {
+    let cat = Catalog::builtin();
+    let p = example("edge-dynamic.ttg.json");
+    let net = norm(&generate(&p, &cat, "aws", Tool::OpenTofu).unwrap().files["network.tf"]);
+    assert!(
+        net.contains("origin { origin_id = \"origin\" domain_name = aws_route53_record.origin.fqdn custom_origin_config { http_port = 80 https_port = 443 origin_protocol_policy = \"https-only\""),
+        "{net}"
+    );
+
+    // The certificate no longer covers origin.app.example.com: an error that says how.
+    let mut q = p.clone();
+    q.nodes
+        .get_mut("cert-app")
+        .unwrap()
+        .config
+        .insert("alternative_names".into(), ttg_core::Value::List(vec![]));
+    let err = generate(&q, &cat, "aws", Tool::OpenTofu).unwrap_err().to_string();
+    assert!(
+        err.contains("a name the load balancer's certificate covers"),
+        "{err}"
+    );
+    assert!(
+        err.contains("add that name to the certificate's alternative names"),
+        "{err}"
+    );
+
+    // A wildcard covers one label.
+    q.nodes.get_mut("cert-app").unwrap().config.insert(
+        "alternative_names".into(),
+        ttg_core::Value::List(vec!["*.app.example.com".into()]),
+    );
+    generate(&q, &cat, "aws", Tool::OpenTofu).unwrap();
+
+    // An http load balancer is reached by its own name over plain HTTP, with a warning.
+    let mut h = p.clone();
+    h.nodes
+        .get_mut("lb-app")
+        .unwrap()
+        .config
+        .insert("protocol".into(), ttg_core::Value::Str("http".into()));
+    h.nodes
+        .get_mut("cdn-app")
+        .unwrap()
+        .config
+        .remove("forward_host_header");
+    let g = generate(&h, &cat, "aws", Tool::OpenTofu).unwrap();
+    assert!(has_warning(&g, "has no HTTPS listener"), "{:?}", g.diagnostics);
+    let net = norm(&g.files["network.tf"]);
+    assert!(net.contains("origin_protocol_policy = \"http-only\""), "{net}");
+}
+
+/// Forwarding the viewer's Host header makes the origin answer for the custom domain, so
+/// its certificate has to cover that too.
+#[test]
+fn forwarding_the_host_header_needs_the_origin_certificate_to_cover_it() {
+    let cat = Catalog::builtin();
+    let mut p = example("edge-dynamic.ttg.json");
+    p.nodes.get_mut("cert-app").unwrap().config.insert(
+        "domain".into(),
+        ttg_core::Value::Str("origin.app.example.com".into()),
+    );
+    let err = generate(&p, &cat, "aws", Tool::OpenTofu).unwrap_err().to_string();
+    assert!(
+        err.contains("forwards the viewer's Host header (app.example.com)"),
+        "{err}"
+    );
+}
+
+/// The secret origin header is a generated value the CDN sends and the load balancer's
+/// listener requires: without it the listener answers 403.
+#[test]
+fn the_secret_origin_header_guards_the_load_balancer() {
+    let cat = Catalog::builtin();
+    let p = example("edge-dynamic.ttg.json");
+    let g = generate(&p, &cat, "aws", Tool::OpenTofu).unwrap();
+    let lb = norm(&g.files["load_balancer.tf"]);
+    assert!(
+        lb.contains("default_action { type = \"fixed-response\" fixed_response { content_type = \"text/plain\" message_body = \"Forbidden\" status_code = \"403\" } }"),
+        "{lb}"
+    );
+    assert!(lb.contains(
+        "resource \"aws_lb_listener_rule\" \"app_lb_origin_guard\" { listener_arn = aws_lb_listener.app_lb_listener.arn priority = 1 action { type = \"forward\" target_group_arn = aws_lb_target_group.app_lb_tg.arn } condition { http_header { http_header_name = \"X-Origin-Verify\" values = [ random_password.app_cdn_origin_secret.result ] } } }"
+    ), "{lb}");
+    assert!(g.files["versions.tf"].contains("hashicorp/random"));
+    // Off: the listener forwards as before and there is no rule.
+    let mut q = p.clone();
+    q.nodes
+        .get_mut("cdn-app")
+        .unwrap()
+        .config
+        .remove("secret_origin_header");
+    let lb = norm(&generate(&q, &cat, "aws", Tool::OpenTofu).unwrap().files["load_balancer.tf"]);
+    assert!(
+        lb.contains(
+            "default_action { type = \"forward\" target_group_arn = aws_lb_target_group.app_lb_tg.arn }"
+        ),
+        "{lb}"
+    );
+    assert!(!lb.contains("origin_guard"), "{lb}");
+}
+
+/// AAAA: an alias of a CDN on AWS and Azure, the IPv6 front end of the global HTTPS load
+/// balancer on Google Cloud; an IPv4-only load balancer cannot be one.
+#[test]
+fn aaaa_records_alias_what_answers_ipv6() {
+    let cat = Catalog::builtin();
+    let p = example("edge-dynamic.ttg.json");
+    let aws = norm(&generate(&p, &cat, "aws", Tool::OpenTofu).unwrap().files["dns.tf"]);
+    assert!(aws.contains(
+        "type = \"AAAA\" alias { name = aws_cloudfront_distribution.app_cdn.domain_name zone_id = aws_cloudfront_distribution.app_cdn.hosted_zone_id"
+    ), "{aws}");
+    let az = norm(&generate(&p, &cat, "azure", Tool::OpenTofu).unwrap().files["dns.tf"]);
+    assert!(
+        az.contains("resource \"azurerm_dns_aaaa_record\" \"app_ipv6_aaaa\" { name = \"app\""),
+        "{az}"
+    );
+    assert!(az.contains("target_resource_id = azurerm_cdn_frontdoor_endpoint.app_cdn.id"));
+    // The TXT validation record is written once, by the A record.
+    assert_eq!(az.matches("_dnsauth.app").count(), 1, "{az}");
+    let gcp = generate(&p, &cat, "gcp", Tool::OpenTofu).unwrap();
+    let lb = norm(&gcp.files["load_balancer.tf"]);
+    assert!(lb.contains("resource \"google_compute_global_forwarding_rule\" \"app_lb_grule6\""));
+    assert!(lb.contains("ip_version = \"IPV6\""));
+    assert!(norm(&gcp.files["dns.tf"])
+        .contains("type = \"AAAA\" ttl = 300 rrdatas = [ google_compute_global_forwarding_rule.app_lb_grule6.ip_address ]"));
+
+    // An AAAA alias of the load balancer itself resolves to nothing on AWS and Azure.
+    let mut q = p.clone();
+    q.edges.retain(|e| e.source != "rec-app6");
+    q.add_edge("rec-app6", "lb-app", ttg_core::Relation::AttributeReference);
+    for provider in ["aws", "azure"] {
+        let err = generate(&q, &cat, provider, Tool::OpenTofu)
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("\"app ipv6\""), "{provider}: {err}");
+    }
+    generate(&q, &cat, "gcp", Tool::OpenTofu).unwrap();
+}
+
+/// A record pointed at a CDN under a name the CDN does not serve gets an error page from
+/// the edge, whatever the provider.
+#[test]
+fn a_record_aliasing_a_cdn_must_use_its_custom_domain() {
+    let cat = Catalog::builtin();
+    let mut p = example("edge.ttg.json");
+    p.nodes
+        .get_mut("rec-assets")
+        .unwrap()
+        .config
+        .insert("record_name".into(), ttg_core::Value::Str("static".into()));
+    for provider in ["aws", "azure", "gcp"] {
+        let g = generate(&p, &cat, provider, Tool::OpenTofu).unwrap();
+        assert!(
+            has_warning(&g, "points static.example.com at the CDN \"assets cdn\", which only answers for its custom domain assets.example.com"),
+            "{provider}: {:?}",
+            g.diagnostics
+        );
+    }
+}
+
+/// Azure's CDN is Front Door: Premium with a managed-rule firewall (the only tier that runs
+/// managed rule sets), Standard without one; routes per path behaviour; a rule set for the
+/// origin headers; the firewall attached by a security policy.
+#[test]
+fn azure_cdn_is_front_door() {
+    let cat = Catalog::builtin();
+    let p = example("edge-dynamic.ttg.json");
+    let g = generate(&p, &cat, "azure", Tool::OpenTofu).unwrap();
+    let net = norm(&g.files["network.tf"]);
+    assert!(
+        net.contains("sku_name = \"Premium_AzureFrontDoor\" response_timeout_seconds = 60"),
+        "{net}"
+    );
+    assert!(
+        net.contains(
+            "resource \"azurerm_cdn_frontdoor_firewall_policy\" \"app_waf_fd\" { name = \"appwaffd\""
+        ),
+        "{net}"
+    );
+    assert!(
+        net.contains(
+            "managed_rule { type = \"Microsoft_DefaultRuleSet\" version = \"2.1\" action = \"Block\" }"
+        ),
+        "{net}"
+    );
+    assert!(net
+        .contains("cdn_frontdoor_firewall_policy_id = azurerm_cdn_frontdoor_firewall_policy.app_waf_fd.id"));
+    // The origin is the A record that aliases the load balancer, certificate checked; the
+    // Host header is the viewer's ('Forward Host header').
+    assert!(net.contains(
+        "host_name = trimsuffix(azurerm_dns_a_record.origin_a.fqdn, \".\") certificate_name_check_enabled = true"
+    ), "{net}");
+    // Dynamic: the default route caches nothing; the static path does.
+    assert!(net.contains("patterns_to_match = [ \"/*\" ] forwarding_protocol = \"HttpsOnly\" https_redirect_enabled = true link_to_default_domain = true }"), "{net}");
+    assert!(net.contains(
+        "patterns_to_match = [ \"/_next/static/*\" ] forwarding_protocol = \"HttpsOnly\" https_redirect_enabled = true link_to_default_domain = true cache { query_string_caching_behavior = \"IgnoreQueryString\" compression_enabled = true"
+    ), "{net}");
+    assert!(net.contains(
+        "cdn_frontdoor_route_ids = concat([azurerm_cdn_frontdoor_route.app_cdn_route.id], [azurerm_cdn_frontdoor_route.app_cdn_behavior_0.id, azurerm_cdn_frontdoor_route.app_cdn_behavior_1.id])"
+    ), "{net}");
+    assert!(net.contains(
+        "request_header_action { header_action = \"Overwrite\" header_name = \"X-Origin-Verify\" value = random_password.app_cdn_secret.result }"
+    ), "{net}");
+    assert!(g.files["MANUAL_STEPS.md"].contains("Check the secret origin header at the backends"));
+
+    // No firewall: Standard, and no security policy.
+    let mut q = p.clone();
+    q.edges.retain(|e| e.target != "waf-app");
+    let net = norm(&generate(&q, &cat, "azure", Tool::OpenTofu).unwrap().files["network.tf"]);
+    assert!(net.contains("sku_name = \"Standard_AzureFrontDoor\""), "{net}");
+    assert!(!net.contains("azurerm_cdn_frontdoor_security_policy"), "{net}");
+}
+
+/// On Google Cloud a CDN in front of a load balancer is Cloud CDN on that load balancer's
+/// backend service, with the CDN's firewall attached there too; the CDN node itself
+/// generates nothing and nothing about its links is left to do by hand.
+#[test]
+fn gcp_cloud_cdn_is_switched_on_at_the_load_balancer() {
+    let cat = Catalog::builtin();
+    let p = example("edge-dynamic.ttg.json");
+    let g = generate(&p, &cat, "gcp", Tool::OpenTofu).unwrap();
+    let lb = norm(&g.files["load_balancer.tf"]);
+    assert!(lb.contains(
+        "timeout_sec = 60 health_checks = [ google_compute_health_check.app_lb_ghc.id ] enable_cdn = true security_policy = google_compute_security_policy.app_waf.id"
+    ), "{lb}");
+    assert!(
+        lb.contains("cdn_policy { cache_mode = \"USE_ORIGIN_HEADERS\" cache_key_policy {"),
+        "{lb}"
+    );
+    assert!(!g.entity_blocks.contains_key("cdn-app"));
+    assert!(
+        !g.diagnostics.iter().any(|d| d.message.contains("cannot express")),
+        "{:?}",
+        g.diagnostics
+    );
+    assert!(
+        !g.manual_steps.iter().any(|s| s.title.contains("by hand")),
+        "{:?}",
+        g.manual_steps
+    );
+    // The rows Cloud CDN cannot express are named.
+    assert!(has_warning(
+        &g,
+        "path behaviours, origin headers and the secret origin header are not generated"
+    ));
+}
+
+/// `hop` and `for_each_item` are checked when the catalog loads.
+#[test]
+fn hops_and_row_lists_are_checked_at_load_time() {
+    let aws = include_str!("../../../definitions/providers/aws.toml");
+    let head = r#"
+schema_version = 2
+[resource]
+type = "thing"
+category = "network"
+display_name = "Thing"
+[[fields]]
+name = "rows"
+type = "struct_list"
+[[fields.items]]
+name = "paths"
+type = "string_list"
+[[relations]]
+kind = "attribute_reference"
+targets = ["thing"]
+[providers.aws]
+[[providers.aws.blocks]]
+key = "main"
+resource = "aws_thing"
+"#;
+    let load = |tail: &str| {
+        let def = format!("{head}{tail}\n");
+        Catalog::from_sources(
+            [("thing.toml", def.as_str())].into_iter(),
+            [("aws.toml", aws)].into_iter(),
+        )
+        .map(|_| ())
+    };
+    load(r#"when = { relation = "attribute_reference", target_type = "thing", hop = { relation = "attribute_reference", target_type = "thing" } }"#)
+        .expect("an outgoing hop the first-hop type declares");
+    let err = load(r#"when = { relation = "attribute_reference", target_type = "thing", hop = { relation = "logs_to" } }"#)
+        .expect_err("undeclared on the first-hop type");
+    assert!(
+        err.to_string().contains("'thing' declares no relation 'logs_to'"),
+        "{err}"
+    );
+    let err = load(r#"when = { relation = "attribute_reference", hop = { relation = "attribute_reference", incoming = true, target_type = "thing", certificate_covers = true } }"#)
+        .expect_err("no host name");
+    assert!(
+        err.to_string()
+            .contains("certificate_covers needs a target_type with a host name"),
+        "{err}"
+    );
+
+    let nested = |extra: &str| {
+        format!(
+            "[[providers.aws.blocks.nested]]\nblock = \"rule\"\n{extra}\n[[providers.aws.blocks.nested.nested]]\nblock = \"entry\"\nfor_each_item = \"paths\"\n[providers.aws.blocks.nested.nested.args]\nv = {{ item = \"value\" }}\n"
+        )
+    };
+    load(&nested("for_each_field = \"rows\"")).expect("for_each_item inside a row");
+    let err = load(&nested("")).expect_err("no row");
+    assert!(
+        err.to_string()
+            .contains("only valid inside a for_each_field block"),
+        "{err}"
+    );
+    let err = load("when = { not = { field = \"missing\" } }").expect_err("not is checked inside");
+    assert!(err.to_string().contains("undeclared field 'missing'"), "{err}");
 }
 
 // ---------------------------------------------------------------------------

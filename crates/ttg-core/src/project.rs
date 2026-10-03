@@ -1,6 +1,6 @@
 //! Loading and saving `.ttg.json` project files.
 
-use crate::{ir::Project, validate, ProjectError, SCHEMA_VERSION};
+use crate::{ir::Project, validate, ProjectError, Value, SCHEMA_VERSION};
 use std::path::Path;
 
 /// File extension used for project files.
@@ -21,12 +21,48 @@ pub fn load_str(json: &str) -> Result<Project, ProjectError> {
     }
     let mut project: Project = serde_json::from_str(json)?;
     // Forward migrations go here as the schema evolves (1 -> 2 -> ...).
+    migrate_fields(&mut project);
     project.schema_version = SCHEMA_VERSION;
     let report = validate::structural(&project);
     if report.has_errors() {
         return Err(ProjectError::Invalid(report.to_string()));
     }
     Ok(project)
+}
+
+/// Fields a type has replaced, rewritten into their new shape so older files keep
+/// loading with the same meaning:
+///
+/// - a Web Application Firewall's single `rate_limit_per_5min` becomes the first row of
+///   `rate_rules` (all paths, any method, blocking); 0 meant "no rate limit" and is dropped.
+fn migrate_fields(p: &mut Project) {
+    for n in p.nodes.values_mut() {
+        if n.resource_type != "web_application_firewall" {
+            continue;
+        }
+        let Some(old) = n.config.remove("rate_limit_per_5min") else {
+            continue;
+        };
+        let limit = match &old {
+            Value::Int(i) => *i,
+            Value::Float(f) => *f as i64,
+            Value::Str(s) => s.trim().parse().unwrap_or(0),
+            _ => 0,
+        };
+        if limit <= 0 || n.config.contains_key("rate_rules") {
+            continue;
+        }
+        let row: crate::Record = [
+            ("name".to_string(), Value::Str("rate-limit".into())),
+            ("limit".to_string(), Value::Int(limit)),
+            ("paths".to_string(), Value::List(Vec::new())),
+            ("method".to_string(), Value::Str("ANY".into())),
+            ("action".to_string(), Value::Str("block".into())),
+        ]
+        .into_iter()
+        .collect();
+        n.config.insert("rate_rules".into(), Value::Records(vec![row]));
+    }
 }
 
 pub fn load(path: &Path) -> Result<Project, ProjectError> {

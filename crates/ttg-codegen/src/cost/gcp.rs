@@ -428,12 +428,11 @@ fn cdn(c: &mut Ctx) {
 }
 
 fn web_application_firewall(c: &mut Ctx) {
-    let rules = c.list_len("managed_rules") as f64
-        + if c.num("rate_limit_per_5min", 0.0) > 0.0 {
-            1.0
-        } else {
-            0.0
-        };
+    if !c.emits("main") {
+        c.note("protects nothing yet, so no security policy is generated");
+        return;
+    }
+    let rules = (c.list_len("managed_rules") + c.list_len("rate_rules")) as f64;
     let req = c.a("waf_requests");
     c.charge("security policy", "cloud_armor", "policy", 1.0);
     c.charge(format!("{rules} rule(s)"), "cloud_armor", "rule", rules);

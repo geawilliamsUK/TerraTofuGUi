@@ -988,7 +988,18 @@ fn struct_list_editor(app: &mut TtgApp, ui: &mut Ui, id: &str, provider: Option<
                                     let r = ui.add(te);
                                     track_text_edit(app, &r);
                                     if r.changed() {
-                                        set = Some(Value::Str(s));
+                                        // A list item (a rate rule's path prefixes) is typed
+                                        // as "a, b, c", like a list field.
+                                        set = Some(if sub.field_type == FieldType::StringList {
+                                            Value::List(
+                                                s.split(',')
+                                                    .map(|x| x.trim().to_string())
+                                                    .filter(|x| !x.is_empty())
+                                                    .collect(),
+                                            )
+                                        } else {
+                                            Value::Str(s)
+                                        });
                                         text_changed = true;
                                     }
                                 }

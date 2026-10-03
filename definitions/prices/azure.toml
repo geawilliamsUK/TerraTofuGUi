@@ -28,7 +28,7 @@ network_peering = "Peering costs nothing to create; traffic across it is billed 
 key_vault = "A vault costs nothing by itself; the keys and secrets in it are priced on their own lines (per operation)."
 
 [not_estimated]
-web_application_firewall = "A WAF policy is free by itself; WAF is billed through the Application Gateway (WAF_v2) or Front Door it is attached to, which the diagram does not model."
+web_application_firewall = "A WAF policy is free by itself. In front of a CDN it runs on Front Door Premium, whose base fee includes it (priced on the CDN's line); in front of a load balancer it is billed through the Application Gateway (WAF_v2) it is attached to, which the diagram does not model."
 tls_certificate = "Key Vault charges per certificate renewal request plus whatever the issuing certificate authority charges; neither depends on the diagram."
 
 # ------------------------------------------------------------------ compute
@@ -269,14 +269,19 @@ checked = "2026-09-29: via prices.azure.com retail API (armRegionName 'Global': 
 hour = { "*" = 0.01 }
 data = { unit = "GB", "*" = 0.01 }
 
-[tables.cdn]
-unit = "GB"
-description = "Azure CDN Standard from Microsoft (classic), data transfer out, zone 1, first 10 TB"
-source = "Azure CDN pricing (azure.microsoft.com/pricing/details/cdn)"
-checked = "2026-09-29: via prices.azure.com retail API (productName 'Azure CDN from Microsoft', meter 'Standard Data Transfer', armRegionName 'Zone 1', first 10 TB)"
+[tables.front_door]
+unit = "month"
+description = "Azure Front Door Standard / Premium: monthly base fee, data transfer out to viewers (zone 1, first 10 TB) and requests (zone 1, first 250 million)"
+source = "Azure Front Door pricing (azure.microsoft.com/pricing/details/frontdoor)"
+checked = "2026-10-02: via prices.azure.com retail API (serviceName 'Azure Front Door Service', productName 'Azure Front Door', armRegionName 'Zone 1': 'Standard Base Fees' / 'Premium Base Fees', 'Standard Data Transfer Out' / 'Premium Data Transfer Out' first tier, 'Standard Requests' / 'Premium Requests' first tier). The WAF is included in Premium; data from Front Door to the origin ('Data Transfer In') is not modelled"
 
-[tables.cdn.rows]
-data_out = { "*" = 0.081 }
+[tables.front_door.rows]
+standard_base     = { "*" = 35.0 }
+premium_base      = { "*" = 330.0 }
+standard_data_out = { unit = "GB", "*" = 0.0825 }
+premium_data_out  = { unit = "GB", "*" = 0.0825 }
+standard_requests = { unit = "10,000 requests", "*" = 0.009 }
+premium_requests  = { unit = "10,000 requests", "*" = 0.015 }
 
 [tables.dns]
 unit = "month"

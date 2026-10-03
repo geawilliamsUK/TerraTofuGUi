@@ -201,12 +201,49 @@ protocol          = { map = "protocol", table = { http = "HTTP", https = "HTTPS"
 certificate_arn   = { relation = "attribute_reference", target_type = "tls_certificate", block = "issued", attr = "certificate_arn", optional = true, fallback = { relation = "attribute_reference", target_type = "tls_certificate", attr = "arn", optional = true } }
 ssl_policy        = { if = { field = "protocol", equals = "https" }, then = { value = "ELBSecurityPolicy-TLS13-1-2-2021-06" } }
 
+# Behind a CDN with a secret origin header, the listener refuses everything by default and
+# a rule (`origin_guard`) forwards only the requests that carry the header.
 [[providers.aws.blocks.nested]]
 block = "default_action"
 
 [providers.aws.blocks.nested.args]
+type             = { if = { relation = "attribute_reference", incoming = true, target_type = "cdn", target_field = "secret_origin_header" }, then = { value = "fixed-response" }, else = { value = "forward" } }
+target_group_arn = { if = { relation = "attribute_reference", incoming = true, target_type = "cdn", target_field = "secret_origin_header", absent = true }, then = { self_block = "tg", attr = "arn" } }
+
+[[providers.aws.blocks.nested.nested]]
+block = "fixed_response"
+when = { relation = "attribute_reference", incoming = true, target_type = "cdn", target_field = "secret_origin_header" }
+
+[providers.aws.blocks.nested.nested.args]
+content_type = { value = "text/plain" }
+message_body = { value = "Forbidden" }
+status_code  = { value = "403" }
+
+[[providers.aws.blocks]]
+key = "origin_guard"
+resource = "aws_lb_listener_rule"
+when = { relation = "attribute_reference", incoming = true, target_type = "cdn", target_field = "secret_origin_header" }
+
+[providers.aws.blocks.args]
+listener_arn = { self_block = "listener", attr = "arn" }
+priority     = { value = 1 }
+
+[[providers.aws.blocks.nested]]
+block = "action"
+
+[providers.aws.blocks.nested.args]
 type             = { value = "forward" }
 target_group_arn = { self_block = "tg", attr = "arn" }
+
+[[providers.aws.blocks.nested]]
+block = "condition"
+
+[[providers.aws.blocks.nested.nested]]
+block = "http_header"
+
+[providers.aws.blocks.nested.nested.args]
+http_header_name = { relation = "attribute_reference", incoming = true, target_type = "cdn", field = "secret_header_name" }
+values           = { relation = "attribute_reference", incoming = true, target_type = "cdn", block = "origin_secret", attr = "result", wrap = "list" }
 
 [[providers.aws.blocks]]
 key = "redirect"
@@ -512,8 +549,15 @@ name                  = { field = "name", transform = "kebab" }
 protocol              = { value = "HTTP" }
 port_name             = { value = "app" }
 load_balancing_scheme = { value = "EXTERNAL_MANAGED" }
-timeout_sec           = { field = "idle_timeout_seconds", fallback = { value = 30 } }
+# A CDN in front sets how long the edge waits for the backends.
+timeout_sec           = { relation = "attribute_reference", incoming = true, target_type = "cdn", field = "origin_read_timeout", fallback = { field = "idle_timeout_seconds", fallback = { value = 30 } } }
 health_checks         = { self_block = "ghc", attr = "id", wrap = "list" }
+# Cloud CDN is a property of the backend service: a CDN linked to this load balancer
+# turns it on here rather than creating anything of its own.
+enable_cdn            = { if = { relation = "attribute_reference", incoming = true, target_type = "cdn" }, then = { value = true } }
+# Cloud Armor attaches here too: a firewall that protects this load balancer, or the one
+# that protects a CDN in front of it.
+security_policy       = { relation = "attachment", incoming = true, target_type = "web_application_firewall", attr = "id", fallback = { relation = "attribute_reference", incoming = true, target_type = "cdn", hop = { relation = "attribute_reference", target_type = "web_application_firewall" }, attr = "id" } }
 
 [[providers.gcp.blocks.nested]]
 block = "backend"
@@ -521,6 +565,26 @@ when = { relation = "attachment", target_type = "compute_instance" }
 
 [providers.gcp.blocks.nested.args]
 group = { self_block = "group", attr = "self_link" }
+
+# A dynamic site caches only what the application marks cacheable; anything else caches
+# static content types the way CloudFront's CachingOptimized does.
+[[providers.gcp.blocks.nested]]
+block = "cdn_policy"
+when = { relation = "attribute_reference", incoming = true, target_type = "cdn" }
+
+[providers.gcp.blocks.nested.args]
+cache_mode  = { if = { relation = "attribute_reference", incoming = true, target_type = "cdn", target_field = "dynamic_site" }, then = { value = "USE_ORIGIN_HEADERS" }, else = { value = "CACHE_ALL_STATIC" } }
+default_ttl = { if = { relation = "attribute_reference", incoming = true, target_type = "cdn", target_field = "dynamic_site", absent = true }, then = { value = 3600 } }
+client_ttl  = { if = { relation = "attribute_reference", incoming = true, target_type = "cdn", target_field = "dynamic_site", absent = true }, then = { value = 3600 } }
+max_ttl     = { if = { relation = "attribute_reference", incoming = true, target_type = "cdn", target_field = "dynamic_site", absent = true }, then = { value = 86400 } }
+
+[[providers.gcp.blocks.nested.nested]]
+block = "cache_key_policy"
+
+[providers.gcp.blocks.nested.nested.args]
+include_host         = { value = true }
+include_protocol     = { value = true }
+include_query_string = { value = true }
 
 [[providers.gcp.blocks]]
 key = "urlmap"
@@ -553,9 +617,28 @@ port_range            = { value = "443" }
 ip_protocol           = { value = "TCP" }
 load_balancing_scheme = { value = "EXTERNAL_MANAGED" }
 
+# An IPv6 front end on the same proxy, for an AAAA record that aliases this load balancer
+# or a CDN in front of it.
+[[providers.gcp.blocks]]
+key = "grule6"
+resource = "google_compute_global_forwarding_rule"
+when = { all = [ { field = "protocol", equals = "https" }, { any = [
+  { relation = "attribute_reference", incoming = true, target_type = "dns_record", target_field = "record_type", equals = "AAAA" },
+  { relation = "attribute_reference", incoming = true, target_type = "cdn", hop = { relation = "attribute_reference", incoming = true, target_type = "dns_record" }, target_field = "record_type", equals = "AAAA" },
+] } ] }
+
+[providers.gcp.blocks.args]
+name                  = { template = "{name}-https-rule-v6", transform = "kebab" }
+target                = { self_block = "proxy", attr = "id" }
+port_range            = { value = "443" }
+ip_protocol           = { value = "TCP" }
+ip_version            = { value = "IPV6" }
+load_balancing_scheme = { value = "EXTERNAL_MANAGED" }
+
 [providers.gcp.outputs]
-address        = { block = "rule", attr = "ip_address", description = "Frontend IP address" }
-global_address = { block = "grule", attr = "ip_address", description = "Global frontend IP address of the HTTPS load balancer" }
+address         = { block = "rule", attr = "ip_address", description = "Frontend IP address" }
+global_address  = { block = "grule", attr = "ip_address", description = "Global frontend IP address of the HTTPS load balancer" }
+global_address6 = { block = "grule6", attr = "ip_address", description = "Global frontend IPv6 address of the HTTPS load balancer" }
 
 [[providers.gcp.checks]]
 severity = "error"

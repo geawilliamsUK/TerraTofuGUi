@@ -1,18 +1,22 @@
 # Abstract type: Web Application Firewall  (schema_version 2)
 #
-# Managed rule groups (and an optional rate limit) in front of a Load Balancer or a CDN.
-# AWS: aws_wafv2_web_acl (REGIONAL) with one managed-rule statement per entry plus an
-#      aws_wafv2_web_acl_association per protected load balancer — the whole thing. A CDN
-#      that links here ("Protected by") also gets a CLOUDFRONT-scoped copy of the same
-#      rules in us-east-1, which is the only kind of Web ACL CloudFront accepts.
-# Azure: azurerm_web_application_firewall_policy with the OWASP 3.2 managed rule set and a
-#      rate-limit custom rule. Azure policies attach to an Application Gateway or Front
-#      Door, never to the layer-4 azurerm_lb the Load Balancer type emits, so the
-#      attachment is a manual step.
+# Managed rule groups and per-path rate limits in front of a Load Balancer ('Protects')
+# or a CDN (the CDN's 'Protected by'). Each provider builds what the links ask for and
+# nothing else: a firewall that protects nothing is a warning, not a stray resource.
+# AWS: a REGIONAL aws_wafv2_web_acl plus one aws_wafv2_web_acl_association per protected
+#      load balancer, only when one is linked; a CLOUDFRONT-scoped copy of the same rules in
+#      us-east-1, only when a CDN links here (the only kind of Web ACL CloudFront accepts).
+#      Every row of 'Rate rules' is a rate-based rule whose scope-down statement matches
+#      the row's path prefixes (STARTS_WITH, OR'ed) and HTTP method.
+# Azure: an Application Gateway policy (azurerm_web_application_firewall_policy) for a
+#      protected load balancer, which has to be attached to a gateway by hand because the
+#      Load Balancer type emits a layer-4 azurerm_lb; and a Front Door policy
+#      (azurerm_cdn_frontdoor_firewall_policy) for a CDN, which the CDN's Front Door profile
+#      attaches with a security policy. Rate rules become RateLimitRule custom rules.
 # GCP: google_compute_security_policy (Cloud Armor) with preconfigured WAF expressions and
-#      a rate-based ban. Cloud Armor is attached by setting `security_policy` on the
-#      *backend service*, which belongs to the load balancer's mapping, so that too is a
-#      manual step.
+#      one rate-based ban per rate rule, matched with request.path.startsWith(...). The
+#      global HTTPS load balancer it protects (directly, or through a CDN) sets it on its
+#      backend service.
 
 schema_version = 2
 
@@ -20,7 +24,7 @@ schema_version = 2
 type = "web_application_firewall"
 category = "network"
 display_name = "Web Application Firewall"
-description = "Managed rule groups and a rate limit in front of a Load Balancer. Link 'Protects' to the load balancers it guards."
+description = "Managed rule groups and per-path rate limits. Link 'Protects' to the load balancers it guards, or 'Protected by' from a CDN."
 kind = "node"
 allowed_parents = ["resource_group"]
 icon = "WAF"
@@ -32,14 +36,50 @@ label = "Managed rule groups"
 type = "string_list"
 required = true
 default = ["AWSManagedRulesCommonRuleSet"]
-description = "AWS managed rule group names. AWSManagedRulesCommonRuleSet, AWSManagedRulesKnownBadInputsRuleSet, AWSManagedRulesSQLiRuleSet, AWSManagedRulesLinuxRuleSet and AWSManagedRulesPHPRuleSet also translate to Cloud Armor; any other name is AWS-only."
+description = "AWS managed rule group names. AWSManagedRulesCommonRuleSet, AWSManagedRulesKnownBadInputsRuleSet, AWSManagedRulesSQLiRuleSet, AWSManagedRulesLinuxRuleSet and AWSManagedRulesPHPRuleSet also translate to Cloud Armor; any other name is AWS-only. Azure uses its own default rule set for all of them."
 
 [[fields]]
-name = "rate_limit_per_5min"
-label = "Rate limit / 5 min"
+name = "rate_rules"
+label = "Rate rules"
+type = "struct_list"
+description = "Requests per source IP per five minutes before a rule fires, optionally only for some path prefixes and one HTTP method. Each row is counted separately."
+
+[[fields.items]]
+name = "name"
+type = "string"
+required = true
+default = "rate-limit"
+pattern = "^[a-z][a-z0-9-]{0,40}$"
+pattern_hint = "lower case letters, digits and '-', starting with a letter"
+
+[[fields.items]]
+name = "limit"
+label = "Limit / 5 min"
 type = "int"
-default = 0
-description = "Requests per source IP per five minutes before the rule fires; 0 turns the rule off. AWS requires at least 100."
+required = true
+default = 300
+description = "Requests per source IP in five minutes. AWS needs at least 10."
+
+[[fields.items]]
+name = "paths"
+label = "Path prefixes"
+type = "string_list"
+description = "Only count requests whose path starts with one of these, e.g. /api/auth/. Empty = every path."
+
+[[fields.items]]
+name = "method"
+label = "Method"
+type = "enum"
+options = ["ANY", "GET", "POST", "PUT", "PATCH", "DELETE"]
+default = "ANY"
+
+[[fields.items]]
+name = "action"
+label = "Action"
+type = "enum"
+options = ["block", "count"]
+default = "block"
+description = "block rejects requests over the limit; count only records them. Mode = count downgrades every rule to count."
 
 [[fields]]
 name = "mode"
@@ -60,9 +100,11 @@ cardinality = "many"
 [providers.aws]
 status = "full"
 
+# The regional Web ACL, for the load balancers this firewall protects.
 [[providers.aws.blocks]]
 key = "main"
 resource = "aws_wafv2_web_acl"
+when = { relation = "attachment", target_type = "load_balancer" }
 
 [providers.aws.blocks.args]
 name        = { field = "name", transform = "kebab" }
@@ -115,25 +157,29 @@ cloudwatch_metrics_enabled = { value = true }
 metric_name                = { item = "value" }
 sampled_requests_enabled   = { value = true }
 
-# Rate limit. A rate-based rule carries its own action rather than an override_action.
+# One rate-based rule per row. A rate-based rule carries its own action rather than an
+# override_action, and its scope-down statement narrows what it counts: the row's path
+# prefixes (one byte match, or several OR'ed together) and its method. A scope-down
+# statement nests three levels deep at most, so several prefixes together with a method
+# are one regex match on the path instead of an OR.
 [[providers.aws.blocks.nested]]
 block = "rule"
-when = { field = "rate_limit_per_5min" }
+for_each_field = "rate_rules"
 
 [providers.aws.blocks.nested.args]
-name     = { template = "{name}-rate-limit", transform = "kebab" }
-priority = { value = 100 }
+name     = { template = "{name}-{item.name}", transform = "kebab" }
+priority = { item_index = { base = 100, step = 1 } }
 
 [[providers.aws.blocks.nested.nested]]
 block = "action"
 
 [[providers.aws.blocks.nested.nested.nested]]
 block = "block"
-when = { field = "mode", equals = "block" }
+when = { all = [ { field = "mode", equals = "block" }, { item = "action", equals = "block" } ] }
 
 [[providers.aws.blocks.nested.nested.nested]]
 block = "count"
-when = { field = "mode", equals = "count" }
+when = { any = [ { field = "mode", equals = "count" }, { item = "action", equals = "count" } ] }
 
 [[providers.aws.blocks.nested.nested]]
 block = "statement"
@@ -142,16 +188,167 @@ block = "statement"
 block = "rate_based_statement"
 
 [providers.aws.blocks.nested.nested.nested.args]
-limit                 = { field = "rate_limit_per_5min" }
+limit                 = { item = "limit" }
 aggregate_key_type    = { value = "IP" }
 evaluation_window_sec = { value = 300 }
+
+[[providers.aws.blocks.nested.nested.nested.nested]]
+block = "scope_down_statement"
+when = { any = [ { item = "paths" }, { item = "method", not_equals = "ANY" } ] }
+
+# One prefix, any method.
+[[providers.aws.blocks.nested.nested.nested.nested.nested]]
+block = "byte_match_statement"
+for_each_item = "paths"
+when = { all = [ { not = { item = "paths", min_count = 2 } }, { item = "method", equals = "ANY" } ] }
+
+[providers.aws.blocks.nested.nested.nested.nested.nested.args]
+search_string         = { item = "value" }
+positional_constraint = { value = "STARTS_WITH" }
+
+[[providers.aws.blocks.nested.nested.nested.nested.nested.nested]]
+block = "field_to_match"
+
+[[providers.aws.blocks.nested.nested.nested.nested.nested.nested.nested]]
+block = "uri_path"
+
+[[providers.aws.blocks.nested.nested.nested.nested.nested.nested]]
+block = "text_transformation"
+
+[providers.aws.blocks.nested.nested.nested.nested.nested.nested.args]
+priority = { value = 0 }
+type     = { value = "NONE" }
+
+# Several prefixes, any method.
+[[providers.aws.blocks.nested.nested.nested.nested.nested]]
+block = "or_statement"
+when = { all = [ { item = "paths", min_count = 2 }, { item = "method", equals = "ANY" } ] }
+
+[[providers.aws.blocks.nested.nested.nested.nested.nested.nested]]
+block = "statement"
+for_each_item = "paths"
+
+[[providers.aws.blocks.nested.nested.nested.nested.nested.nested.nested]]
+block = "byte_match_statement"
+
+[providers.aws.blocks.nested.nested.nested.nested.nested.nested.nested.args]
+search_string         = { item = "value" }
+positional_constraint = { value = "STARTS_WITH" }
+
+[[providers.aws.blocks.nested.nested.nested.nested.nested.nested.nested.nested]]
+block = "field_to_match"
+
+[[providers.aws.blocks.nested.nested.nested.nested.nested.nested.nested.nested.nested]]
+block = "uri_path"
+
+[[providers.aws.blocks.nested.nested.nested.nested.nested.nested.nested.nested]]
+block = "text_transformation"
+
+[providers.aws.blocks.nested.nested.nested.nested.nested.nested.nested.nested.args]
+priority = { value = 0 }
+type     = { value = "NONE" }
+
+# A method, any path.
+[[providers.aws.blocks.nested.nested.nested.nested.nested]]
+block = "byte_match_statement"
+when = { all = [ { not = { item = "paths" } }, { item = "method", not_equals = "ANY" } ] }
+
+[providers.aws.blocks.nested.nested.nested.nested.nested.args]
+search_string         = { item = "method" }
+positional_constraint = { value = "EXACTLY" }
+
+[[providers.aws.blocks.nested.nested.nested.nested.nested.nested]]
+block = "field_to_match"
+
+[[providers.aws.blocks.nested.nested.nested.nested.nested.nested.nested]]
+block = "method"
+
+[[providers.aws.blocks.nested.nested.nested.nested.nested.nested]]
+block = "text_transformation"
+
+[providers.aws.blocks.nested.nested.nested.nested.nested.nested.args]
+priority = { value = 0 }
+type     = { value = "NONE" }
+
+# Prefixes and a method.
+[[providers.aws.blocks.nested.nested.nested.nested.nested]]
+block = "and_statement"
+when = { all = [ { item = "paths" }, { item = "method", not_equals = "ANY" } ] }
+
+[[providers.aws.blocks.nested.nested.nested.nested.nested.nested]]
+block = "statement"
+
+[[providers.aws.blocks.nested.nested.nested.nested.nested.nested.nested]]
+block = "byte_match_statement"
+for_each_item = "paths"
+when = { not = { item = "paths", min_count = 2 } }
+
+[providers.aws.blocks.nested.nested.nested.nested.nested.nested.nested.args]
+search_string         = { item = "value" }
+positional_constraint = { value = "STARTS_WITH" }
+
+[[providers.aws.blocks.nested.nested.nested.nested.nested.nested.nested.nested]]
+block = "field_to_match"
+
+[[providers.aws.blocks.nested.nested.nested.nested.nested.nested.nested.nested.nested]]
+block = "uri_path"
+
+[[providers.aws.blocks.nested.nested.nested.nested.nested.nested.nested.nested]]
+block = "text_transformation"
+
+[providers.aws.blocks.nested.nested.nested.nested.nested.nested.nested.nested.args]
+priority = { value = 0 }
+type     = { value = "NONE" }
+
+[[providers.aws.blocks.nested.nested.nested.nested.nested.nested.nested]]
+block = "regex_match_statement"
+when = { item = "paths", min_count = 2 }
+
+[providers.aws.blocks.nested.nested.nested.nested.nested.nested.nested.args]
+regex_string = { raw = 'format("^(%s)", join("|", [for p in @paths@ : replace(p, "/[.^$*+?()[\\]{}|\\\\]/", "\\$0")]))', refs = { paths = { item = "paths" } } }
+
+[[providers.aws.blocks.nested.nested.nested.nested.nested.nested.nested.nested]]
+block = "field_to_match"
+
+[[providers.aws.blocks.nested.nested.nested.nested.nested.nested.nested.nested.nested]]
+block = "uri_path"
+
+[[providers.aws.blocks.nested.nested.nested.nested.nested.nested.nested.nested]]
+block = "text_transformation"
+
+[providers.aws.blocks.nested.nested.nested.nested.nested.nested.nested.nested.args]
+priority = { value = 0 }
+type     = { value = "NONE" }
+
+[[providers.aws.blocks.nested.nested.nested.nested.nested.nested]]
+block = "statement"
+
+[[providers.aws.blocks.nested.nested.nested.nested.nested.nested.nested]]
+block = "byte_match_statement"
+
+[providers.aws.blocks.nested.nested.nested.nested.nested.nested.nested.args]
+search_string         = { item = "method" }
+positional_constraint = { value = "EXACTLY" }
+
+[[providers.aws.blocks.nested.nested.nested.nested.nested.nested.nested.nested]]
+block = "field_to_match"
+
+[[providers.aws.blocks.nested.nested.nested.nested.nested.nested.nested.nested.nested]]
+block = "method"
+
+[[providers.aws.blocks.nested.nested.nested.nested.nested.nested.nested.nested]]
+block = "text_transformation"
+
+[providers.aws.blocks.nested.nested.nested.nested.nested.nested.nested.nested.args]
+priority = { value = 0 }
+type     = { value = "NONE" }
 
 [[providers.aws.blocks.nested.nested]]
 block = "visibility_config"
 
 [providers.aws.blocks.nested.nested.args]
 cloudwatch_metrics_enabled = { value = true }
-metric_name                = { template = "{name}-rate-limit", transform = "kebab" }
+metric_name                = { template = "{name}-{item.name}", transform = "kebab" }
 sampled_requests_enabled   = { value = true }
 
 [[providers.aws.blocks.nested]]
@@ -223,22 +420,22 @@ sampled_requests_enabled   = { value = true }
 
 [[providers.aws.blocks.nested]]
 block = "rule"
-when = { field = "rate_limit_per_5min" }
+for_each_field = "rate_rules"
 
 [providers.aws.blocks.nested.args]
-name     = { template = "{name}-rate-limit", transform = "kebab" }
-priority = { value = 100 }
+name     = { template = "{name}-{item.name}", transform = "kebab" }
+priority = { item_index = { base = 100, step = 1 } }
 
 [[providers.aws.blocks.nested.nested]]
 block = "action"
 
 [[providers.aws.blocks.nested.nested.nested]]
 block = "block"
-when = { field = "mode", equals = "block" }
+when = { all = [ { field = "mode", equals = "block" }, { item = "action", equals = "block" } ] }
 
 [[providers.aws.blocks.nested.nested.nested]]
 block = "count"
-when = { field = "mode", equals = "count" }
+when = { any = [ { field = "mode", equals = "count" }, { item = "action", equals = "count" } ] }
 
 [[providers.aws.blocks.nested.nested]]
 block = "statement"
@@ -247,16 +444,163 @@ block = "statement"
 block = "rate_based_statement"
 
 [providers.aws.blocks.nested.nested.nested.args]
-limit                 = { field = "rate_limit_per_5min" }
+limit                 = { item = "limit" }
 aggregate_key_type    = { value = "IP" }
 evaluation_window_sec = { value = 300 }
+
+[[providers.aws.blocks.nested.nested.nested.nested]]
+block = "scope_down_statement"
+when = { any = [ { item = "paths" }, { item = "method", not_equals = "ANY" } ] }
+
+[[providers.aws.blocks.nested.nested.nested.nested.nested]]
+block = "byte_match_statement"
+for_each_item = "paths"
+when = { all = [ { not = { item = "paths", min_count = 2 } }, { item = "method", equals = "ANY" } ] }
+
+[providers.aws.blocks.nested.nested.nested.nested.nested.args]
+search_string         = { item = "value" }
+positional_constraint = { value = "STARTS_WITH" }
+
+[[providers.aws.blocks.nested.nested.nested.nested.nested.nested]]
+block = "field_to_match"
+
+[[providers.aws.blocks.nested.nested.nested.nested.nested.nested.nested]]
+block = "uri_path"
+
+[[providers.aws.blocks.nested.nested.nested.nested.nested.nested]]
+block = "text_transformation"
+
+[providers.aws.blocks.nested.nested.nested.nested.nested.nested.args]
+priority = { value = 0 }
+type     = { value = "NONE" }
+
+[[providers.aws.blocks.nested.nested.nested.nested.nested]]
+block = "or_statement"
+when = { all = [ { item = "paths", min_count = 2 }, { item = "method", equals = "ANY" } ] }
+
+[[providers.aws.blocks.nested.nested.nested.nested.nested.nested]]
+block = "statement"
+for_each_item = "paths"
+
+[[providers.aws.blocks.nested.nested.nested.nested.nested.nested.nested]]
+block = "byte_match_statement"
+
+[providers.aws.blocks.nested.nested.nested.nested.nested.nested.nested.args]
+search_string         = { item = "value" }
+positional_constraint = { value = "STARTS_WITH" }
+
+[[providers.aws.blocks.nested.nested.nested.nested.nested.nested.nested.nested]]
+block = "field_to_match"
+
+[[providers.aws.blocks.nested.nested.nested.nested.nested.nested.nested.nested.nested]]
+block = "uri_path"
+
+[[providers.aws.blocks.nested.nested.nested.nested.nested.nested.nested.nested]]
+block = "text_transformation"
+
+[providers.aws.blocks.nested.nested.nested.nested.nested.nested.nested.nested.args]
+priority = { value = 0 }
+type     = { value = "NONE" }
+
+[[providers.aws.blocks.nested.nested.nested.nested.nested]]
+block = "byte_match_statement"
+when = { all = [ { not = { item = "paths" } }, { item = "method", not_equals = "ANY" } ] }
+
+[providers.aws.blocks.nested.nested.nested.nested.nested.args]
+search_string         = { item = "method" }
+positional_constraint = { value = "EXACTLY" }
+
+[[providers.aws.blocks.nested.nested.nested.nested.nested.nested]]
+block = "field_to_match"
+
+[[providers.aws.blocks.nested.nested.nested.nested.nested.nested.nested]]
+block = "method"
+
+[[providers.aws.blocks.nested.nested.nested.nested.nested.nested]]
+block = "text_transformation"
+
+[providers.aws.blocks.nested.nested.nested.nested.nested.nested.args]
+priority = { value = 0 }
+type     = { value = "NONE" }
+
+[[providers.aws.blocks.nested.nested.nested.nested.nested]]
+block = "and_statement"
+when = { all = [ { item = "paths" }, { item = "method", not_equals = "ANY" } ] }
+
+[[providers.aws.blocks.nested.nested.nested.nested.nested.nested]]
+block = "statement"
+
+[[providers.aws.blocks.nested.nested.nested.nested.nested.nested.nested]]
+block = "byte_match_statement"
+for_each_item = "paths"
+when = { not = { item = "paths", min_count = 2 } }
+
+[providers.aws.blocks.nested.nested.nested.nested.nested.nested.nested.args]
+search_string         = { item = "value" }
+positional_constraint = { value = "STARTS_WITH" }
+
+[[providers.aws.blocks.nested.nested.nested.nested.nested.nested.nested.nested]]
+block = "field_to_match"
+
+[[providers.aws.blocks.nested.nested.nested.nested.nested.nested.nested.nested.nested]]
+block = "uri_path"
+
+[[providers.aws.blocks.nested.nested.nested.nested.nested.nested.nested.nested]]
+block = "text_transformation"
+
+[providers.aws.blocks.nested.nested.nested.nested.nested.nested.nested.nested.args]
+priority = { value = 0 }
+type     = { value = "NONE" }
+
+[[providers.aws.blocks.nested.nested.nested.nested.nested.nested.nested]]
+block = "regex_match_statement"
+when = { item = "paths", min_count = 2 }
+
+[providers.aws.blocks.nested.nested.nested.nested.nested.nested.nested.args]
+regex_string = { raw = 'format("^(%s)", join("|", [for p in @paths@ : replace(p, "/[.^$*+?()[\\]{}|\\\\]/", "\\$0")]))', refs = { paths = { item = "paths" } } }
+
+[[providers.aws.blocks.nested.nested.nested.nested.nested.nested.nested.nested]]
+block = "field_to_match"
+
+[[providers.aws.blocks.nested.nested.nested.nested.nested.nested.nested.nested.nested]]
+block = "uri_path"
+
+[[providers.aws.blocks.nested.nested.nested.nested.nested.nested.nested.nested]]
+block = "text_transformation"
+
+[providers.aws.blocks.nested.nested.nested.nested.nested.nested.nested.nested.args]
+priority = { value = 0 }
+type     = { value = "NONE" }
+
+[[providers.aws.blocks.nested.nested.nested.nested.nested.nested]]
+block = "statement"
+
+[[providers.aws.blocks.nested.nested.nested.nested.nested.nested.nested]]
+block = "byte_match_statement"
+
+[providers.aws.blocks.nested.nested.nested.nested.nested.nested.nested.args]
+search_string         = { item = "method" }
+positional_constraint = { value = "EXACTLY" }
+
+[[providers.aws.blocks.nested.nested.nested.nested.nested.nested.nested.nested]]
+block = "field_to_match"
+
+[[providers.aws.blocks.nested.nested.nested.nested.nested.nested.nested.nested.nested]]
+block = "method"
+
+[[providers.aws.blocks.nested.nested.nested.nested.nested.nested.nested.nested]]
+block = "text_transformation"
+
+[providers.aws.blocks.nested.nested.nested.nested.nested.nested.nested.nested.args]
+priority = { value = 0 }
+type     = { value = "NONE" }
 
 [[providers.aws.blocks.nested.nested]]
 block = "visibility_config"
 
 [providers.aws.blocks.nested.nested.args]
 cloudwatch_metrics_enabled = { value = true }
-metric_name                = { template = "{name}-rate-limit", transform = "kebab" }
+metric_name                = { template = "{name}-global-{item.name}", transform = "kebab" }
 sampled_requests_enabled   = { value = true }
 
 [[providers.aws.blocks.nested]]
@@ -278,17 +622,22 @@ resource_arn = { target = "arn" }
 web_acl_arn  = { self_block = "main", attr = "arn" }
 
 [providers.aws.outputs]
-arn        = { attr = "arn", description = "Web ACL ARN" }
+arn        = { attr = "arn", description = "Regional Web ACL ARN" }
 global_arn = { block = "global", attr = "arn", description = "CLOUDFRONT-scoped Web ACL ARN" }
+
+[[providers.aws.checks]]
+when = { all = [ { relation = "attachment", target_type = "load_balancer", absent = true }, { relation = "attribute_reference", incoming = true, target_type = "cdn", absent = true } ] }
+message = "\"{name}\" protects nothing: link 'Protects' to a load balancer or 'Protected by' from a CDN; no Web ACL is generated until one exists"
 
 # ---------------------------------------------------------------- Azure
 [providers.azure]
 status = "partial"
-notes = "OWASP 3.2 covers the AWS rule groups between them, so the individual entries of 'Managed rule groups' are not distinguished on Azure."
+notes = "A protected load balancer gets an Application Gateway policy (attached by hand: azurerm_lb is layer 4); a CDN gets a Front Door policy its profile attaches. Managed rule groups become Azure's own rule sets (OWASP 3.2 / Microsoft_DefaultRuleSet 2.1), which need Front Door Premium."
 
 [[providers.azure.blocks]]
 key = "main"
 resource = "azurerm_web_application_firewall_policy"
+when = { relation = "attachment", target_type = "load_balancer" }
 
 [providers.azure.blocks.args]
 name                = { field = "name", transform = "kebab" }
@@ -313,21 +662,54 @@ block = "managed_rule_set"
 type    = { value = "OWASP" }
 version = { value = "3.2" }
 
+# One rate-limit custom rule per row. The match conditions of a rule are AND'ed; the values
+# of one condition are OR'ed, so the prefixes share a condition and the method has its own.
 [[providers.azure.blocks.nested]]
 block = "custom_rules"
-when = { field = "rate_limit_per_5min" }
+for_each_field = "rate_rules"
 
 [providers.azure.blocks.nested.args]
-name                 = { value = "RateLimit" }
-priority             = { value = 1 }
+name                 = { item = "name", transform = "alnum" }
+priority             = { item_index = { base = 1, step = 1 } }
 rule_type            = { value = "RateLimitRule" }
 rate_limit_duration  = { value = "FiveMins" }
-rate_limit_threshold = { field = "rate_limit_per_5min" }
+rate_limit_threshold = { item = "limit" }
 group_rate_limit_by  = { value = "ClientAddr" }
-action               = { map = "mode", table = { block = "Block", count = "Log" } }
+action               = { if = { any = [ { field = "mode", equals = "count" }, { item = "action", equals = "count" } ] }, then = { value = "Log" }, else = { value = "Block" } }
 
 [[providers.azure.blocks.nested.nested]]
 block = "match_conditions"
+when = { item = "paths" }
+
+[providers.azure.blocks.nested.nested.args]
+operator           = { value = "BeginsWith" }
+negation_condition = { value = false }
+match_values       = { item = "paths" }
+
+[[providers.azure.blocks.nested.nested.nested]]
+block = "match_variables"
+
+[providers.azure.blocks.nested.nested.nested.args]
+variable_name = { value = "RequestUri" }
+
+[[providers.azure.blocks.nested.nested]]
+block = "match_conditions"
+when = { item = "method", not_equals = "ANY" }
+
+[providers.azure.blocks.nested.nested.args]
+operator           = { value = "Equal" }
+negation_condition = { value = false }
+match_values       = { item = "method", wrap = "list" }
+
+[[providers.azure.blocks.nested.nested.nested]]
+block = "match_variables"
+
+[providers.azure.blocks.nested.nested.nested.args]
+variable_name = { value = "RequestMethod" }
+
+[[providers.azure.blocks.nested.nested]]
+block = "match_conditions"
+when = { all = [ { not = { item = "paths" } }, { item = "method", equals = "ANY" } ] }
 
 [providers.azure.blocks.nested.nested.args]
 operator           = { value = "IPMatch" }
@@ -340,26 +722,103 @@ block = "match_variables"
 [providers.azure.blocks.nested.nested.nested.args]
 variable_name = { value = "RemoteAddr" }
 
+# The Front Door policy, for a CDN that links here. Managed rule sets need the Premium
+# tier, so the policy (and the CDN's profile, whose tier must match) is Premium whenever
+# there are managed rule groups — which the type requires.
+[[providers.azure.blocks]]
+key = "fd"
+resource = "azurerm_cdn_frontdoor_firewall_policy"
+when = { relation = "attribute_reference", incoming = true, target_type = "cdn" }
+
+[providers.azure.blocks.args]
+name                = { template = "{name}fd", transform = "alnum" }
+resource_group_name = { ancestor = "resource_group", attr = "name" }
+sku_name            = { if = { field = "managed_rules" }, then = { value = "Premium_AzureFrontDoor" }, else = { value = "Standard_AzureFrontDoor" } }
+enabled             = { value = true }
+mode                = { map = "mode", table = { block = "Prevention", count = "Detection" } }
+tags                = { object = { Name = { field = "name" } } }
+
+[[providers.azure.blocks.nested]]
+block = "managed_rule"
+when = { field = "managed_rules" }
+
+[providers.azure.blocks.nested.args]
+type    = { value = "Microsoft_DefaultRuleSet" }
+version = { value = "2.1" }
+action  = { map = "mode", table = { block = "Block", count = "Log" } }
+
+# Front Door's RequestUri is the full URL (scheme and host included), so a path prefix
+# is a regular expression anchored after the host.
+[[providers.azure.blocks.nested]]
+block = "custom_rule"
+for_each_field = "rate_rules"
+
+[providers.azure.blocks.nested.args]
+name                           = { item = "name", transform = "alnum" }
+enabled                        = { value = true }
+priority                       = { item_index = { base = 1, step = 1 } }
+type                           = { value = "RateLimitRule" }
+rate_limit_duration_in_minutes = { value = 5 }
+rate_limit_threshold           = { item = "limit" }
+action                         = { if = { any = [ { field = "mode", equals = "count" }, { item = "action", equals = "count" } ] }, then = { value = "Log" }, else = { value = "Block" } }
+
+[[providers.azure.blocks.nested.nested]]
+block = "match_condition"
+when = { item = "paths" }
+
+[providers.azure.blocks.nested.nested.args]
+match_variable = { value = "RequestUri" }
+operator       = { value = "RegEx" }
+match_values   = { func = "formatlist", args = [ { value = "^[a-z]+://[^/]+%s" }, { item = "paths" } ] }
+
+[[providers.azure.blocks.nested.nested]]
+block = "match_condition"
+when = { item = "method", not_equals = "ANY" }
+
+[providers.azure.blocks.nested.nested.args]
+match_variable = { value = "RequestMethod" }
+operator       = { value = "Equal" }
+match_values   = { item = "method", wrap = "list" }
+
+[[providers.azure.blocks.nested.nested]]
+block = "match_condition"
+when = { all = [ { not = { item = "paths" } }, { item = "method", equals = "ANY" } ] }
+
+[providers.azure.blocks.nested.nested.args]
+match_variable = { value = "RemoteAddr" }
+operator       = { value = "IPMatch" }
+match_values   = { value = ["0.0.0.0/0", "::/0"] }
+
 [providers.azure.outputs]
-id = { attr = "id", description = "WAF policy id (reference it from an Application Gateway or Front Door)" }
+id    = { attr = "id", description = "Application Gateway WAF policy id" }
+fd_id = { block = "fd", attr = "id", description = "Front Door WAF policy id" }
+
+[[providers.azure.checks]]
+when = { all = [ { relation = "attachment", target_type = "load_balancer", absent = true }, { relation = "attribute_reference", incoming = true, target_type = "cdn", absent = true } ] }
+message = "\"{name}\" protects nothing: link 'Protects' to a load balancer or 'Protected by' from a CDN; no WAF policy is generated until one exists"
 
 [[providers.azure.manual_steps]]
-title = "Attach the policy to an Application Gateway or Front Door"
+title = "Attach the policy to an Application Gateway"
+when = { relation = "attachment", target_type = "load_balancer" }
 body = """
-The policy exists but protects nothing yet. Azure WAF only attaches to an Application
-Gateway (`azurerm_application_gateway.firewall_policy_id`) or a Front Door
-(`azurerm_cdn_frontdoor_security_policy`); the Standard `azurerm_lb` the Load Balancer type
-emits is a layer-4 load balancer and cannot run a WAF. Add a native Application Gateway
-node in front of the backends and set its `firewall_policy_id` to this policy's id.
+The Application Gateway policy exists but protects nothing yet. Azure WAF attaches to an
+Application Gateway (`azurerm_application_gateway.firewall_policy_id`) or a Front Door; the
+Standard `azurerm_lb` the Load Balancer type emits is a layer-4 load balancer and cannot run
+a WAF. Add a native Application Gateway node in front of the backends and set its
+`firewall_policy_id` to this policy's id — or put a CDN (Front Door) in front of the load
+balancer and link this firewall from it, which is generated end to end.
 """
 
 # ---------------------------------------------------------------- GCP
 [providers.gcp]
 status = "partial"
 
+# One policy serves both a protected load balancer and a CDN in front of one: on Google
+# Cloud the CDN is the load balancer's backend service, and that is where it attaches.
 [[providers.gcp.blocks]]
 key = "main"
 resource = "google_compute_security_policy"
+when = { any = [ { relation = "attachment", target_type = "load_balancer" }, { relation = "attribute_reference", incoming = true, target_type = "cdn" } ] }
 
 [providers.gcp.blocks.args]
 name        = { field = "name", transform = "kebab" }
@@ -394,18 +853,21 @@ block = "expr"
 [providers.gcp.blocks.nested.nested.nested.args]
 expression = { map = "value", optional = true, table = { AWSManagedRulesCommonRuleSet = "evaluatePreconfiguredWaf('xss-v33-stable') || evaluatePreconfiguredWaf('protocolattack-v33-stable') || evaluatePreconfiguredWaf('scannerdetection-v33-stable')", AWSManagedRulesKnownBadInputsRuleSet = "evaluatePreconfiguredWaf('cve-canary') || evaluatePreconfiguredWaf('rce-v33-stable')", AWSManagedRulesSQLiRuleSet = "evaluatePreconfiguredWaf('sqli-v33-stable')", AWSManagedRulesLinuxRuleSet = "evaluatePreconfiguredWaf('lfi-v33-stable') || evaluatePreconfiguredWaf('rfi-v33-stable')", AWSManagedRulesPHPRuleSet = "evaluatePreconfiguredWaf('php-v33-stable')" } }
 
+# One rate-based ban per row: every source IP, or only requests whose path starts with
+# one of the row's prefixes and / or that use its method.
 [[providers.gcp.blocks.nested]]
 block = "rule"
-when = { field = "rate_limit_per_5min" }
+for_each_field = "rate_rules"
 
 [providers.gcp.blocks.nested.args]
 action      = { value = "rate_based_ban" }
-priority    = { value = 100 }
-description = { value = "rate limit per source IP" }
-preview     = { if = { field = "mode", equals = "count" }, then = { value = true } }
+priority    = { item_index = { base = 100, step = 1 } }
+description = { template = "{item.name}: rate limit per source IP" }
+preview     = { if = { any = [ { field = "mode", equals = "count" }, { item = "action", equals = "count" } ] }, then = { value = true } }
 
 [[providers.gcp.blocks.nested.nested]]
 block = "match"
+when = { all = [ { not = { item = "paths" } }, { item = "method", equals = "ANY" } ] }
 
 [providers.gcp.blocks.nested.nested.args]
 versioned_expr = { value = "SRC_IPS_V1" }
@@ -415,6 +877,18 @@ block = "config"
 
 [providers.gcp.blocks.nested.nested.nested.args]
 src_ip_ranges = { value = ["*"] }
+
+[[providers.gcp.blocks.nested.nested]]
+block = "match"
+when = { any = [ { item = "paths" }, { item = "method", not_equals = "ANY" } ] }
+
+[[providers.gcp.blocks.nested.nested.nested]]
+block = "expr"
+
+[providers.gcp.blocks.nested.nested.nested.args.expression]
+if   = { all = [ { item = "paths" }, { item = "method", equals = "ANY" } ] }
+then = { func = "join", args = [ { value = " || " }, { func = "formatlist", args = [ { value = "request.path.startsWith('%s')" }, { item = "paths" } ] } ] }
+else = { if = { not = { item = "paths" } }, then = { func = "format", args = [ { value = "request.method == '%s'" }, { item = "method" } ] }, else = { func = "format", args = [ { value = "(%s) && request.method == '%s'" }, { func = "join", args = [ { value = " || " }, { func = "formatlist", args = [ { value = "request.path.startsWith('%s')" }, { item = "paths" } ] } ] }, { item = "method" } ] } }
 
 [[providers.gcp.blocks.nested.nested]]
 block = "rate_limit_options"
@@ -429,7 +903,7 @@ ban_duration_sec = { value = 600 }
 block = "rate_limit_threshold"
 
 [providers.gcp.blocks.nested.nested.nested.args]
-count        = { field = "rate_limit_per_5min" }
+count        = { item = "limit" }
 interval_sec = { value = 300 }
 
 # Cloud Armor requires a catch-all rule at the lowest priority.
@@ -467,12 +941,17 @@ when = { all = [
 ] }
 message = "\"{name}\": Cloud Armor has no preconfigured equivalent for \"{item.value}\"; that rule group is dropped on Google Cloud"
 
+[[providers.gcp.checks]]
+when = { all = [ { relation = "attachment", target_type = "load_balancer", absent = true }, { relation = "attribute_reference", incoming = true, target_type = "cdn", absent = true } ] }
+message = "\"{name}\" protects nothing: link 'Protects' to a load balancer or 'Protected by' from a CDN; no security policy is generated until one exists"
+
 [[providers.gcp.manual_steps]]
-title = "Attach the policy to the load balancer's backend service"
+title = "Attach the policy to a passthrough load balancer"
+when = { relation = "attachment", target_type = "load_balancer", target_field = "protocol", not_equals = "https" }
 body = """
-Cloud Armor is attached from the *backend service* side (`security_policy = <this policy's
-id>`), which belongs to the load balancer, so this mapping cannot write it. After apply,
-set `security_policy` on the `google_compute_backend_service` /
-`google_compute_region_backend_service` of each protected load balancer — for example as an
-extra argument on the Load Balancer node's `main` block — and re-apply.
+A protected load balancer whose protocol is http or tcp is a regional passthrough Network
+Load Balancer, and Cloud Armor's WAF and rate-limit rules only run on an Application Load
+Balancer's backend service. Set the load balancer's protocol to https — the global HTTPS
+load balancer then attaches this policy itself — or put the backends behind a native
+Application Load Balancer and set its backend service's `security_policy` to this id.
 """

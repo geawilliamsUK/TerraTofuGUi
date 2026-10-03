@@ -1,0 +1,424 @@
+{
+  "schema_version": 1,
+  "name": "edge-dynamic",
+  "settings": {
+    "tool": "opentofu",
+    "target_provider": "aws",
+    "provider_settings": {
+      "aws": {
+        "region": "eu-west-2"
+      },
+      "azure": {
+        "location": "uksouth"
+      },
+      "gcp": {
+        "region": "europe-west2",
+        "zone": "europe-west2-a"
+      }
+    },
+    "backend": null,
+    "state_encryption": false
+  },
+  "containers": {
+    "rg-app": {
+      "id": "rg-app",
+      "name": "app edge",
+      "container_type": "resource_group",
+      "config": {},
+      "provider_config": {},
+      "position": {
+        "x": 40,
+        "y": 40
+      },
+      "size": {
+        "w": 1500,
+        "h": 760
+      },
+      "parent": null,
+      "manual": false
+    },
+    "vnet-app": {
+      "id": "vnet-app",
+      "name": "app net",
+      "container_type": "virtual_network",
+      "config": {
+        "cidr_block": "10.40.0.0/16"
+      },
+      "provider_config": {},
+      "position": {
+        "x": 80,
+        "y": 110
+      },
+      "size": {
+        "w": 700,
+        "h": 420
+      },
+      "parent": "rg-app",
+      "manual": false
+    },
+    "zone-app": {
+      "id": "zone-app",
+      "name": "app zone",
+      "container_type": "dns_zone",
+      "config": {
+        "domain": "example.com"
+      },
+      "provider_config": {},
+      "position": {
+        "x": 840,
+        "y": 110
+      },
+      "size": {
+        "w": 340,
+        "h": 260
+      },
+      "parent": "rg-app",
+      "manual": false
+    },
+    "kv-app": {
+      "id": "kv-app",
+      "name": "app vault",
+      "container_type": "key_vault",
+      "config": {},
+      "provider_config": {
+        "azure": {
+          "vault_name": "ttg-appedge-x7q2"
+        }
+      },
+      "position": {
+        "x": 840,
+        "y": 400
+      },
+      "size": {
+        "w": 340,
+        "h": 160
+      },
+      "parent": "rg-app",
+      "manual": false
+    }
+  },
+  "nodes": {
+    "sub-a": {
+      "id": "sub-a",
+      "name": "public a",
+      "resource_type": "subnet",
+      "config": {
+        "cidr_block": "10.40.0.0/24"
+      },
+      "provider_config": {
+        "aws": {
+          "availability_zone": "eu-west-2a",
+          "map_public_ip": true
+        }
+      },
+      "position": {
+        "x": 120,
+        "y": 180
+      },
+      "parent": "vnet-app",
+      "manual": false
+    },
+    "sub-b": {
+      "id": "sub-b",
+      "name": "public b",
+      "resource_type": "subnet",
+      "config": {
+        "cidr_block": "10.40.1.0/24"
+      },
+      "provider_config": {
+        "aws": {
+          "availability_zone": "eu-west-2b",
+          "map_public_ip": true
+        }
+      },
+      "position": {
+        "x": 120,
+        "y": 320
+      },
+      "parent": "vnet-app",
+      "manual": false
+    },
+    "vm-app": {
+      "id": "vm-app",
+      "name": "app server",
+      "resource_type": "compute_instance",
+      "config": {
+        "size": "small"
+      },
+      "provider_config": {
+        "aws": {
+          "ami": ""
+        },
+        "azure": {
+          "admin_username": "azureuser",
+          "image": "ubuntu-22.04"
+        }
+      },
+      "position": {
+        "x": 380,
+        "y": 320
+      },
+      "parent": "vnet-app",
+      "manual": false
+    },
+    "lb-app": {
+      "id": "lb-app",
+      "name": "app lb",
+      "resource_type": "load_balancer",
+      "config": {
+        "scheme": "internet_facing",
+        "protocol": "https",
+        "listener_port": 443,
+        "target_port": 3000,
+        "redirect_http": true,
+        "idle_timeout_seconds": 120
+      },
+      "provider_config": {},
+      "position": {
+        "x": 560,
+        "y": 220
+      },
+      "parent": "vnet-app",
+      "manual": false
+    },
+    "cert-app": {
+      "id": "cert-app",
+      "name": "app cert",
+      "resource_type": "tls_certificate",
+      "config": {
+        "domain": "app.example.com",
+        "alternative_names": [
+          "origin.app.example.com"
+        ]
+      },
+      "provider_config": {},
+      "position": {
+        "x": 880,
+        "y": 460
+      },
+      "parent": "kv-app",
+      "manual": false
+    },
+    "rec-app": {
+      "id": "rec-app",
+      "name": "app",
+      "resource_type": "dns_record",
+      "config": {
+        "record_name": "app",
+        "record_type": "A",
+        "ttl": 300
+      },
+      "provider_config": {},
+      "position": {
+        "x": 880,
+        "y": 170
+      },
+      "parent": "zone-app",
+      "manual": false
+    },
+    "rec-app6": {
+      "id": "rec-app6",
+      "name": "app ipv6",
+      "resource_type": "dns_record",
+      "config": {
+        "record_name": "app",
+        "record_type": "AAAA",
+        "ttl": 300
+      },
+      "provider_config": {},
+      "position": {
+        "x": 880,
+        "y": 240
+      },
+      "parent": "zone-app",
+      "manual": false
+    },
+    "rec-origin": {
+      "id": "rec-origin",
+      "name": "origin",
+      "resource_type": "dns_record",
+      "config": {
+        "record_name": "origin.app",
+        "record_type": "A",
+        "ttl": 300
+      },
+      "provider_config": {},
+      "position": {
+        "x": 880,
+        "y": 310
+      },
+      "parent": "zone-app",
+      "manual": false
+    },
+    "waf-app": {
+      "id": "waf-app",
+      "name": "app waf",
+      "resource_type": "web_application_firewall",
+      "config": {
+        "managed_rules": [
+          "AWSManagedRulesCommonRuleSet",
+          "AWSManagedRulesKnownBadInputsRuleSet"
+        ],
+        "rate_rules": [
+          {
+            "name": "auth",
+            "limit": 100,
+            "paths": [
+              "/api/auth/"
+            ],
+            "method": "ANY",
+            "action": "block"
+          },
+          {
+            "name": "contact",
+            "limit": 20,
+            "paths": [
+              "/contact"
+            ],
+            "method": "POST",
+            "action": "block"
+          },
+          {
+            "name": "forms",
+            "limit": 50,
+            "paths": [
+              "/contact",
+              "/sales"
+            ],
+            "method": "POST",
+            "action": "count"
+          },
+          {
+            "name": "api",
+            "limit": 2000,
+            "paths": [
+              "/api/",
+              "/trpc/"
+            ],
+            "method": "ANY",
+            "action": "block"
+          },
+          {
+            "name": "writes",
+            "limit": 500,
+            "paths": [],
+            "method": "POST",
+            "action": "block"
+          }
+        ],
+        "mode": "block"
+      },
+      "provider_config": {},
+      "position": {
+        "x": 1240,
+        "y": 110
+      },
+      "parent": "rg-app",
+      "manual": false
+    },
+    "cdn-app": {
+      "id": "cdn-app",
+      "name": "app cdn",
+      "resource_type": "cdn",
+      "config": {
+        "domain": "app.example.com",
+        "dynamic_site": true,
+        "forward_host_header": true,
+        "origin_read_timeout": 60,
+        "origin_keepalive_timeout": 60,
+        "behaviors": [
+          {
+            "path_pattern": "/_next/static/*",
+            "cache_policy": "CachingOptimized",
+            "origin_request_policy": "None",
+            "allowed_methods": "read_only",
+            "compress": true
+          },
+          {
+            "path_pattern": "/api/files/*",
+            "cache_policy": "UseOriginCacheControlHeaders",
+            "origin_request_policy": "AllViewerExceptHostHeader",
+            "allowed_methods": "all",
+            "compress": false
+          }
+        ],
+        "origin_headers": [
+          {
+            "name": "X-Edge",
+            "value": "cdn"
+          }
+        ],
+        "secret_origin_header": true
+      },
+      "provider_config": {},
+      "position": {
+        "x": 1240,
+        "y": 300
+      },
+      "parent": "rg-app",
+      "manual": false
+    }
+  },
+  "edges": [
+    {
+      "source": "vm-app",
+      "target": "sub-a",
+      "relation": "network_membership"
+    },
+    {
+      "source": "lb-app",
+      "target": "sub-a",
+      "relation": "network_membership"
+    },
+    {
+      "source": "lb-app",
+      "target": "sub-b",
+      "relation": "network_membership"
+    },
+    {
+      "source": "lb-app",
+      "target": "cert-app",
+      "relation": "attribute_reference"
+    },
+    {
+      "source": "lb-app",
+      "target": "vm-app",
+      "relation": "attachment"
+    },
+    {
+      "source": "cert-app",
+      "target": "zone-app",
+      "relation": "attribute_reference"
+    },
+    {
+      "source": "cdn-app",
+      "target": "lb-app",
+      "relation": "attribute_reference"
+    },
+    {
+      "source": "cdn-app",
+      "target": "cert-app",
+      "relation": "attribute_reference"
+    },
+    {
+      "source": "cdn-app",
+      "target": "waf-app",
+      "relation": "attribute_reference"
+    },
+    {
+      "source": "rec-app",
+      "target": "cdn-app",
+      "relation": "attribute_reference"
+    },
+    {
+      "source": "rec-app6",
+      "target": "cdn-app",
+      "relation": "attribute_reference"
+    },
+    {
+      "source": "rec-origin",
+      "target": "lb-app",
+      "relation": "attribute_reference"
+    }
+  ]
+}

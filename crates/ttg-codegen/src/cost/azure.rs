@@ -472,9 +472,35 @@ fn private_endpoint(c: &mut Ctx) {
     c.charge(format!("{gb} GB processed"), "private_endpoint", "data", gb);
 }
 
+/// Front Door: a monthly base fee by tier (Premium when the linked firewall runs managed
+/// rule sets — its WAF is included), data out to viewers and requests.
 fn cdn(c: &mut Ctx) {
+    let premium = c.sku("profile", "sku_name").as_deref() == Some("Premium_AzureFrontDoor");
+    let tier = if premium { "premium" } else { "standard" };
     let gb = c.a("cdn_data_gb");
-    c.charge(format!("{gb} GB out to viewers (zone 1)"), "cdn", "data_out", gb);
+    let req = c.a("cdn_requests");
+    c.charge(
+        format!(
+            "Front Door {} base fee",
+            if premium { "Premium" } else { "Standard" }
+        ),
+        "front_door",
+        &format!("{tier}_base"),
+        1.0,
+    );
+    c.charge(
+        format!("{gb} GB out to viewers (zone 1)"),
+        "front_door",
+        &format!("{tier}_data_out"),
+        gb,
+    );
+    c.charge(
+        format!("{} requests", fmt(req)),
+        "front_door",
+        &format!("{tier}_requests"),
+        req / 10_000.0,
+    );
+    c.note("data from Front Door to the origin is billed per GB as well; not estimated");
 }
 
 fn dns_zone(c: &mut Ctx) {
