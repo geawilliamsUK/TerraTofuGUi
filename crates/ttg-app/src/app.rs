@@ -93,6 +93,9 @@ pub struct TtgApp {
     pub drag: Drag,
     pub clip: Option<Clip>,
     pub diagnostics: Vec<Diagnostic>,
+    /// The references extra arguments make (`$ref`, addresses in `$raw`) on the target
+    /// provider, drawn as dashed edges; refreshed with the diagnostics.
+    pub derived_refs: Vec<ttg_codegen::refs::DerivedRef>,
     pub diag_dirty: bool,
     /// The *other* providers' errors as warnings (see `diagnostics::other_providers`).
     /// Computed on demand — only the panel and the agent ask for them — and dropped
@@ -198,6 +201,7 @@ impl TtgApp {
             drag: Drag::None,
             clip: None,
             diagnostics: Vec::new(),
+            derived_refs: Vec::new(),
             diag_dirty: true,
             other_diags: None,
             palette_filter: String::new(),
@@ -355,6 +359,11 @@ impl TtgApp {
     pub fn refresh_diagnostics(&mut self) {
         if self.diag_dirty {
             self.diagnostics = ttg_codegen::diagnostics::run(
+                &self.project,
+                &self.catalog,
+                &self.project.settings.target_provider,
+            );
+            self.derived_refs = ttg_codegen::refs::derived_references(
                 &self.project,
                 &self.catalog,
                 &self.project.settings.target_provider,

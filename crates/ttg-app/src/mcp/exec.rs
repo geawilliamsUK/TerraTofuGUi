@@ -437,29 +437,40 @@ impl TtgApp {
                         .catalog
                         .mapping(&type_id, &prov)
                         .ok_or_else(|| format!("{type_id} has no {prov} mapping"))?;
+                    // Resource blocks first; a native data source has only its data block.
+                    let keyed = m.blocks.iter().chain(m.data.iter());
                     let block = extra_block.unwrap_or_else(|| {
                         m.blocks
                             .iter()
                             .find(|b| b.key == "main")
                             .or(m.blocks.first())
+                            .or(m.data.iter().find(|b| b.key == "main"))
                             .map(|b| b.key.clone())
                             .unwrap_or("main".into())
                     });
-                    if !m.blocks.iter().any(|b| b.key == block) {
+                    let Some(bdef) = keyed.clone().find(|b| b.key == block) else {
                         return Err(format!(
                             "{type_id}/{prov} has no block \"{block}\" (blocks: {})",
-                            m.blocks
-                                .iter()
-                                .map(|b| b.key.clone())
-                                .collect::<Vec<_>>()
-                                .join(", ")
+                            keyed.map(|b| b.key.clone()).collect::<Vec<_>>().join(", ")
                         ));
-                    }
+                    };
+                    // What the mapping itself writes into the block: `null` on one of
+                    // these removes it from the generated block rather than clearing an
+                    // override, and `{"$restore": true}` brings the mapping's value back.
+                    let mapping_sets =
+                        |k: &str| bdef.args.contains_key(k) || bdef.nested.iter().any(|n| n.block == k);
+                    let restore = |v: &J| v.get("$restore").and_then(|r| r.as_bool()) == Some(true);
                     let before = self.snapshot();
-                    let resource = m.blocks.iter().find(|b| b.key == block).map(|b| b.resource.clone()).unwrap_or_default();
+                    // The schema the values are stored against: a data block's is the
+                    // data source's (`data.<type>`).
+                    let resource = if m.blocks.iter().any(|b| b.key == block) {
+                        bdef.resource.clone()
+                    } else {
+                        format!("{}{}", ttg_schema::DATA_PREFIX, bdef.resource)
+                    };
                     if let Some(map) = self.project.extra_args_mut(&id, &prov, &block) {
                         for (k, v) in extra {
-                            if v.is_null() {
+                            if restore(&v) || (v.is_null() && !mapping_sets(&k)) {
                                 map.remove(&k);
                             } else {
                                 // Stored in the form the schema declares: `30` for a
@@ -745,27 +756,50 @@ impl TtgApp {
                     )),
                 }))
             }
-            AgentCommand::SchemaSearch { provider, query } => {
+            AgentCommand::SchemaSearch { provider, query, kind } => {
+                use ttg_schema::SchemaKind;
                 let prov = provider.unwrap_or(self.project.settings.target_provider.clone());
                 let ps = ttg_schema::index()
                     .provider(&prov)
                     .ok_or_else(|| format!("no schema for provider \"{prov}\""))?;
+                let kinds = match kind.as_deref() {
+                    None | Some("") | Some("both") => vec![SchemaKind::Resource, SchemaKind::Data],
+                    Some("resource") => vec![SchemaKind::Resource],
+                    Some("data") => vec![SchemaKind::Data],
+                    Some(other) => return Err(format!("kind \"{other}\": use resource, data or omit it for both")),
+                };
+                let native = ttg_catalog::load::NATIVE_PREFIX;
                 let hits: Vec<J> = ps
-                    .search(&query, 40)
+                    .search_kinds(&query, &kinds, 40)
                     .into_iter()
-                    .map(|r| json!({"resource": r, "type_id": format!("{}{prov}:{r}", ttg_catalog::load::NATIVE_PREFIX)}))
+                    .map(|(k, r)| match k {
+                        SchemaKind::Resource => {
+                            json!({"kind": "resource", "resource": r, "type_id": format!("{native}{prov}:{r}")})
+                        }
+                        SchemaKind::Data => {
+                            json!({"kind": "data", "resource": r, "type_id": format!("{native}{prov}:data.{r}")})
+                        }
+                    })
                     .collect();
                 Ok(json!({"provider": prov, "version": ps.version, "hits": hits}))
             }
             AgentCommand::SchemaShow {
                 provider,
                 resource,
+                kind,
                 depth,
                 required_only,
             } => {
                 let prov = provider.unwrap_or(self.project.settings.target_provider.clone());
+                // `data.<type>` (or kind = data) is a data source.
+                let resource = match kind.as_deref() {
+                    Some("data") if !resource.starts_with(ttg_schema::DATA_PREFIX) => {
+                        format!("{}{resource}", ttg_schema::DATA_PREFIX)
+                    }
+                    _ => resource,
+                };
                 let b = ttg_schema::index()
-                    .resource(&prov, &resource)
+                    .block(&prov, &resource)
                     .ok_or_else(|| format!("no {resource} on {prov}"))?
                     .filtered(depth, required_only.unwrap_or(false));
                 let b = &b;
@@ -1493,6 +1527,22 @@ impl TtgApp {
         y: Option<i32>,
     ) -> R {
         if Catalog::is_native(type_id) {
+            // A type the provider's schema does not have would only fail at export.
+            if let Some((prov, tf)) = ttg_catalog::load::native_parts(type_id) {
+                if let Some(ps) = ttg_schema::index().provider(prov) {
+                    if ps.block(tf).is_none() {
+                        let what = if tf.starts_with(ttg_schema::DATA_PREFIX) {
+                            "data source"
+                        } else {
+                            "resource"
+                        };
+                        return Err(format!(
+                            "{prov} has no {what} \"{}\" in its schema (see schema_search)",
+                            tf.trim_start_matches(ttg_schema::DATA_PREFIX)
+                        ));
+                    }
+                }
+            }
             self.catalog.ensure_native(type_id);
         }
         let def = self

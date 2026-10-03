@@ -156,6 +156,7 @@ pub fn show(app: &mut TtgApp, ui: &mut Ui) {
         entity_widget(app, ui, origin, id, true);
     }
     draw_edges(app, ui, origin);
+    draw_reference_edges(app, ui, origin);
     for id in &nodes {
         entity_widget(app, ui, origin, id, false);
     }
@@ -349,6 +350,7 @@ fn entity_widget(app: &mut TtgApp, ui: &mut Ui, origin: Pos2, id: &str, is_conta
         .catalog
         .mapping(&type_id, &app.project.settings.target_provider)
         .is_some();
+    let data_source = ttg_catalog::Catalog::is_native_data(&type_id);
 
     // Interaction area: whole node, or the header strip of a container.
     let hit = if is_container {
@@ -595,7 +597,7 @@ fn entity_widget(app: &mut TtgApp, ui: &mut Ui, origin: Pos2, id: &str, is_conta
             Stroke::new(stroke_w, stroke_color),
             StrokeKind::Inside,
         );
-        if manual || !mapped {
+        if manual || !mapped || data_source {
             dashed_rect(&painter, sr, stroke_color);
         }
         // icon block
@@ -653,6 +655,15 @@ fn entity_widget(app: &mut TtgApp, ui: &mut Ui, origin: Pos2, id: &str, is_conta
             font_small,
             Color32::from_gray(120),
         );
+        // A data source looks something up and creates nothing: say so on the node.
+        if data_source {
+            let font = FontId::proportional((9.5 * zoom).max(6.0));
+            let galley = painter.layout_no_wrap("data".into(), font, Color32::WHITE);
+            let size = galley.size() + Vec2::new(8.0, 3.0);
+            let pill = Rect::from_min_size(Pos2::new(sr.left() + 4.0, sr.top() - size.y / 2.0), size);
+            painter.rect_filled(pill, CornerRadius::same(6), Color32::from_rgb(70, 120, 110));
+            painter.galley(pill.min + Vec2::new(4.0, 1.5), galley, Color32::WHITE);
+        }
     }
 
     // ---- provider layer: tag entities that are not on every provider; dim the ones
@@ -1511,6 +1522,106 @@ fn arrowhead(painter: &egui::Painter, from: Pos2, to: Pos2, color: Color32, size
 }
 
 /// A polyline with an arrowhead on its last segment; dashed when `dashed`.
+/// The references extra arguments make — a `$ref`, or an address inside a `$raw` — as
+/// thin dashed arrows from the entity that holds them to the one they name. They are
+/// links the export creates without an edge in the diagram, so they are drawn apart
+/// from the edges and cannot be selected.
+fn draw_reference_edges(app: &mut TtgApp, ui: &mut Ui, origin: Pos2) {
+    if app.derived_refs.is_empty() || app.filter.hide_edges {
+        return;
+    }
+    let painter = ui.painter_at(app.canvas_rect);
+    let zoom = app.camera.zoom;
+    let color = Color32::from_rgb(120, 110, 170);
+    let stroke = Stroke::new(1.2_f32, color);
+    let hover = ui.ctx().pointer_hover_pos();
+    let mut seen = std::collections::HashSet::new();
+    let mut tip: Option<String> = None;
+    for r in app.derived_refs.clone() {
+        if !seen.insert((r.source.clone(), r.target.clone())) {
+            continue;
+        }
+        if !app.is_visible(&r.source) || !app.is_visible(&r.target) {
+            continue;
+        }
+        // A real edge between the two already says it.
+        if app
+            .project
+            .edges
+            .iter()
+            .any(|e| e.source == r.source && e.target == r.target)
+        {
+            continue;
+        }
+        let (Some(sr), Some(tr)) = (
+            app.entity_rect(&r.source)
+                .map(|x| app.camera.rect_to_screen(origin, x)),
+            app.entity_rect(&r.target)
+                .map(|x| app.camera.rect_to_screen(origin, x)),
+        ) else {
+            continue;
+        };
+        let (a, b) = (rect_exit(sr, tr.center()), rect_exit(tr, sr.center()));
+        painter.add(egui::Shape::dashed_line(&[a, b], stroke, 5.0, 4.0));
+        arrowhead(&painter, a, b, color, 8.0 * zoom.clamp(0.6, 1.4));
+        if let Some(h) = hover {
+            let d = b - a;
+            let t = ((h - a).dot(d) / d.length_sq().max(1.0)).clamp(0.0, 1.0);
+            if (a + d * t - h).length() < 5.0 {
+                let via = match r.via {
+                    ttg_codegen::refs::Via::Ref => "$ref",
+                    ttg_codegen::refs::Via::Raw => "$raw",
+                };
+                let name = |id: &str| {
+                    app.project
+                        .entity(id)
+                        .map(|e| e.name.to_string())
+                        .unwrap_or_default()
+                };
+                tip = Some(format!(
+                    "\"{}\" references \"{}\" ({via} in {})",
+                    name(&r.source),
+                    name(&r.target),
+                    r.at
+                ));
+            }
+        }
+    }
+    // What the hovered arrow is, in a small label beside the pointer.
+    if let (Some(t), Some(h)) = (tip, hover) {
+        let galley = painter.layout_no_wrap(t, FontId::proportional(12.0), Color32::from_gray(30));
+        let rect = Rect::from_min_size(h + Vec2::new(14.0, 14.0), galley.size() + Vec2::new(10.0, 6.0));
+        painter.rect(
+            rect,
+            CornerRadius::same(4),
+            Color32::from_rgb(250, 250, 252),
+            Stroke::new(1.0_f32, color),
+            StrokeKind::Inside,
+        );
+        painter.galley(rect.min + Vec2::new(5.0, 3.0), galley, Color32::from_gray(30));
+    }
+}
+
+/// Where the line from a rectangle's centre towards `to` leaves the rectangle.
+fn rect_exit(r: Rect, to: Pos2) -> Pos2 {
+    let c = r.center();
+    let d = to - c;
+    if d.x.abs() < f32::EPSILON && d.y.abs() < f32::EPSILON {
+        return c;
+    }
+    let sx = if d.x.abs() > f32::EPSILON {
+        (r.width() / 2.0) / d.x.abs()
+    } else {
+        f32::INFINITY
+    };
+    let sy = if d.y.abs() > f32::EPSILON {
+        (r.height() / 2.0) / d.y.abs()
+    } else {
+        f32::INFINITY
+    };
+    c + d * sx.min(sy).min(1.0)
+}
+
 fn draw_flow(painter: &egui::Painter, pts: &[Pos2], stroke: Stroke, dashed: bool, arrow: f32) {
     if pts.len() < 2 {
         return;

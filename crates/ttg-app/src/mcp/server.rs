@@ -380,7 +380,7 @@ pub struct EntityUpdateArgs {
     #[schemars(description = "Provider layers this entity belongs to; [] = every provider")]
     pub providers: Option<Vec<String>>,
     #[schemars(
-        description = "Extra provider arguments merged into the generated block, keyed by argument name (see schema_show). Values: JSON scalars/lists/objects, {\"$ref\": {\"entity\": \"<id or name>\", \"attr\": \"id\"}} for a reference to the target's primary block (add \"block\": \"<key>\" to address one of its secondary blocks instead, e.g. object_storage's \"versioning\" block on AWS), {\"$raw\": \"<hcl>\"} for raw HCL; null removes. For native resources this is where every argument goes"
+        description = "Extra provider arguments merged into the generated block, keyed by argument name (see schema_show). Values: JSON scalars/lists/objects, {\"$ref\": {\"entity\": \"<id or name>\", \"attr\": \"id\"}} for a reference to the target's primary block (add \"block\": \"<key>\" to address one of its secondary blocks, e.g. object_storage's \"versioning\" block on AWS, and \"key\": \"<row key>\" to pick one instance of a repeated block, e.g. {\"entity\": \"ecr\", \"block\": \"repo\", \"key\": \"zipos-web\", \"attr\": \"repository_url\"}; a native data source is referenced the same way), {\"$raw\": \"<hcl>\"} for raw HCL, whose addresses are checked against what the export generates (add \"refs\": {\"name\": {\"$ref\": …}} and write @name@ in the HCL to splice a reference in). null on an argument the mapping sets removes it from the generated block (on a nested block, the block); null on anything else removes the extra argument; {\"$restore\": true} drops an override or removal and brings the mapping's own value back. For native resources and data sources this is where every argument goes"
     )]
     pub extra: Option<serde_json::Map<String, serde_json::Value>>,
     #[schemars(description = "Provider the extra arguments are for; defaults to the target provider")]
@@ -480,13 +480,21 @@ pub struct SchemaSearchArgs {
     pub provider: Option<String>,
     #[schemars(description = "Space-separated terms matched against resource type names, e.g. `sqs queue`")]
     pub query: String,
+    #[schemars(
+        description = "`resource` or `data` to search only resources or only data sources; omit for both (each hit says which it is)"
+    )]
+    pub kind: Option<String>,
 }
 
 #[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
 pub struct SchemaShowArgs {
     pub provider: Option<String>,
-    #[schemars(description = "Resource type, e.g. `aws_s3_bucket_policy`")]
+    #[schemars(
+        description = "Resource type, e.g. `aws_s3_bucket_policy`, or a data source as `data.aws_ec2_managed_prefix_list`"
+    )]
     pub resource: String,
+    #[schemars(description = "`data` to read `resource` as a data source name without the `data.` prefix")]
+    pub kind: Option<String>,
     #[schemars(
         description = "Levels of nested blocks to include (0 = attributes only); omit for everything. Some resources (e.g. aws_wafv2_web_acl) run to hundreds of KB unfiltered"
     )]
@@ -1204,12 +1212,13 @@ impl TtgServer {
     }
 
     #[tool(
-        description = "Search the provider schema for resource types (all 1,500+ AWS / 1,100+ Azure resources). Add one with entity_add using type_id `native:<provider>:<resource>`; then set its arguments with entity_update.extra."
+        description = "Search the provider schema for resource types and data sources (1,700+ AWS / 1,100+ Azure / 1,300+ Google Cloud resources, and their data sources). Each hit has a `kind` (resource | data) and a `type_id`: add it with entity_add (`native:<provider>:<resource>`, or `native:<provider>:data.<data source>` for a lookup of something that already exists, e.g. an AWS-managed prefix list); then set its arguments with entity_update.extra and reference it from other entities with {\"$ref\": {\"entity\": …, \"attr\": …}}."
     )]
     async fn schema_search(&self, Parameters(a): Parameters<SchemaSearchArgs>) -> CallToolResult {
         self.run(AgentCommand::SchemaSearch {
             provider: a.provider,
             query: a.query,
+            kind: a.kind,
         })
         .await
     }
@@ -1221,6 +1230,7 @@ impl TtgServer {
         self.run(AgentCommand::SchemaShow {
             provider: a.provider,
             resource: a.resource,
+            kind: a.kind,
             depth: a.depth,
             required_only: a.required_only,
         })

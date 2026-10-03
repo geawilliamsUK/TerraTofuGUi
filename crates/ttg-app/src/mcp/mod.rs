@@ -364,10 +364,14 @@ pub enum AgentCommand {
     SchemaSearch {
         provider: Option<String>,
         query: String,
+        /// `resource`, `data`, or `None` for both.
+        kind: Option<String>,
     },
     SchemaShow {
         provider: Option<String>,
         resource: String,
+        /// `data` reads `resource` as a data source (as `data.<type>` does).
+        kind: Option<String>,
         /// Levels of nested blocks to include (0 = attributes only); `None` = everything.
         depth: Option<u32>,
         /// Only required attributes and nested blocks.

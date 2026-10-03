@@ -1,6 +1,7 @@
 //! Schema-driven editor for extra provider arguments (curated resources) and for every
-//! argument of a native provider resource. Argument names, types, required flags and
-//! descriptions come from `ttg-schema`; values are stored as JSON on the entity.
+//! argument of a native provider resource or data source. Argument names, types,
+//! required flags and descriptions come from `ttg-schema`; values are stored as JSON on
+//! the entity. A `null` value on an argument the mapping sets leaves it out of the block.
 
 use crate::app::TtgApp;
 use egui::{Color32, RichText, Ui};
@@ -55,14 +56,28 @@ pub fn extra_args_editor(
     m: &ProviderMapping,
     native: bool,
 ) {
+    // Resource blocks, then data blocks (a native data source has nothing else).
     let blocks: Vec<(String, String)> = m
         .blocks
         .iter()
         .map(|b| (b.key.clone(), b.resource.clone()))
+        .chain(m.data.iter().filter(|_| native).map(|d| {
+            (
+                d.key.clone(),
+                format!("{}{}", ttg_schema::DATA_PREFIX, d.resource),
+            )
+        }))
         .collect();
     if blocks.is_empty() {
         return;
     }
+    // Arguments and nested blocks the mapping itself writes into each block.
+    let mapping_sets = |block: &str, arg: &str| {
+        m.blocks
+            .iter()
+            .find(|b| b.key == block)
+            .is_some_and(|b| b.args.contains_key(arg) || b.nested.iter().any(|n| n.block == arg))
+    };
     let key = (id.to_string(), provider.to_string());
     let chosen = app
         .schema_editor
@@ -107,7 +122,7 @@ pub fn extra_args_editor(
                         });
                 });
             }
-            let schema = ttg_schema::index().resource(provider, &resource).cloned();
+            let schema = ttg_schema::index().block(provider, &resource).cloned();
             let Some(schema) = schema else {
                 ui.label(
                     RichText::new(format!("No schema for {resource} in the bundled index (run `ttg schema refresh`)."))
@@ -118,7 +133,7 @@ pub fn extra_args_editor(
             };
             if !native {
                 ui.label(
-                    RichText::new("Any argument the provider accepts, merged into the generated block. An argument the mapping already sets is overridden by yours.")
+                    RichText::new("Any argument the provider accepts, merged into the generated block. An argument the mapping already sets is overridden by yours; set it to null (∅) to leave it out of the block.")
                         .small()
                         .color(Color32::from_gray(110)),
                 );
@@ -133,7 +148,7 @@ pub fn extra_args_editor(
                 let missing: Vec<&str> = schema
                     .required()
                     .into_iter()
-                    .filter(|r| !current.contains_key(*r))
+                    .filter(|r| current.get(*r).is_none_or(|v| v.is_null()))
                     .collect();
                 if !missing.is_empty() {
                     ui.label(
@@ -165,10 +180,35 @@ pub fn extra_args_editor(
                             "not in the provider schema".to_string()
                         };
                         ui.label(label).on_hover_text(tip);
-                        value_editor(app, ui, id, provider, &chosen, name, value, kind, nested.is_some(), &mut set);
-                        if ui.small_button("×").on_hover_text("Remove").clicked() {
-                            remove = Some(name.clone());
+                        if value.is_null() {
+                            ui.label(
+                                RichText::new("left out of the block")
+                                    .small()
+                                    .italics()
+                                    .color(Color32::from_rgb(200, 120, 20)),
+                            );
+                        } else {
+                            value_editor(app, ui, id, provider, &chosen, name, value, kind, nested.is_some(), &mut set);
                         }
+                        ui.horizontal(|ui| {
+                            let removes = if mapping_sets(&chosen, name) {
+                                "Remove, and use the mapping's value again"
+                            } else {
+                                "Remove"
+                            };
+                            if ui.small_button("×").on_hover_text(removes).clicked() {
+                                remove = Some(name.clone());
+                            }
+                            if mapping_sets(&chosen, name)
+                                && !value.is_null()
+                                && ui
+                                    .small_button("∅")
+                                    .on_hover_text("Leave this argument out of the block (null)")
+                                    .clicked()
+                            {
+                                set = Some((name.clone(), J::Null));
+                            }
+                        });
                         ui.end_row();
                     }
                 });
@@ -416,7 +456,17 @@ fn describe_ref(app: &TtgApp, v: &J) -> String {
             .map(|e| e.name.to_string())
             .unwrap_or(key.to_string());
         let attr = r.get("attr").and_then(|x| x.as_str()).unwrap_or("id");
-        return format!("→ {name}.{attr}");
+        let block = r.get("block").and_then(|x| x.as_str());
+        let key = r
+            .get("key")
+            .or_else(|| r.get("index"))
+            .map(|k| k.as_str().map(str::to_string).unwrap_or(k.to_string()));
+        return match (block, key) {
+            (Some(b), Some(k)) => format!("→ {name}.{b}[{k}].{attr}"),
+            (Some(b), None) => format!("→ {name}.{b}.{attr}"),
+            (None, Some(k)) => format!("→ {name}[{k}].{attr}"),
+            (None, None) => format!("→ {name}.{attr}"),
+        };
     }
     v.to_string()
 }
@@ -468,23 +518,40 @@ fn ref_popup(app: &mut TtgApp, ui: &mut Ui) {
             // Offer the attributes the target's primary block exposes, from the schema.
             if let Some(e) = app.project.entity(&pop.target) {
                 if let Some(m) = app.catalog.mapping(e.resource_type, &pop.provider) {
-                    if let Some(b) = m.blocks.iter().find(|b| b.key == "main").or(m.blocks.first()) {
-                        if let Some(s) = ttg_schema::index().resource(&pop.provider, &b.resource) {
-                            ui.label(
-                                RichText::new(format!(
-                                    "{}: {}",
-                                    b.resource,
-                                    s.attributes
-                                        .keys()
-                                        .take(12)
-                                        .cloned()
-                                        .collect::<Vec<_>>()
-                                        .join(", ")
-                                ))
-                                .small()
-                                .color(Color32::from_gray(110)),
-                            );
-                        }
+                    let primary = m
+                        .blocks
+                        .iter()
+                        .find(|b| b.key == "main")
+                        .or(m.blocks.first())
+                        .map(|b| {
+                            (
+                                b.resource.clone(),
+                                ttg_schema::index().resource(&pop.provider, &b.resource),
+                            )
+                        })
+                        .or_else(|| {
+                            m.data.first().map(|d| {
+                                (
+                                    format!("data.{}", d.resource),
+                                    ttg_schema::index().data_source(&pop.provider, &d.resource),
+                                )
+                            })
+                        });
+                    if let Some((resource, Some(s))) = primary {
+                        ui.label(
+                            RichText::new(format!(
+                                "{}: {}",
+                                resource,
+                                s.attributes
+                                    .keys()
+                                    .take(12)
+                                    .cloned()
+                                    .collect::<Vec<_>>()
+                                    .join(", ")
+                            ))
+                            .small()
+                            .color(Color32::from_gray(110)),
+                        );
                     }
                 }
             }

@@ -2894,3 +2894,142 @@ fn headless_terse_replies_rename_and_defaults() {
     assert_eq!(project_of(&mut c)["name"], json!("zipos-aws-staging"));
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+/// Native data sources through the tools: schema_search labels both kinds, schema_show
+/// reads a data source, entity_add creates one (and refuses a type the schema lacks), a
+/// `$ref` reaches it, and `null` on an argument the mapping sets removes it until
+/// `$restore` brings it back.
+#[test]
+fn headless_native_data_sources_and_extra_removal() {
+    let server = start("three-tier.ttg.json");
+    let mut c = Client::new(&server);
+    c.initialize();
+
+    let (err, hits) = c.call("schema_search", json!({"query": "managed_prefix_list"}));
+    assert!(!err, "{hits}");
+    let hits = hits["hits"].as_array().unwrap().clone();
+    assert!(
+        hits.iter().any(|h| h["kind"] == json!("data")
+            && h["type_id"] == json!("native:aws:data.aws_ec2_managed_prefix_list")),
+        "{hits:?}"
+    );
+    assert!(
+        hits.iter().any(|h| h["kind"] == json!("resource")
+            && h["type_id"] == json!("native:aws:aws_ec2_managed_prefix_list")),
+        "{hits:?}"
+    );
+    let (err, data_only) = c.call(
+        "schema_search",
+        json!({"query": "managed_prefix_list", "kind": "data"}),
+    );
+    assert!(!err, "{data_only}");
+    assert!(
+        data_only["hits"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|h| h["kind"] == json!("data")),
+        "{data_only}"
+    );
+    let (err, shown) = c.call(
+        "schema_show",
+        json!({"resource": "data.aws_ec2_managed_prefix_list", "depth": 0}),
+    );
+    assert!(!err, "{shown}");
+    assert!(shown["schema"]["attributes"]["name"].is_object(), "{shown}");
+
+    let (err, msg) = c.call(
+        "entity_add",
+        json!({"type_id": "native:aws:data.aws_no_such_lookup", "name": "nope"}),
+    );
+    assert!(err, "{msg}");
+    let (err, added) = c.call(
+        "entity_add",
+        json!({"type_id": "native:aws:data.aws_ec2_managed_prefix_list", "name": "cf prefix", "parent": "main"}),
+    );
+    assert!(!err, "{added}");
+    let (err, upd) = c.call(
+        "entity_update",
+        json!({"entity": "cf prefix", "extra": {"name": "com.amazonaws.global.cloudfront.origin-facing"}}),
+    );
+    assert!(!err, "{upd}");
+    let (err, rule) = c.call(
+        "entity_add",
+        json!({"type_id": "native:aws:aws_vpc_security_group_ingress_rule", "name": "https from cloudfront", "parent": "main"}),
+    );
+    assert!(!err, "{rule}");
+    let (err, upd) = c.call(
+        "entity_update",
+        json!({
+            "entity": "https from cloudfront",
+            "extra": {
+                "security_group_id": {"$ref": {"entity": "web sg", "attr": "id"}},
+                "ip_protocol": "tcp",
+                "from_port": 443,
+                "to_port": 443,
+                "prefix_list_id": {"$ref": {"entity": "cf prefix", "attr": "id"}},
+            },
+        }),
+    );
+    assert!(!err, "{upd}");
+    let (err, preview) = c.call("export_preview", json!({}));
+    assert!(!err, "{preview}");
+    let native = preview["files"]["native.tf"]
+        .as_str()
+        .unwrap_or_default()
+        .to_string();
+    assert!(
+        native.contains("data \"aws_ec2_managed_prefix_list\" \"cf_prefix\""),
+        "{native}"
+    );
+    assert!(
+        native.contains("prefix_list_id    = data.aws_ec2_managed_prefix_list.cf_prefix.id"),
+        "{native}"
+    );
+
+    // `null` on an argument the database mapping sets removes it from the block.
+    let (err, upd) = c.call(
+        "entity_update",
+        json!({"entity": "app db", "extra": {"manage_master_user_password": true, "password": null}}),
+    );
+    assert!(!err, "{upd}");
+    assert_eq!(
+        upd["entity"]["extra"]["aws"]["main"]["password"],
+        Value::Null,
+        "{upd}"
+    );
+    assert!(
+        upd["entity"]["extra"]["aws"]["main"]
+            .as_object()
+            .unwrap()
+            .contains_key("password"),
+        "the removal is stored: {upd}"
+    );
+    let (_, preview) = c.call("export_preview", json!({}));
+    let db = preview["files"]["database.tf"]
+        .as_str()
+        .unwrap_or_default()
+        .to_string();
+    assert!(
+        !db.lines().any(|l| l.trim_start().starts_with("password ")),
+        "{db}"
+    );
+    assert!(db.contains("manage_master_user_password"), "{db}");
+    // `$restore` brings the mapping's own value back (the mapping sets both arguments:
+    // `manage_master_user_password` from the database's own option).
+    let (err, upd) = c.call(
+        "entity_update",
+        json!({"entity": "app db", "extra": {"password": {"$restore": true}, "manage_master_user_password": {"$restore": true}}}),
+    );
+    assert!(!err, "{upd}");
+    assert!(
+        upd["entity"]["extra"].as_object().is_none_or(|x| x.is_empty()),
+        "{upd}"
+    );
+    let (_, preview) = c.call("export_preview", json!({}));
+    let db = preview["files"]["database.tf"]
+        .as_str()
+        .unwrap_or_default()
+        .to_string();
+    assert!(db.contains("password             = var.db_password"), "{db}");
+}
