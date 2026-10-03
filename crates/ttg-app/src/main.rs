@@ -21,6 +21,7 @@ mod canvas;
 mod clipboard;
 mod cost_panel;
 mod display;
+mod environments;
 mod history;
 mod inspector;
 #[cfg(feature = "mcp")]

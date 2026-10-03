@@ -818,6 +818,9 @@ fn entity_widget(app: &mut TtgApp, ui: &mut Ui, origin: Pos2, id: &str, is_conta
     }
     pr.on_hover_text("Drag to connect to another resource");
 
+    // ---- environments: absent from the one shown; the last plan's change
+    crate::environments::draw_entity_marks(app, &painter, sr, zoom, id);
+
     // ---- badge
     if let Some(d) = app.entity_badge(id).cloned() {
         let (glyph, bcolor) = match (d.severity, d.code) {

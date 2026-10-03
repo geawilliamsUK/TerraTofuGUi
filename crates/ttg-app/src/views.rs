@@ -117,6 +117,7 @@ impl TtgApp {
 /// summary of what is hidden.
 pub fn bar(app: &mut TtgApp, ui: &mut Ui) {
     ui.horizontal(|ui| {
+        crate::environments::selector(app, ui);
         ui.label(RichText::new("Views").small().color(Color32::from_gray(110)))
             .on_hover_text("A view remembers WHICH resources and links are shown (the filter), not where they are: positions are shared by every view. The active view saves filter changes as you make them.");
         if ui

@@ -68,13 +68,14 @@ pub struct ExportUi {
     /// `dir` is the root of an "export all" (one sub-directory per provider).
     pub root: bool,
     pub results: Vec<(String, Result<ttg_codegen::ExportReport, String>)>,
-    pub validate: Vec<(String, String)>,
+    /// Per provider: the summary line and each error, attributed to its entity.
+    pub validate: Vec<(String, crate::environments::Validated)>,
     /// Providers whose `init && validate` is running on the background thread, in the
     /// order they were started. `init` alone can take minutes, so it never runs on the
     /// UI thread: that froze egui, and with it the agent command queue.
     pub validating: Vec<String>,
     /// Outcomes coming back from that thread, polled once a frame.
-    pub validate_rx: Option<std::sync::mpsc::Receiver<(String, String)>>,
+    pub validate_rx: Option<std::sync::mpsc::Receiver<(String, crate::environments::Validated)>>,
     /// Last "preview changes" result: provider and per-file diffs.
     pub diff: Option<(String, Vec<ttg_codegen::diff::FileDiff>)>,
     pub diff_open: bool,
@@ -159,6 +160,8 @@ pub struct TtgApp {
     pub icons: crate::display::Icons,
     /// The Cost window (`cost_panel.rs`).
     pub cost: crate::cost_panel::CostUi,
+    /// The environment shown, and the last plan (`environments.rs`).
+    pub env: crate::environments::EnvUi,
     /// Built-in MCP server (off until enabled).
     #[cfg(feature = "mcp")]
     pub mcp: crate::mcp::McpState,
@@ -240,6 +243,7 @@ impl TtgApp {
             display: crate::display::DisplayMode::Abstract,
             icons: crate::display::Icons::new(defs_dir.as_ref()),
             cost: Default::default(),
+            env: Default::default(),
             #[cfg(feature = "mcp")]
             mcp: crate::mcp::McpState::default(),
         };
@@ -351,6 +355,7 @@ impl TtgApp {
             self.history.push(before);
             self.dirty = true;
             self.diag_dirty = true;
+            self.clear_plan_badges();
             #[cfg(feature = "mcp")]
             self.mcp.note_change();
         }
@@ -358,18 +363,16 @@ impl TtgApp {
 
     pub fn refresh_diagnostics(&mut self) {
         if self.diag_dirty {
-            self.diagnostics = ttg_codegen::diagnostics::run(
-                &self.project,
-                &self.catalog,
-                &self.project.settings.target_provider,
-            );
+            // For the environment the canvas shows (`environments.rs`).
+            self.diagnostics = self.diagnostics_for_shown();
             self.derived_refs = ttg_codegen::refs::derived_references(
-                &self.project,
+                &self.shown_project(),
                 &self.catalog,
                 &self.project.settings.target_provider,
             );
             self.diag_dirty = false;
             self.other_diags = None;
+            self.env.other_diags = None;
             self.reach = None;
         }
     }
@@ -382,7 +385,7 @@ impl TtgApp {
         self.refresh_diagnostics();
         if self.other_diags.is_none() {
             self.other_diags = Some(ttg_codegen::diagnostics::other_providers(
-                &self.project,
+                &self.shown_project(),
                 &self.catalog,
                 &self.project.settings.target_provider,
             ));
@@ -394,7 +397,7 @@ impl TtgApp {
     pub fn reach(&mut self) -> &ttg_codegen::reach::Reach {
         if self.reach.is_none() {
             self.reach = Some(ttg_codegen::reach::analyse(
-                &self.project,
+                &self.shown_project(),
                 &self.catalog,
                 &self.project.settings.target_provider,
             ));
@@ -410,7 +413,7 @@ impl TtgApp {
         }
         let src = self.selection.iter().next().unwrap().clone();
         let reach = self.reach().clone();
-        ttg_codegen::reach::paths_from(&self.project, &self.catalog, &reach, &src)
+        ttg_codegen::reach::paths_from(&self.shown_project(), &self.catalog, &reach, &src)
     }
 
     /// Who can reach the single selected entity (overlay on, one node selected).
@@ -420,7 +423,7 @@ impl TtgApp {
         }
         let tgt = self.selection.iter().next().unwrap().clone();
         let reach = self.reach().clone();
-        ttg_codegen::reach::paths_to(&self.project, &self.catalog, &reach, &tgt)
+        ttg_codegen::reach::paths_to(&self.shown_project(), &self.catalog, &reach, &tgt)
     }
 
     /// Entities on a path (source, hops, target, and the source's way out of the
@@ -1084,24 +1087,47 @@ impl TtgApp {
             return;
         }
         let tool = self.project.settings.tool;
-        let jobs: Vec<(String, std::path::PathBuf)> = self
+        // What each file and line of an export belongs to, so errors come back on their
+        // entity: generated again here (cheap), the tool runs on the thread.
+        let jobs: Vec<(String, std::path::PathBuf, ttg_codegen::plan_run::Attribution)> = self
             .export
             .results
             .iter()
             .filter_map(|(pid, r)| r.as_ref().ok().map(|rep| (pid.clone(), rep.out_dir.clone())))
+            .map(|(pid, dir)| {
+                let a = ttg_codegen::plan_run::attribution_for(&self.project, &self.catalog, &pid, tool)
+                    .unwrap_or_default();
+                (pid, dir, a)
+            })
             .collect();
         if jobs.is_empty() {
             return;
         }
         self.export.validate.clear();
-        self.export.validating = jobs.iter().map(|(pid, _)| pid.clone()).collect();
+        self.export.validating = jobs.iter().map(|(pid, _, _)| pid.clone()).collect();
         let (tx, rx) = std::sync::mpsc::channel();
         self.export.validate_rx = Some(rx);
         let started = std::thread::Builder::new()
             .name("ttg-validate".into())
             .spawn(move || {
-                for (pid, dir) in jobs {
-                    let out = ttg_codegen::validate::run(&dir, tool).summary();
+                for (pid, dir, a) in jobs {
+                    let out = match ttg_codegen::plan_run::validate(&dir, tool, &a) {
+                        Ok((true, diagnostics)) => crate::environments::Validated {
+                            summary: "validate passed".into(),
+                            diagnostics,
+                        },
+                        Ok((false, diagnostics)) => crate::environments::Validated {
+                            summary: format!(
+                                "validate FAILED: {} error(s)",
+                                diagnostics.iter().filter(|d| d.severity == "error").count()
+                            ),
+                            diagnostics,
+                        },
+                        Err(summary) => crate::environments::Validated {
+                            summary,
+                            diagnostics: Vec::new(),
+                        },
+                    };
                     if tx.send((pid, out)).is_err() {
                         return;
                     }
@@ -1599,6 +1625,7 @@ impl eframe::App for TtgApp {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         self.refresh_diagnostics();
         self.poll_validate(ctx);
+        self.poll_plan(ctx);
         self.screenshot_mode(ctx);
         #[cfg(feature = "mcp")]
         self.drain_agent_commands(ctx);

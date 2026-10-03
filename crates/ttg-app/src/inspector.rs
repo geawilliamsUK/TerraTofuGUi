@@ -311,6 +311,9 @@ fn entity_inspector(app: &mut TtgApp, ui: &mut Ui, id: &Id) {
             provider_checkboxes(app, ui, id, None);
             ui.end_row();
 
+            // present in the environment shown?
+            crate::environments::presence_row(app, ui, id);
+
             entity_meta_rows(app, ui, id);
 
             if !is_container {
@@ -631,14 +634,13 @@ fn set_name(app: &mut TtgApp, id: &str, name: String) {
 }
 
 fn field_editor(app: &mut TtgApp, ui: &mut Ui, id: &str, provider: Option<&str>, f: &FieldDef) {
-    let current: Option<Value> = {
-        let e = app.project.entity(id).unwrap();
-        match provider {
-            Some(p) => e.provider_field(p, &f.name).cloned(),
-            None => e.field(&f.name).cloned(),
-        }
+    // The value of the environment shown, and whether that environment overrides it.
+    let (current, overridden) = app.shown_field(id, provider, &f.name);
+    let check = match current.as_ref().and_then(|v| v.as_str()) {
+        // Checked once resolved, per environment (the diagnostics say where it fails).
+        Some(s) if s.contains("${var.") => Ok(()),
+        _ => ttg_catalog::fields::check_value(f, current.as_ref()),
     };
-    let check = ttg_catalog::fields::check_value(f, current.as_ref());
     // The unit the value is in, picked by another field (an alarm threshold by its metric).
     let unit = f.units.as_ref().and_then(|u| {
         let e = app.project.entity(id)?;
@@ -715,8 +717,22 @@ fn field_editor(app: &mut TtgApp, ui: &mut Ui, id: &str, provider: Option<&str>,
         lbl.on_hover_text(tip);
     }
     let mut new_value: Option<Value> = None;
+    // A project variable reference (`${var.web_tasks}`) is edited as text whatever the
+    // field's type; clearing it brings the typed editor back.
+    let var_ref = current
+        .as_ref()
+        .and_then(|v| v.as_str())
+        .is_some_and(|s| s.contains("${var."));
     ui.vertical(|ui| {
         match f.field_type {
+            _ if var_ref => {
+                let mut s = current.as_ref().map(|v| v.display()).unwrap_or_default();
+                let r = ui.add(egui::TextEdit::singleline(&mut s).desired_width(f32::INFINITY));
+                track_text_edit(app, &r);
+                if r.changed() {
+                    new_value = Some(Value::Str(s));
+                }
+            }
             FieldType::Bool => {
                 let mut b = current.as_ref().and_then(|v| v.as_bool()).unwrap_or(false);
                 if ui.checkbox(&mut b, "").changed() {
@@ -850,6 +866,7 @@ fn field_editor(app: &mut TtgApp, ui: &mut Ui, id: &str, provider: Option<&str>,
         if let Err(msg) = &check {
             ui.label(RichText::new(msg).small().color(Color32::from_rgb(220, 50, 50)));
         }
+        crate::environments::override_marker(app, ui, id, provider, &f.name, overridden);
     });
     ui.end_row();
     if let Some(v) = new_value {
@@ -858,31 +875,8 @@ fn field_editor(app: &mut TtgApp, ui: &mut Ui, id: &str, provider: Option<&str>,
             FieldType::String | FieldType::Cidr | FieldType::StringList
         );
         let before = if is_text { None } else { Some(app.snapshot()) };
-        {
-            let cfg = match provider {
-                Some(p) => {
-                    if let Some(n) = app.project.nodes.get_mut(id) {
-                        n.provider_config.entry(p.to_string()).or_default()
-                    } else {
-                        app.project
-                            .containers
-                            .get_mut(id)
-                            .unwrap()
-                            .provider_config
-                            .entry(p.to_string())
-                            .or_default()
-                    }
-                }
-                None => {
-                    if let Some(n) = app.project.nodes.get_mut(id) {
-                        &mut n.config
-                    } else {
-                        &mut app.project.containers.get_mut(id).unwrap().config
-                    }
-                }
-            };
-            cfg.insert(f.name.clone(), v);
-        }
+        // Into the shown environment's overrides, or the entity's own values.
+        app.config_for_edit(id, provider).insert(f.name.clone(), v);
         match before {
             Some(b) => app.finish(b),
             None => {
@@ -895,16 +889,12 @@ fn field_editor(app: &mut TtgApp, ui: &mut Ui, id: &str, provider: Option<&str>,
 
 /// Table editor for a `struct_list` field: one row per record, one column per item.
 fn struct_list_editor(app: &mut TtgApp, ui: &mut Ui, id: &str, provider: Option<&str>, f: &FieldDef) {
-    let current: Vec<ttg_core::Record> = {
-        let e = app.project.entity(id).unwrap();
-        let v = match provider {
-            Some(p) => e.provider_field(p, &f.name),
-            None => e.field(&f.name),
-        };
-        v.and_then(|v| v.as_records())
-            .map(|r| r.to_vec())
-            .unwrap_or_default()
-    };
+    let (shown, overridden) = app.shown_field(id, provider, &f.name);
+    let current: Vec<ttg_core::Record> = shown
+        .as_ref()
+        .and_then(|v| v.as_records())
+        .map(|r| r.to_vec())
+        .unwrap_or_default();
     let mut rows = current.clone();
     let mut structural = false; // add/remove/combo/bool/int: one undo step each
     let mut text_changed = false; // typing: undo step managed by track_text_edit
@@ -914,6 +904,7 @@ fn struct_list_editor(app: &mut TtgApp, ui: &mut Ui, id: &str, provider: Option<
     if !f.description.is_empty() {
         title.on_hover_text(&f.description);
     }
+    crate::environments::override_marker(app, ui, id, provider, &f.name, overridden);
     egui::ScrollArea::horizontal()
         .id_salt(("rows", id, provider, &f.name))
         .show(ui, |ui| {
@@ -1072,29 +1063,8 @@ fn struct_list_editor(app: &mut TtgApp, ui: &mut Ui, id: &str, provider: Option<
 
     if structural || text_changed {
         let before = if structural { Some(app.snapshot()) } else { None };
-        let cfg = match provider {
-            Some(p) => {
-                if let Some(n) = app.project.nodes.get_mut(id) {
-                    n.provider_config.entry(p.to_string()).or_default()
-                } else {
-                    app.project
-                        .containers
-                        .get_mut(id)
-                        .unwrap()
-                        .provider_config
-                        .entry(p.to_string())
-                        .or_default()
-                }
-            }
-            None => {
-                if let Some(n) = app.project.nodes.get_mut(id) {
-                    &mut n.config
-                } else {
-                    &mut app.project.containers.get_mut(id).unwrap().config
-                }
-            }
-        };
-        cfg.insert(f.name.clone(), Value::Records(rows));
+        app.config_for_edit(id, provider)
+            .insert(f.name.clone(), Value::Records(rows));
         match before {
             Some(b) => app.finish(b),
             None => {
@@ -1139,6 +1109,7 @@ fn edge_inspector(app: &mut TtgApp, ui: &mut Ui, i: usize) {
         ui.label("Providers");
         provider_checkboxes(app, ui, "", Some(i));
     });
+    ui.horizontal(|ui| crate::environments::edge_environments(app, ui, i));
     if ttg_codegen::diagnostics::is_redundant_edge(&app.project, &app.catalog, &e) {
         ui.add_space(6.0);
         ui.label(
@@ -1555,6 +1526,8 @@ pub fn settings_ui(app: &mut TtgApp, ui: &mut Ui) {
     ui.add_space(8.0);
     tags_ui(app, ui);
     ui.add_space(8.0);
+    crate::environments::settings_section(app, ui);
+    ui.add_space(8.0);
     provider_versions_ui(app, ui);
     ui.add_space(8.0);
     ui.label(RichText::new("Provider settings").strong());
@@ -1691,7 +1664,12 @@ pub fn export_ui(app: &mut TtgApp, ui: &mut Ui) {
         }
     });
     for (pid, out) in &app.export.validate {
-        ui.label(RichText::new(format!("[{pid}] {out}")).monospace().small());
+        ui.label(
+            RichText::new(format!("[{pid}] {}", out.summary))
+                .monospace()
+                .small(),
+        );
+        crate::environments::tool_diagnostics(ui, &out.diagnostics);
     }
     // Validation runs off the UI thread, so the window keeps painting (and the agent
     // command queue keeps draining) while `init` downloads providers.
@@ -1706,6 +1684,7 @@ pub fn export_ui(app: &mut TtgApp, ui: &mut Ui) {
             );
         });
     }
+    crate::environments::plan_section(app, ui);
 }
 
 /// The "Changes vs last export" window: per-file diffs of a fresh generation against
@@ -1893,6 +1872,7 @@ pub fn status_ui(app: &mut TtgApp, ui: &mut Ui) {
                 });
             }
         });
+        crate::environments::other_environments_section(app, ui);
     }
 }
 
