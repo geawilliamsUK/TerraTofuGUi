@@ -1,13 +1,14 @@
 //! Runs `tofu validate` / `terraform validate` on every example project for every
 //! provider that can be exported — every root of it, the `bootstrap/` root(s) included —
 //! and on `hardened` with each state backend and state encryption on, which is what
-//! produces the bootstrap roots. Skips (passes) when neither binary is installed, so the
-//! ordinary test suite stays dependency-free; CI installs OpenTofu so it always runs there.
-//! Set `TTG_REQUIRE_VALIDATE=1` to make a missing binary a failure.
+//! produces the bootstrap roots. Every export must also already be formatted: `fmt -check
+//! -recursive` passes with each installed binary. Skips (passes) when neither binary is
+//! installed, so the ordinary test suite stays dependency-free; CI installs OpenTofu so it
+//! always runs there. Set `TTG_REQUIRE_VALIDATE=1` to make a missing binary a failure.
 
 use std::path::{Path, PathBuf};
 use ttg_catalog::Catalog;
-use ttg_codegen::validate::{find_binary, run, Outcome};
+use ttg_codegen::validate::{find_binary, fmt_check, run, Outcome};
 use ttg_core::{BackendConfig, Project, Tool};
 
 fn examples() -> Vec<std::path::PathBuf> {
@@ -105,6 +106,12 @@ fn every_example_validates() {
         eprintln!("skipping: no tofu/terraform binary found");
         return;
     };
+    // `fmt` is quick, so every installed binary checks the formatting.
+    let formatters: Vec<Tool> = Tool::ALL
+        .into_iter()
+        .filter(|t| find_binary(*t).is_some())
+        .collect();
+    let mut formatted = 0;
     let mut cat = Catalog::builtin();
     let root = std::env::temp_dir().join(format!("ttg-validate-{}", std::process::id()));
     let mut ran = 0;
@@ -133,6 +140,17 @@ fn every_example_validates() {
                     Err(ttg_codegen::GenError::Blocked(_)) => continue,
                     Err(e) => panic!("{stem}/{provider}: {e}"),
                 };
+                for fmt_tool in &formatters {
+                    formatted += 1;
+                    if let Some(Err(diff)) = fmt_check(&rep.out_dir, *fmt_tool) {
+                        failures.push(format!(
+                            "{stem}/{provider}/{}: `{} fmt -check -recursive` wants changes:
+{diff}",
+                            tool.display_name(),
+                            fmt_tool.binary_name()
+                        ));
+                    }
+                }
                 for dir in roots(&rep.out_dir) {
                     ran += 1;
                     if dir != rep.out_dir {
@@ -153,6 +171,7 @@ fn every_example_validates() {
     }
     let _ = std::fs::remove_dir_all(&root);
     assert!(ran > 0, "no example produced an exportable configuration");
+    assert!(formatted > 0, "no export was checked with fmt");
     // Three backends x both tools, plus the Google Cloud export of the S3 variant (store
     // and key roots) and the Terraform flavours (store only): well over a dozen roots.
     assert!(

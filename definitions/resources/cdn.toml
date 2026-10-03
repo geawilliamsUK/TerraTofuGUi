@@ -578,6 +578,7 @@ content_types_to_compress     = { value = ["application/javascript", "applicatio
 key = "behavior"
 resource = "azurerm_cdn_frontdoor_route"
 for_each_field = "behaviors"
+for_each_key = "path_pattern"
 
 [providers.azure.blocks.args]
 name                            = { template = "{name}-path-{item.index}", transform = "kebab" }

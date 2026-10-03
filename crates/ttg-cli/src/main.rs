@@ -78,6 +78,11 @@ enum Cmd {
         /// the project's own setting says.
         #[arg(long)]
         k8s: bool,
+        /// Afterwards run `<tool> providers lock` for linux_amd64, linux_arm64,
+        /// darwin_arm64 and windows_amd64, so the committed .terraform.lock.hcl works on
+        /// CI runners and every developer machine (needs the binary and the network).
+        #[arg(long)]
+        lock: bool,
     },
     /// Show what exporting would change in an existing export directory, without
     /// writing anything. Exits 1 when there are changes.
@@ -698,6 +703,7 @@ fn main() -> Result<()> {
             out,
             validate,
             k8s,
+            lock,
         } => {
             let mut p = ttg_core::project::load(&project)?;
             p.settings.kubernetes_manifests |= k8s;
@@ -706,6 +712,22 @@ fn main() -> Result<()> {
             let tool: Tool = tool.map(Into::into).unwrap_or(p.settings.tool);
             let rep = ttg_codegen::export(&p, &cat, &provider, tool, &out)?;
             print_report(&rep);
+            if lock {
+                match ttg_codegen::validate::lock(&out, tool) {
+                    Ok(_) => println!(
+                        "locked providers for {} in {}",
+                        ttg_codegen::validate::LOCK_PLATFORMS.join(", "),
+                        out.join(".terraform.lock.hcl").display()
+                    ),
+                    Err(e) => {
+                        eprintln!(
+                            "providers lock failed:
+{e}"
+                        );
+                        std::process::exit(2);
+                    }
+                }
+            }
             if validate {
                 let o = ttg_codegen::validate::run(&out, tool);
                 println!("{}", o.summary());

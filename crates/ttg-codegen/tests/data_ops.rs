@@ -203,7 +203,9 @@ fn storage_is_free_form_with_autoscaling_and_parameters() {
     assert!(az.contains("if mb >= 20 * 1024][0]"), "{az}");
     assert!(az.contains("auto_grow_enabled = true"), "{az}");
     assert!(
-        az.contains("azurerm_postgresql_flexible_server_configuration\" \"app_db_pgconf_0\""),
+        az.contains(
+            "azurerm_postgresql_flexible_server_configuration\" \"app_db_pgconf_log_min_duration_statement\""
+        ),
         "{az}"
     );
     let g = generate(&p, &Catalog::builtin(), "azure", Tool::OpenTofu).unwrap();

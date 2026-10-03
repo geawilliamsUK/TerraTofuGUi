@@ -190,7 +190,7 @@ fn aws_manifests_replace_the_deployment_and_target_group_steps() {
         "value       = aws_lb_target_group.edge_tg.arn",
         "value       = aws_efs_file_system.models.id",
         "value       = var.region",
-        "value       = split(\"/\", concat([aws_ecr_repository.images_repo_0.repository_url, aws_ecr_repository.images_repo_1.repository_url, aws_ecr_repository.images_repo_2.repository_url])[0])[0]",
+        "value       = split(\"/\", concat([aws_ecr_repository.images_repo_api.repository_url, aws_ecr_repository.images_repo_asr_worker.repository_url, aws_ecr_repository.images_repo_reporting.repository_url])[0])[0]",
     ] {
         assert!(out.contains(want), "missing {want:?} in\n{out}");
     }
@@ -208,7 +208,7 @@ fn aws_manifests_replace_the_deployment_and_target_group_steps() {
     // The links the manifests read never reach the Terraform: no depends_on on the
     // registry, node pool or load balancer, and no "link by hand" or "cannot express".
     let c = &g.files["container.tf"];
-    assert!(!c.contains("aws_ecr_repository.images_repo_0,"), "{c}");
+    assert!(!c.contains("aws_ecr_repository.images_repo_api,"), "{c}");
     assert!(!t.iter().any(|s| s.contains("by hand")), "{t:?}");
     assert!(
         !g.diagnostics.iter().any(|d| d.message.contains("cannot express")

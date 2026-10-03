@@ -4,10 +4,12 @@
 //! Schema_version 2 additions handled here: repeated blocks (`for_each_field`,
 //! `for_each_relation`), data sources (`data` / `self_data`), row-scoped sources
 //! (`item`, `item_index`, `target`), conditional sources (`if`), field fallbacks and
-//! relation `target_type` filters.
+//! relation `target_type` filters. Which blocks exist and what they are called is
+//! decided up front by [`crate::plan`].
 
 use crate::diagnostics::{self, consumed_relations, Consumed, Diagnostic, Severity};
 use crate::files;
+use crate::plan::{self, KeySel, Plan, Row};
 use crate::state;
 use crate::tool::Profile;
 use crate::GenError;
@@ -193,14 +195,6 @@ enum Status<'a> {
     Logical(&'a ProviderMapping),
 }
 
-/// One iteration of a repeated block: a struct_list row, a string_list entry, or a
-/// relation target. A plain block has a single row with neither.
-#[derive(Clone, Default)]
-struct Row {
-    record: Option<Record>,
-    target: Option<Id>,
-}
-
 /// The current row while emitting a repeated block.
 #[derive(Clone, Copy)]
 struct ItemCtx<'a> {
@@ -209,23 +203,27 @@ struct ItemCtx<'a> {
     index: usize,
 }
 
-impl Row {
-    fn ctx(&self, index: usize) -> Option<ItemCtx<'_>> {
-        if self.record.is_none() && self.target.is_none() {
-            None
-        } else {
-            Some(ItemCtx {
-                record: self.record.as_ref(),
-                target: self.target.as_deref(),
-                index,
-            })
-        }
+fn row_ctx(row: &Row, index: usize) -> Option<ItemCtx<'_>> {
+    if row.record.is_none() && row.target.is_none() {
+        None
+    } else {
+        Some(ItemCtx {
+            record: row.record.as_ref(),
+            target: row.target.as_deref(),
+            index,
+        })
     }
 }
 
 fn repeated(b: &BlockDef) -> bool {
-    b.for_each_field.is_some() || b.for_each_relation.is_some()
+    b.repeated()
 }
+
+/// Emit `moved` blocks from the index-based names repeated blocks had before they were
+/// named by key. They are no-ops once a state has been applied with them (and for a
+/// state that never had the old names), so they go in their own `moved.tf`; turn this
+/// off one release after the rename, when every state has had its apply.
+pub const LEGACY_INDEX_MOVES: bool = true;
 
 struct Emitter<'a> {
     p: &'a Project,
@@ -233,12 +231,12 @@ struct Emitter<'a> {
     provider: &'a str,
     pdef: &'a ProviderDef,
     profile: Profile,
-    /// `(entity, block key)` pairs that will produce at least one block.
-    planned: HashSet<(Id, String)>,
-    /// `(entity, "data:" + key)` pairs for data sources.
-    planned_data: HashSet<(Id, String)>,
-    /// Local names of the instances of a block, per `(entity, key)`.
-    instances: HashMap<(Id, String), Vec<String>>,
+    /// Every block this export generates and what it is called.
+    plan: Plan,
+    /// Old index-based address of a repeated block -> its address now, so a `$raw`
+    /// written against the old name still lands on the resource (with a warning from
+    /// the diagnostics).
+    legacy: HashMap<String, String>,
     vars: IndexMap<String, VarSpec>,
     used_vars: HashSet<String>,
     /// Provider aliases some emitted block sent itself to; only these get a block.
@@ -292,24 +290,27 @@ pub(crate) fn emit_unchecked(
     let p = &layer;
     let encryption = state::encryption_plan(p, cat, provider, tool);
 
+    let bootstrap_key = encryption
+        .as_ref()
+        .filter(|e| e.key_in_bootstrap)
+        .and_then(|e| e.key.clone());
+    // Phase 1: plan which blocks exist and what they are called, so cross references
+    // can be checked.
+    let plan = Plan::build(p, cat, provider, bootstrap_key.as_deref());
     let mut em = Emitter {
         p,
         cat,
         provider,
         pdef,
         profile: Profile::new(tool),
-        planned: HashSet::new(),
-        planned_data: HashSet::new(),
-        instances: HashMap::new(),
+        legacy: plan.legacy_addresses(),
+        plan,
         vars: IndexMap::new(),
         used_vars: HashSet::new(),
         used_aliases: HashSet::new(),
         manual: Vec::new(),
         manual_refs_done: HashSet::new(),
-        bootstrap_key: encryption
-            .as_ref()
-            .filter(|e| e.key_in_bootstrap)
-            .and_then(|e| e.key.clone()),
+        bootstrap_key,
     };
 
     // Provider-level variables are always present.
@@ -354,34 +355,8 @@ pub(crate) fn emit_unchecked(
         em.used_vars.insert(name);
     }
 
-    // Phase 1: plan which (entity, block) pairs exist, so cross references can be checked.
     let order = ttg_core::graph::dependency_order(p)
         .map_err(|c| GenError::Emit(format!("dependency cycle: {}", c.join(" -> "))))?;
-    for id in &order {
-        let e = p.entity(id).unwrap();
-        if let Status::Emit(m) = em.status(&e) {
-            for b in &m.blocks {
-                let inst = em.block_instances(&e, b);
-                if inst.is_empty() {
-                    continue;
-                }
-                em.planned.insert((id.clone(), b.key.clone()));
-                let locals: Vec<String> = if repeated(b) {
-                    inst.into_iter()
-                        .map(|i| format!("{}_{}", local_name(p, id, &b.key), i))
-                        .collect()
-                } else {
-                    vec![local_name(p, id, &b.key)]
-                };
-                em.instances.insert((id.clone(), b.key.clone()), locals);
-            }
-            for d in &m.data {
-                if !em.block_instances(&e, d).is_empty() {
-                    em.planned_data.insert((id.clone(), format!("data:{}", d.key)));
-                }
-            }
-        }
-    }
 
     // Phase 2: resolve.
     let mut emitted: Vec<Emitted> = Vec::new();
@@ -396,18 +371,13 @@ pub(crate) fn emit_unchecked(
                 let primary = primary_key(m);
                 let file = m.file.clone().unwrap_or(def.resource.category.clone());
                 for d in &m.data {
-                    if !em.planned_data.contains(&(id.clone(), format!("data:{}", d.key))) {
+                    let Some(planned) = em.plan.data.get(&(id.clone(), d.key.clone())).cloned() else {
                         continue;
-                    }
+                    };
                     let rows = em.rows_for(&e, d);
-                    for (n, row) in rows.iter().enumerate() {
-                        let item = row.ctx(n);
-                        if let Some(c) = &d.when {
-                            if !em.cond_holds(&e, c, item) {
-                                continue;
-                            }
-                        }
-                        let local = data_local_name(p, id, &d.key, repeated(d).then_some(n));
+                    for inst in &planned.instances {
+                        let item = row_ctx(&rows[inst.row], inst.row);
+                        let local = inst.local.clone();
                         let block = em.build_block("data", &e, m, d, &local, item)?;
                         emitted.push(Emitted {
                             entity: id.clone(),
@@ -420,22 +390,14 @@ pub(crate) fn emit_unchecked(
                     }
                 }
                 for b in &m.blocks {
-                    if !em.planned.contains(&(id.clone(), b.key.clone())) {
+                    let Some(planned) = em.plan.blocks.get(&(id.clone(), b.key.clone())).cloned() else {
                         continue;
-                    }
+                    };
                     let rows = em.rows_for(&e, b);
-                    for (n, row) in rows.iter().enumerate() {
-                        let item = row.ctx(n);
-                        if let Some(c) = &b.when {
-                            if !em.cond_holds(&e, c, item) {
-                                continue;
-                            }
-                        }
-                        let local = if repeated(b) {
-                            format!("{}_{}", local_name(p, id, &b.key), n)
-                        } else {
-                            local_name(p, id, &b.key)
-                        };
+                    for inst in &planned.instances {
+                        let n = inst.row;
+                        let item = row_ctx(&rows[n], n);
+                        let local = inst.local.clone();
                         let mut block = em.build_block("resource", &e, m, b, &local, item)?;
                         if b.key == primary && n == 0 {
                             let deps = em.explicit_depends(&e, &consumed, &documented);
@@ -455,14 +417,13 @@ pub(crate) fn emit_unchecked(
                 }
                 for (suffix, o) in &m.outputs {
                     let key = o.block.clone().unwrap_or(primary.clone());
-                    if !em.planned.contains(&(id.clone(), key.clone())) {
+                    let Some(locals) = em.locals(id, &key) else {
                         continue;
-                    }
+                    };
                     if o.when.as_ref().is_some_and(|c| !em.cond_holds(&e, c, None)) {
                         continue;
                     }
                     let bdef = m.blocks.iter().find(|b| b.key == key).unwrap();
-                    let locals = em.instances[&(id.clone(), key.clone())].clone();
                     if locals.is_empty() {
                         continue;
                     }
@@ -629,6 +590,19 @@ pub(crate) fn emit_unchecked(
     for name in file_names {
         let content = files::render_resource_file(&header, &by_file[&name]);
         files.insert(format!("{name}.tf"), content);
+    }
+    let moves = if LEGACY_INDEX_MOVES {
+        let written: HashSet<String> = emitted
+            .iter()
+            .filter(|b| b.kind == "resource")
+            .map(|b| format!("{}.{}", b.resource_type, b.local))
+            .collect();
+        moved_blocks(&em.plan, &order, &written)
+    } else {
+        Vec::new()
+    };
+    if !moves.is_empty() {
+        files.insert("moved.tf".into(), files::render_moved(&header, &moves));
     }
 
     let vars: Vec<&VarSpec> = em
@@ -801,31 +775,47 @@ fn bootstrap_step(
     }
 }
 
-/// The block other resources reference: `main` if present, else the first.
-fn primary_key(m: &ProviderMapping) -> String {
+/// The block other resources reference: `main` if present, else the first; a mapping
+/// with no resource blocks (a native data source) is referenced through its data block.
+pub(crate) fn primary_key(m: &ProviderMapping) -> String {
     m.blocks
         .iter()
         .find(|b| b.key == "main")
         .or(m.blocks.first())
+        .or_else(|| m.data.iter().find(|b| b.key == "main").or(m.data.first()))
         .map(|b| b.key.clone())
         .unwrap_or_default()
 }
 
-fn local_name(p: &Project, id: &str, key: &str) -> String {
-    let slug = p.hcl_name(id);
-    if key == "main" {
-        slug
-    } else {
-        format!("{slug}_{key}")
+/// `moved` blocks for every repeated-block instance renamed from its row index to its
+/// key, in dependency order of the entities and then row order. `written` is every
+/// resource address the export writes: an instance dropped after planning (a grant
+/// identical to another, which `dedupe_grants` keeps once) gets no `moved` block, since
+/// its new address is not declared and the one kept already has its own.
+fn moved_blocks(plan: &Plan, order: &[Id], written: &HashSet<String>) -> Vec<Block> {
+    let declared: HashSet<String> = plan.addresses().into_keys().collect();
+    let mut keys: Vec<&(Id, String)> = plan.blocks.keys().collect();
+    let pos = |id: &Id| order.iter().position(|x| x == id).unwrap_or(usize::MAX);
+    keys.sort_by_key(|k| (pos(&k.0), plan.blocks[*k].order));
+    let mut out = Vec::new();
+    for k in keys {
+        let pl = &plan.blocks[k];
+        for i in &pl.instances {
+            let Some(old) = &i.legacy else { continue };
+            if declared.contains(&format!("{}.{old}", pl.resource))
+                || !written.contains(&format!("{}.{}", pl.resource, i.local))
+            {
+                continue;
+            }
+            out.push(
+                Block::builder("moved")
+                    .add_attribute(("from", traversal(&pl.resource, old, "")))
+                    .add_attribute(("to", traversal(&pl.resource, &i.local, "")))
+                    .build(),
+            );
+        }
     }
-}
-
-fn data_local_name(p: &Project, id: &str, key: &str, index: Option<usize>) -> String {
-    let base = format!("{}_{}", p.hcl_name(id), key);
-    match index {
-        Some(i) => format!("{base}_{i}"),
-        None => base,
-    }
+    out
 }
 
 pub(crate) fn traversal(resource_type: &str, local: &str, attr: &str) -> Expression {
@@ -1271,12 +1261,7 @@ impl<'a> Emitter<'a> {
     /// The rows a block iterates: one per relation target, one per struct_list row /
     /// string_list entry, or a single empty row for a plain block.
     fn rows_for(&self, e: &EntityRef<'a>, b: &BlockDef) -> Vec<Row> {
-        self.rows(
-            e,
-            b.for_each_field.as_deref(),
-            b.for_each_relation.as_deref(),
-            b.for_each_target_type.as_deref(),
-        )
+        plan::rows_for(self.p, self.cat, self.provider, e, b)
     }
 
     fn rows(
@@ -1286,54 +1271,15 @@ impl<'a> Emitter<'a> {
         relation: Option<&str>,
         target_type: Option<&str>,
     ) -> Vec<Row> {
-        if let Some(rel) = relation {
-            let Some(kind) = Relation::from_key(rel) else {
-                return Vec::new();
-            };
-            return self
-                .relation_targets_filtered(e, kind, target_type)
-                .into_iter()
-                .map(|t| Row {
-                    record: None,
-                    target: Some(t),
-                })
-                .collect();
-        }
-        let Some(field) = field else {
-            return vec![Row::default()];
-        };
-        match any_field(e, self.provider, field) {
-            Some(Value::Records(rows)) => rows
-                .iter()
-                .map(|r| Row {
-                    record: Some(r.clone()),
-                    target: None,
-                })
-                .collect(),
-            Some(Value::List(items)) => items
-                .iter()
-                .map(|s| {
-                    let mut r = Record::new();
-                    r.insert("value".into(), Value::Str(s.clone()));
-                    Row {
-                        record: Some(r),
-                        target: None,
-                    }
-                })
-                .collect(),
-            _ => Vec::new(),
-        }
+        plan::rows(self.p, self.cat, self.provider, e, field, relation, target_type)
     }
 
-    /// Indices of the rows of a block that survive its `when` condition (or `[0]` for a
-    /// plain block whose condition holds). Empty means the block is not emitted.
-    fn block_instances(&self, e: &EntityRef<'a>, b: &BlockDef) -> Vec<usize> {
-        let rows = self.rows_for(e, b);
-        rows.iter()
-            .enumerate()
-            .filter(|(n, row)| b.when.as_ref().is_none_or(|c| self.cond_holds(e, c, row.ctx(*n))))
-            .map(|(n, _)| n)
-            .collect()
+    /// The local names of a resource block's instances, if it is generated at all.
+    fn locals(&self, id: &str, key: &str) -> Option<Vec<String>> {
+        self.plan
+            .blocks
+            .get(&(id.to_string(), key.to_string()))
+            .map(|pl| pl.instances.iter().map(|i| i.local.clone()).collect())
     }
 
     fn relation_targets_filtered(
@@ -1406,7 +1352,12 @@ impl<'a> Emitter<'a> {
             }
         }
         if !extra.is_empty() {
-            let schema = ttg_schema::index().resource(self.provider, &b.resource).cloned();
+            let idx = ttg_schema::index();
+            let schema = if kind == "data" {
+                idx.data_source(self.provider, &b.resource).cloned()
+            } else {
+                idx.resource(self.provider, &b.resource).cloned()
+            };
             let at = format!(
                 "{} \"{}\" / {} extra arguments",
                 e.resource_type, e.name, b.resource
@@ -1417,7 +1368,8 @@ impl<'a> Emitter<'a> {
     }
 
     /// Merge extra arguments into a block: nested blocks per the schema, everything else
-    /// as attributes.
+    /// as attributes. `null` writes nothing: on an argument or nested block the mapping
+    /// sets, it is how the user removes it (`build_block` already skipped it).
     fn apply_extras(
         &mut self,
         mut builder: hcl::structure::BlockBuilder,
@@ -1426,6 +1378,9 @@ impl<'a> Emitter<'a> {
         at: &str,
     ) -> Result<hcl::structure::BlockBuilder, GenError> {
         for (k, v) in extra {
+            if v.is_null() {
+                continue;
+            }
             let nested = schema.and_then(|s| s.blocks.get(k));
             match (nested, v) {
                 (Some(ns), serde_json::Value::Object(o)) => {
@@ -1460,6 +1415,9 @@ impl<'a> Emitter<'a> {
     ) -> Result<Block, GenError> {
         let mut b = Block::builder(name);
         for (k, v) in o {
+            if v.is_null() {
+                continue;
+            }
             let nested = schema.and_then(|s| s.blocks.get(k));
             match (nested, v) {
                 (Some(ns), serde_json::Value::Object(inner)) => {
@@ -1505,7 +1463,7 @@ impl<'a> Emitter<'a> {
             }
             serde_json::Value::Object(o) => {
                 if let Some(raw) = o.get("$raw").and_then(|r| r.as_str()) {
-                    return Ok(raw_expr(raw));
+                    return self.raw_with_refs(raw, o.get("refs"), at);
                 }
                 if let Some(r) = o.get("$ref") {
                     let key = r
@@ -1514,23 +1472,16 @@ impl<'a> Emitter<'a> {
                         .ok_or_else(|| GenError::Emit(format!("{at}: $ref needs an \"entity\"")))?;
                     let attr = r.get("attr").and_then(|x| x.as_str()).unwrap_or("id");
                     let block = r.get("block").and_then(|x| x.as_str());
-                    let id = self
-                        .p
-                        .entity(key)
-                        .map(|e| e.id.to_string())
-                        .or_else(|| {
-                            self.p
-                                .entities()
-                                .iter()
-                                .find(|e| e.name.eq_ignore_ascii_case(key))
-                                .map(|e| e.id.to_string())
-                        })
+                    let sel = KeySel::from_ref(r);
+                    let id = crate::refs::resolve_entity(self.p, key)
                         .ok_or_else(|| GenError::Emit(format!("{at}: $ref to unknown resource \"{key}\"")))?;
-                    return self.reference(&id, block, attr, at)?.ok_or_else(|| {
-                        GenError::Emit(format!(
-                            "{at}: $ref target \"{key}\" produces nothing for this provider"
-                        ))
-                    });
+                    return self
+                        .reference_to(&id, block, sel.as_ref(), attr, at)?
+                        .ok_or_else(|| {
+                            GenError::Emit(format!(
+                                "{at}: $ref target \"{key}\" produces nothing for this provider"
+                            ))
+                        });
                 }
                 let mut obj = Object::new();
                 for (k, v) in o {
@@ -1539,6 +1490,25 @@ impl<'a> Emitter<'a> {
                 Expression::Object(obj)
             }
         })
+    }
+
+    /// A `$raw` expression, with each `@name@` replaced by its entry in `refs` (any extra
+    /// value, usually a `$ref`) and old index-based addresses of repeated blocks moved to
+    /// the names those blocks have now.
+    fn raw_with_refs(
+        &mut self,
+        raw: &str,
+        refs: Option<&serde_json::Value>,
+        at: &str,
+    ) -> Result<Expression, GenError> {
+        let mut text = crate::refs::rewrite_legacy(raw, &self.legacy);
+        if let Some(serde_json::Value::Object(refs)) = refs {
+            for (name, v) in refs {
+                let x = self.json_expr(v, &format!("{at}.refs.{name}"))?;
+                text = text.replace(&format!("@{name}@"), &x.to_string());
+            }
+        }
+        Ok(raw_expr(&text))
     }
 
     /// A nested block definition yields zero or more blocks (more than one when it has
@@ -1583,7 +1553,7 @@ impl<'a> Emitter<'a> {
         };
         let mut out = Vec::new();
         for (idx, row) in rows.iter().enumerate() {
-            let item = if own_rows { row.ctx(idx) } else { outer_item };
+            let item = if own_rows { row_ctx(row, idx) } else { outer_item };
             if let Some(c) = &n.when {
                 if !self.cond_holds(e, c, item) {
                     continue;
@@ -1937,12 +1907,8 @@ impl<'a> Emitter<'a> {
                 None => return Err(err(format!("requires an enclosing {} container", a.ancestor))),
             },
             ArgSource::SelfBlock(s) => {
-                let key = (e.id.to_string(), s.self_block.clone());
-                if !self.planned.contains(&key) {
-                    None
-                } else {
+                if let Some(locals) = self.locals(e.id, &s.self_block) {
                     let bdef = m.blocks.iter().find(|b| b.key == s.self_block).unwrap();
-                    let locals = self.instances.get(&key).cloned().unwrap_or_default();
                     let mut exprs: Vec<Expression> = locals
                         .iter()
                         .map(|l| traversal(&bdef.resource, l, &s.attr))
@@ -1953,23 +1919,35 @@ impl<'a> Emitter<'a> {
                         (false, None, true) => Some(Expression::Array(exprs)),
                         (false, None, false) => Some(exprs.remove(0)),
                     }
-                }
-            }
-            ArgSource::SelfData(s) => {
-                if !self
-                    .planned_data
-                    .contains(&(e.id.to_string(), format!("data:{}", s.self_data)))
-                {
-                    None
                 } else {
-                    let ddef = m.data.iter().find(|d| d.key == s.self_data).unwrap();
-                    let local = data_local_name(self.p, e.id, &s.self_data, None);
-                    Some(apply_wrap(
-                        data_traversal(&ddef.resource, &local, &s.attr),
-                        s.wrap,
-                    ))
+                    None
                 }
             }
+            ArgSource::SelfData(s) => match self.plan.data.get(&(e.id.to_string(), s.self_data.clone())) {
+                None => None,
+                Some(pl) => {
+                    // `key_item`: the instance whose key is this row's value of that item.
+                    let want = s.key_item.as_ref().map(|k| {
+                        item.and_then(|c| c.record)
+                            .and_then(|r| r.get(k))
+                            .map(|v| v.display())
+                            .unwrap_or_default()
+                    });
+                    let mut exprs: Vec<Expression> = pl
+                        .instances
+                        .iter()
+                        .filter(|i| want.as_ref().is_none_or(|w| i.key.as_deref() == Some(w.as_str())))
+                        .map(|i| data_traversal(&pl.resource, &i.local, &s.attr))
+                        .collect();
+                    if exprs.is_empty() {
+                        None
+                    } else if pl.repeated && want.is_none() {
+                        Some(Expression::Array(exprs))
+                    } else {
+                        Some(apply_wrap(exprs.remove(0), s.wrap))
+                    }
+                }
+            },
             ArgSource::Object(o) => {
                 let mut obj = Object::new();
                 for (k, s) in &o.object {
@@ -2015,7 +1993,7 @@ impl<'a> Emitter<'a> {
                     .iter()
                     .enumerate()
                 {
-                    let ctx = row.ctx(n);
+                    let ctx = row_ctx(row, n);
                     if let Some(c) = &r.when {
                         if !self.cond_holds(e, c, ctx) {
                             continue;
@@ -2090,26 +2068,53 @@ impl<'a> Emitter<'a> {
         attr: &str,
         at: &str,
     ) -> Result<Option<Expression>, GenError> {
+        self.reference_to(target, block, None, attr, at)
+    }
+
+    /// [`Emitter::reference`] to one instance of a repeated block, picked by its key or
+    /// position (`$ref` with `key`); without `key` the first instance. A block key that
+    /// names no resource block may name a data block (a native data source's `main`).
+    fn reference_to(
+        &mut self,
+        target: &str,
+        block: Option<&str>,
+        key: Option<&KeySel>,
+        attr: &str,
+        at: &str,
+    ) -> Result<Option<Expression>, GenError> {
         let t = self
             .p
             .entity(target)
             .ok_or_else(|| GenError::Emit(format!("{at}: unknown target '{target}'")))?;
         match self.status(&t) {
             Status::Emit(tm) => {
-                let key = block.map(|s| s.to_string()).unwrap_or(primary_key(tm));
-                let pk = (target.to_string(), key.clone());
-                if !self.planned.contains(&pk) {
-                    return Ok(None);
-                }
-                let bdef = tm
-                    .blocks
-                    .iter()
-                    .find(|b| b.key == key)
-                    .ok_or_else(|| GenError::Emit(format!("{at}: target has no block '{key}'")))?;
-                let Some(local) = self.instances.get(&pk).and_then(|v| v.first()).cloned() else {
+                let bkey = block.map(|s| s.to_string()).unwrap_or(primary_key(tm));
+                let pk = (target.to_string(), bkey.clone());
+                let found = match self.plan.blocks.get(&pk) {
+                    Some(pl) => Some((pl, false)),
+                    None => self.plan.data.get(&pk).map(|pl| (pl, true)),
+                };
+                let Some((pl, is_data)) = found else {
                     return Ok(None);
                 };
-                Ok(Some(traversal(&bdef.resource, &local, attr)))
+                let inst = match key {
+                    None => pl.instances.first(),
+                    Some(k) => Some(pl.find(k).ok_or_else(|| {
+                        GenError::Emit(format!(
+                            "{at}: block \"{bkey}\" of \"{}\" has no instance with {k} (it has: {})",
+                            t.name,
+                            pl.keys().join(", ")
+                        ))
+                    })?),
+                };
+                let Some(inst) = inst else {
+                    return Ok(None);
+                };
+                Ok(Some(if is_data {
+                    data_traversal(&pl.resource, &inst.local, attr)
+                } else {
+                    traversal(&pl.resource, &inst.local, attr)
+                }))
             }
             Status::Logical(_) => Ok(None),
             Status::Manual | Status::Unmapped => {
@@ -2125,7 +2130,18 @@ impl<'a> Emitter<'a> {
                 let display = tdef
                     .map(|d| d.resource.display_name.clone())
                     .unwrap_or(t.resource_type.to_string());
-                let var_name = format!("{}_{}", self.p.hcl_name(target), attr.replace('.', "_"));
+                let var_name = match key {
+                    Some(KeySel::Key(k)) => format!(
+                        "{}_{}_{}",
+                        self.p.hcl_name(target),
+                        ttg_core::slugify(k),
+                        attr.replace('.', "_")
+                    ),
+                    Some(KeySel::Index(n)) => {
+                        format!("{}_{n}_{}", self.p.hcl_name(target), attr.replace('.', "_"))
+                    }
+                    None => format!("{}_{}", self.p.hcl_name(target), attr.replace('.', "_")),
+                };
                 self.vars.entry(var_name.clone()).or_insert(VarSpec {
                     name: var_name.clone(),
                     var_type: "string".into(),
@@ -2281,19 +2297,36 @@ impl<'a> Emitter<'a> {
                     // primary block is conditional (the GCP load balancer's backend
                     // service) must still get its depends_on and its manual step.
                     let primary = primary_key(tm);
-                    let Some(key) = std::iter::once(primary.clone())
+                    let first = |pl: &plan::Planned| {
+                        pl.instances
+                            .first()
+                            .map(|i| (pl.resource.clone(), i.local.clone()))
+                    };
+                    // A resource block, else a data block (a native data source).
+                    let found = std::iter::once(primary.clone())
                         .chain(tm.blocks.iter().map(|b| b.key.clone()))
-                        .find(|k| self.planned.contains(&(edge.target.clone(), k.clone())))
-                    else {
+                        .find_map(|k| self.plan.blocks.get(&(edge.target.clone(), k)).and_then(first))
+                        .map(|(r, l)| (r, l, false))
+                        .or_else(|| {
+                            tm.data
+                                .iter()
+                                .find_map(|d| {
+                                    self.plan
+                                        .data
+                                        .get(&(edge.target.clone(), d.key.clone()))
+                                        .and_then(first)
+                                })
+                                .map(|(r, l)| (r, l, true))
+                        });
+                    let Some((resource, local, is_data)) = found else {
                         continue;
                     };
-                    let pk = (edge.target.clone(), key.clone());
-                    let bdef = tm.blocks.iter().find(|b| b.key == key).unwrap();
-                    let Some(local) = self.instances.get(&pk).and_then(|v| v.first()).cloned() else {
-                        continue;
-                    };
-                    if seen.insert((bdef.resource.clone(), local.clone())) {
-                        out.push(traversal(&bdef.resource, &local, ""));
+                    if seen.insert((resource.clone(), local.clone())) {
+                        out.push(if is_data {
+                            data_traversal(&resource, &local, "")
+                        } else {
+                            traversal(&resource, &local, "")
+                        });
                     }
                     if edge.relation != Relation::DependsOn
                         && !covers(documented, edge.relation.key(), t.resource_type)
@@ -2346,24 +2379,36 @@ pub(crate) fn raw_expr(s: &str) -> Expression {
         .unwrap_or_else(|| Expression::Variable(Variable::unchecked(s.trim())))
 }
 
-/// Convenience used by the GUI: entity id -> list of HCL addresses it would produce.
+/// Convenience used by the GUI: entity id -> list of HCL addresses it would produce with
+/// its current configuration (a repeated block with no rows yet as a placeholder).
 pub fn addresses_for(p: &Project, cat: &Catalog, provider: &str, id: &str) -> Vec<String> {
     let Some(e) = p.entity(id) else { return vec![] };
     let Some(m) = cat.mapping(e.resource_type, provider) else {
         return vec![];
     };
-    let mut out: Vec<String> = m
-        .data
+    let (blocks, data) = plan::entity_plan(p, cat, provider, &e, m);
+    let mut out: Vec<String> = data
         .iter()
-        .map(|d| format!("data.{}.{}", d.resource, data_local_name(p, id, &d.key, None)))
+        .flat_map(|(_, pl)| {
+            pl.instances
+                .iter()
+                .map(|i| format!("data.{}.{}", pl.resource, i.local))
+        })
         .collect();
-    out.extend(m.blocks.iter().map(|b| {
-        let local = local_name(p, id, &b.key);
-        if repeated(b) {
-            format!("{}.{}_N (one per row / target)", b.resource, local)
-        } else {
-            format!("{}.{}", b.resource, local)
+    for b in &m.blocks {
+        match blocks.iter().find(|(k, _)| *k == b.key) {
+            Some((_, pl)) => out.extend(
+                pl.instances
+                    .iter()
+                    .map(|i| format!("{}.{}", pl.resource, i.local)),
+            ),
+            None if repeated(b) => out.push(format!(
+                "{}.{}_<key> (one per row / target)",
+                b.resource,
+                plan::local_name(p, id, &b.key)
+            )),
+            None => {}
         }
-    }));
+    }
     out
 }

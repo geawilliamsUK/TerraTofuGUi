@@ -49,6 +49,9 @@ pub enum Code {
     Layer,
     /// Extra / native arguments checked against the provider schema.
     Extra,
+    /// A `$ref` or a `$raw` address in extra arguments that the export does not generate
+    /// (`crate::refs`).
+    Reference,
     /// Where the state lives and what protects it: the backend, state encryption, the
     /// bootstrap root, secrets that land in the state (`crate::state`).
     State,
@@ -176,6 +179,18 @@ pub fn run(full: &Project, cat: &Catalog, provider: &str) -> Vec<Diagnostic> {
         &omitted.iter().map(|(id, _)| id.clone()).collect(),
     );
     let p = &layer;
+
+    // What the export generates and what each block is called, and the references
+    // extra arguments make: they count as links (a log group a `$raw` names is not
+    // unreferenced), and the ones that name nothing are errors here.
+    let plan = crate::plan::Plan::build(
+        p,
+        cat,
+        provider,
+        crate::refs::bootstrap_key(p, cat, provider).as_deref(),
+    );
+    let refs = crate::refs::check(full, p, cat, provider, &plan);
+    let referenced: HashSet<&str> = refs.refs.iter().map(|r| r.target.as_str()).collect();
 
     let structural = ttg_core::validate::structural(p);
     for e in structural.errors {
@@ -309,6 +324,14 @@ pub fn run(full: &Project, cat: &Catalog, provider: &str) -> Vec<Diagnostic> {
             };
             for (id, at) in refs {
                 let where_ = at.map(|a| format!(" ({a})")).unwrap_or_default();
+                // A native type of another provider (a prefix list on AWS) is off this
+                // layer by construction; the mapping leaves the row out here.
+                let elsewhere = full.entity(&id).is_some_and(|t| {
+                    ttg_catalog::load::native_parts(t.resource_type).is_some_and(|(pv, _)| pv != provider)
+                });
+                if p.entity(&id).is_none() && elsewhere {
+                    continue;
+                }
                 match p.entity(&id) {
                     None => push(
                         &mut out,
@@ -338,7 +361,7 @@ pub fn run(full: &Project, cat: &Catalog, provider: &str) -> Vec<Diagnostic> {
         }
 
         // Types that expect something to link to them.
-        if def.resource.expects_incoming && p.edges_to(e.id).next().is_none() {
+        if def.resource.expects_incoming && p.edges_to(e.id).next().is_none() && !referenced.contains(e.id) {
             push(
                 &mut out,
                 Some(e.id),
@@ -674,6 +697,7 @@ pub fn run(full: &Project, cat: &Catalog, provider: &str) -> Vec<Diagnostic> {
     network_checks(p, cat, provider, &mut out);
     crate::edge::checks(p, cat, provider, &mut out);
     extra_checks(p, cat, provider, &mut out);
+    out.extend(refs.diagnostics);
     out.extend(crate::state::checks(full, p, cat, provider, full.settings.tool));
     out.extend(crate::versions::checks(p, cat, provider));
     // A budget the cost estimate exceeds. Cheap enough to run with the rest (it is
@@ -1898,16 +1922,25 @@ fn extra_checks(p: &Project, cat: &Catalog, provider: &str, out: &mut Vec<Diagno
         let Some(m) = cat.mapping(e.resource_type, provider) else {
             continue;
         };
-        for b in &m.blocks {
+        let blocks = m
+            .blocks
+            .iter()
+            .map(|b| (b, idx.resource(provider, &b.resource), "resource"))
+            .chain(
+                m.data
+                    .iter()
+                    .map(|d| (d, idx.data_source(provider, &d.resource), "data source")),
+            );
+        for (b, schema, kind) in blocks {
             let extra = e.extra_args(provider, &b.key);
-            let Some(schema) = idx.resource(provider, &b.resource) else {
+            let Some(schema) = schema else {
                 if extra.is_some_and(|x| !x.is_empty()) {
                     out.push(Diagnostic {
                         entity: Some(e.id.to_string()),
                         severity: Severity::Info,
                         code: Code::Extra,
                         message: format!(
-                            "{}: no schema for {} in the bundled index, extra arguments are not checked",
+                            "{}: no schema for the {kind} {} in the bundled index, extra arguments are not checked",
                             b.key, b.resource
                         ),
                         provider: None,
@@ -1917,6 +1950,42 @@ fn extra_checks(p: &Project, cat: &Catalog, provider: &str, out: &mut Vec<Diagno
             };
             if let Some(extra) = extra {
                 for (k, v) in extra {
+                    let set_by_mapping = b.args.contains_key(k) || b.nested.iter().any(|n| &n.block == k);
+                    // `null` removes what the mapping sets: an argument, or a nested block.
+                    if v.is_null() {
+                        let required = schema.attributes.get(k).is_some_and(|a| a.required())
+                            || schema.blocks.get(k).is_some_and(|n| n.required());
+                        let (severity, message) = if !set_by_mapping {
+                            (
+                                Severity::Info,
+                                format!("extra argument {k} is null and the {} mapping does not set it: nothing to remove", b.resource),
+                            )
+                        } else if required {
+                            (
+                                Severity::Error,
+                                format!(
+                                    "extra argument {k} = null removes an argument {} requires",
+                                    b.resource
+                                ),
+                            )
+                        } else {
+                            (
+                                Severity::Info,
+                                format!(
+                                    "extra argument {k} = null removes the argument the {} mapping sets",
+                                    b.resource
+                                ),
+                            )
+                        };
+                        out.push(Diagnostic {
+                            entity: Some(e.id.to_string()),
+                            severity,
+                            code: Code::Extra,
+                            message,
+                            provider: None,
+                        });
+                        continue;
+                    }
                     if let Some(a) = schema.attributes.get(k) {
                         if a.read_only() {
                             out.push(Diagnostic {
@@ -1965,7 +2034,7 @@ fn extra_checks(p: &Project, cat: &Catalog, provider: &str, out: &mut Vec<Diagno
                             provider: None,
                         });
                     }
-                    if b.args.contains_key(k) || b.nested.iter().any(|n| &n.block == k) {
+                    if set_by_mapping {
                         out.push(Diagnostic {
                             entity: Some(e.id.to_string()),
                             severity: Severity::Info,
@@ -1987,7 +2056,7 @@ fn extra_checks(p: &Project, cat: &Catalog, provider: &str, out: &mut Vec<Diagno
                 let missing: Vec<&str> = schema
                     .required()
                     .into_iter()
-                    .filter(|r| !have.contains_key(*r))
+                    .filter(|r| have.get(*r).is_none_or(|v| v.is_null()))
                     .collect();
                 if !missing.is_empty() {
                     out.push(Diagnostic {
@@ -2126,7 +2195,8 @@ fn nested_self_block_refs(n: &NestedBlockDef, out: &mut Vec<String>) {
 /// or a list of objects) are converted argument by argument. Anything else, references
 /// and raw expressions included, is returned as it is.
 pub fn canonical_extra(provider: &str, resource: &str, key: &str, v: serde_json::Value) -> serde_json::Value {
-    match ttg_schema::index().resource(provider, resource) {
+    // `resource` may name a data source as `data.<type>`.
+    match ttg_schema::index().block(provider, resource) {
         Some(schema) => canonical_in(schema, key, v),
         None => v,
     }

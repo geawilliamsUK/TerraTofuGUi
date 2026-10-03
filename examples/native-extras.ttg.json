@@ -27,8 +27,8 @@
         "y": 40
       },
       "size": {
-        "w": 900,
-        "h": 420
+        "w": 1120,
+        "h": 480
       },
       "parent": null,
       "manual": false
@@ -125,6 +125,157 @@
               "name": "ErrorCount",
               "namespace": "App",
               "value": "1"
+            }
+          }
+        }
+      }
+    },
+    "native-cfpl": {
+      "id": "native-cfpl",
+      "name": "cloudfront origin",
+      "resource_type": "native:aws:data.aws_ec2_managed_prefix_list",
+      "config": {},
+      "provider_config": {
+        "aws": {}
+      },
+      "position": {
+        "x": 100,
+        "y": 330
+      },
+      "parent": "rg-nx000001",
+      "manual": false,
+      "extra": {
+        "aws": {
+          "main": {
+            "name": "com.amazonaws.global.cloudfront.origin-facing"
+          }
+        }
+      }
+    },
+    "native-cfpl-param": {
+      "id": "native-cfpl-param",
+      "name": "origin list param",
+      "resource_type": "native:aws:aws_ssm_parameter",
+      "config": {},
+      "provider_config": {
+        "aws": {}
+      },
+      "position": {
+        "x": 360,
+        "y": 330
+      },
+      "parent": "rg-nx000001",
+      "manual": false,
+      "extra": {
+        "aws": {
+          "main": {
+            "name": "/platform/cloudfront-origin-list",
+            "type": "String",
+            "value": {
+              "$ref": {
+                "entity": "cloudfront origin",
+                "attr": "id"
+              }
+            }
+          }
+        }
+      }
+    },
+    "reg-images": {
+      "id": "reg-images",
+      "name": "images",
+      "resource_type": "container_registry",
+      "config": {
+        "repositories": [
+          "api",
+          "worker"
+        ],
+        "keep_last_images": 10
+      },
+      "provider_config": {
+        "azure": {
+          "registry_name": "ttgimagesnx0001"
+        }
+      },
+      "position": {
+        "x": 620,
+        "y": 120
+      },
+      "parent": "rg-nx000001",
+      "manual": false
+    },
+    "native-worker-image": {
+      "id": "native-worker-image",
+      "name": "worker image param",
+      "resource_type": "native:aws:aws_ssm_parameter",
+      "config": {},
+      "provider_config": {
+        "aws": {}
+      },
+      "position": {
+        "x": 620,
+        "y": 330
+      },
+      "parent": "rg-nx000001",
+      "manual": false,
+      "extra": {
+        "aws": {
+          "main": {
+            "name": "/platform/worker-image",
+            "type": "String",
+            "value": {
+              "$raw": "\"${@repo@}:release\"",
+              "refs": {
+                "repo": {
+                  "$ref": {
+                    "entity": "images",
+                    "block": "repo",
+                    "key": "worker",
+                    "attr": "repository_url"
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "log-audit": {
+      "id": "log-audit",
+      "name": "audit logs",
+      "resource_type": "log_group",
+      "config": {
+        "retention_days": "90"
+      },
+      "provider_config": {},
+      "position": {
+        "x": 360,
+        "y": 230
+      },
+      "parent": "rg-nx000001",
+      "manual": false
+    },
+    "native-audit-param": {
+      "id": "native-audit-param",
+      "name": "audit log param",
+      "resource_type": "native:aws:aws_ssm_parameter",
+      "config": {},
+      "provider_config": {
+        "aws": {}
+      },
+      "position": {
+        "x": 880,
+        "y": 330
+      },
+      "parent": "rg-nx000001",
+      "manual": false,
+      "extra": {
+        "aws": {
+          "main": {
+            "name": "/platform/audit-log-group",
+            "type": "String",
+            "value": {
+              "$raw": "aws_cloudwatch_log_group.audit_logs.name"
             }
           }
         }

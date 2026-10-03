@@ -180,6 +180,76 @@ pub fn run(dir: &Path, tool: Tool) -> Outcome {
     }
 }
 
+/// The platforms `ttg export --lock` records checksums for: CI runners (Linux on x86 and
+/// ARM), Apple silicon laptops and Windows desktops. A lock file written by `init` holds
+/// only the platform it ran on, and `init` on any other then fails its checksum check.
+pub const LOCK_PLATFORMS: &[&str] = &["linux_amd64", "linux_arm64", "darwin_arm64", "windows_amd64"];
+
+/// The `providers lock` command for [`LOCK_PLATFORMS`], as a user would type it.
+pub fn lock_command(tool: Tool) -> String {
+    let mut cmd = format!("{} providers lock", Profile::new(tool).binary());
+    for p in LOCK_PLATFORMS {
+        cmd.push_str(&format!(" -platform={p}"));
+    }
+    cmd
+}
+
+/// Run [`lock_command`] in `dir`, writing `.terraform.lock.hcl` with every platform's
+/// checksums. `Err` carries the tool's output; `BinaryNotFound` is reported as such.
+pub fn lock(dir: &Path, tool: Tool) -> Result<String, String> {
+    let profile = Profile::new(tool);
+    let Some(bin) = find_binary(tool) else {
+        return Err(format!(
+            "`{}` not found on PATH. Run `{}` in {} yourself.",
+            profile.binary(),
+            lock_command(tool),
+            dir.display()
+        ));
+    };
+    let mut cmd = Command::new(&bin);
+    cmd.args(["providers", "lock", "-no-color"]);
+    for p in LOCK_PLATFORMS {
+        cmd.arg(format!("-platform={p}"));
+    }
+    let out = cmd
+        .current_dir(dir)
+        .output()
+        .map_err(|e| format!("failed to run providers lock: {e}"))?;
+    let text = format!(
+        "{}{}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+    if out.status.success() {
+        Ok(text)
+    } else {
+        Err(text)
+    }
+}
+
+/// `<tool> fmt -check -recursive -diff` in `dir`: `None` when the binary is missing,
+/// `Some(Err(diff))` when a file is not formatted the way the tool formats it.
+pub fn fmt_check(dir: &Path, tool: Tool) -> Option<Result<(), String>> {
+    let bin = find_binary(tool)?;
+    let out = match Command::new(&bin)
+        .args(["fmt", "-check", "-recursive", "-diff", "-no-color"])
+        .current_dir(dir)
+        .output()
+    {
+        Ok(o) => o,
+        Err(e) => return Some(Err(format!("failed to run fmt: {e}"))),
+    };
+    Some(if out.status.success() {
+        Ok(())
+    } else {
+        Err(format!(
+            "{}{}",
+            String::from_utf8_lossy(&out.stdout),
+            String::from_utf8_lossy(&out.stderr)
+        ))
+    })
+}
+
 /// Run `<tool> providers schema -json` for the given providers (`(namespace/name,
 /// version constraint)` pairs) in a scratch directory, using the shared plugin cache.
 /// The lock file is appended after a `//LOCK` line so the caller can read exact versions.

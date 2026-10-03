@@ -9,7 +9,7 @@ use ttg_core::Project;
 
 fn fmt_block(b: &Block) -> String {
     let s = hcl::format::to_string(b).expect("hcl formatting cannot fail for a built tree");
-    let mut s = collapse_empty_braces(&align_attributes(&s));
+    let mut s = collapse_empty_braces(&align_attributes(&space_object_for(&s)));
     while s.ends_with("\n\n") {
         s.pop();
     }
@@ -17,6 +17,60 @@ fn fmt_block(b: &Block) -> String {
         s.push('\n');
     }
     s
+}
+
+/// `{for o in x : k => o}` -> `{ for o in x : k => o }`: `fmt` pads an object `for`
+/// expression inside its braces (a list one, `[for …]`, it leaves alone). Strings are
+/// skipped, so a `{for` inside one is untouched.
+fn space_object_for(s: &str) -> String {
+    let b = s.as_bytes();
+    // Byte offsets of the `{` opening an object `for` and of the `}` closing it.
+    let mut opens: Vec<usize> = Vec::new();
+    let mut closes: Vec<usize> = Vec::new();
+    // Open braces outside strings: (offset, is an object `for`).
+    let mut stack: Vec<(usize, bool)> = Vec::new();
+    let mut in_str = false;
+    let mut i = 0;
+    while i < b.len() {
+        let c = b[i];
+        if in_str {
+            match c {
+                b'\\' => i += 1,
+                b'"' => in_str = false,
+                _ => {}
+            }
+        } else {
+            match c {
+                b'"' => in_str = true,
+                b'{' => {
+                    let is_for = s[i + 1..].starts_with("for ");
+                    stack.push((i, is_for));
+                }
+                b'}' => {
+                    if let Some((at, true)) = stack.pop() {
+                        opens.push(at);
+                        closes.push(i);
+                    }
+                }
+                _ => {}
+            }
+        }
+        i += 1;
+    }
+    if opens.is_empty() {
+        return s.to_string();
+    }
+    let mut out = String::with_capacity(s.len() + 2 * opens.len());
+    for (i, ch) in s.char_indices() {
+        if closes.contains(&i) && !out.ends_with(' ') {
+            out.push(' ');
+        }
+        out.push(ch);
+        if opens.contains(&i) {
+            out.push(' ');
+        }
+    }
+    out
 }
 
 /// `none {     }` -> `none {}`. The formatter pads an empty body with the block's own
@@ -154,6 +208,25 @@ pub fn render_versions(
         tf = tf.add_block(b.clone());
     }
     format!("{header}\n{}", fmt_block(&tf.build()))
+}
+
+/// `moved.tf`: where repeated blocks named by row index before they were named by key
+/// have gone, so an existing state follows the rename.
+pub fn render_moved(header: &str, blocks: &[Block]) -> String {
+    let mut out = String::from(header);
+    out.push_str(
+        "\n# Resources made once per row or per linked resource are named after the row's key\n\
+         # (a repository's name, a rule's name, the linked resource's name), not its position,\n\
+         # so reordering a list no longer replaces them. These blocks move the old index-based\n\
+         # addresses in an existing state to the new names on the next apply; they do nothing\n\
+         # for a state that never had the old names. Once every state using this configuration\n\
+         # has been applied, this file can be deleted (a later release stops writing it).\n",
+    );
+    for b in blocks {
+        out.push('\n');
+        out.push_str(&fmt_block(b));
+    }
+    out
 }
 
 /// `providers.tf`: the project's own provider configuration, followed by the aliased ones
@@ -344,6 +417,17 @@ pub fn render_readme(
     if has_manual {
         s.push_str("\n> **Read `MANUAL_STEPS.md`** — parts of the diagram must be completed by hand.\n");
     }
+    s.push_str(&format!(
+        "\n## Provider lock file\n\n\
+         This directory has no `.terraform.lock.hcl`. The one `{bin} init` writes holds the \
+         provider checksums of the platform it ran on only, and `init` on any other platform \
+         (a Linux CI runner, a colleague's Mac) then refuses the providers it downloads. \
+         Before committing, lock for every platform that will run this configuration and \
+         commit the result:\n\n```\n{}\n```\n\n\
+         (`ttg export --lock` runs the same command after exporting.) Re-exporting never \
+         touches the lock file.\n",
+        crate::validate::lock_command(profile.tool)
+    ));
     if has_manifests {
         s.push_str(&format!(
             "\n## Kubernetes manifests\n\n\
@@ -402,60 +486,111 @@ fn raw(s: &str) -> Expression {
     crate::emit::raw_expr(s)
 }
 
-/// Pad `key =` runs so `=` signs line up, mirroring `terraform fmt`. A run is a sequence of
-/// consecutive attribute lines at the same indentation.
+/// Pad `key =` lines so their `=` signs line up the way `terraform fmt` / `tofu fmt` do
+/// it (hclwrite's `formatCells`): a line takes part when it has an `=` after its first
+/// token whose right-hand side closes every bracket it opens, and consecutive such lines
+/// form one group, whatever their nesting. Anything else — a nested block's header or
+/// closing brace, a value that runs over several lines, a blank line, a comment — ends
+/// the group. Each group is aligned to its longest left-hand side.
 pub fn align_attributes(s: &str) -> String {
-    let lines: Vec<&str> = s.lines().collect();
+    let lines: Vec<&str> = s.split('\n').collect();
+    let eq: Vec<Option<usize>> = lines.iter().map(|l| assign_at(l)).collect();
     let mut out: Vec<String> = Vec::with_capacity(lines.len());
     let mut i = 0;
     while i < lines.len() {
-        let Some((indent, _)) = attr_parts(lines[i]) else {
+        if eq[i].is_none() {
             out.push(lines[i].to_string());
             i += 1;
             continue;
-        };
-        // collect the run
+        }
         let mut j = i;
         let mut width = 0;
         while j < lines.len() {
-            match attr_parts(lines[j]) {
-                Some((ind, key)) if ind == indent => {
-                    width = width.max(key.len());
-                    j += 1;
-                }
-                _ => break,
-            }
+            let Some(at) = eq[j] else { break };
+            width = width.max(lines[j][..at].trim_end().chars().count());
+            j += 1;
         }
-        for line in &lines[i..j] {
-            let (ind, key) = attr_parts(line).unwrap();
-            let rest = line[ind + key.len()..].trim_start();
-            out.push(format!("{}{:width$} {}", &line[..ind], key, rest, width = width));
+        for k in i..j {
+            let at = eq[k].unwrap();
+            let lead = lines[k][..at].trim_end();
+            let pad = width - lead.chars().count();
+            out.push(format!("{lead}{} {}", " ".repeat(pad), &lines[k][at..]));
         }
         i = j;
     }
-    let mut r = out.join("\n");
-    if s.ends_with('\n') {
-        r.push('\n');
-    }
-    r
+    out.join("\n")
 }
 
-/// (indent width, key) if the line looks like `  key = ...`.
-fn attr_parts(line: &str) -> Option<(usize, &str)> {
-    let indent = line.len() - line.trim_start().len();
-    let body = &line[indent..];
-    let key_end = body
-        .find(|c: char| !(c.is_ascii_alphanumeric() || c == '_' || c == '-'))
-        .unwrap_or(body.len());
-    if key_end == 0 {
+/// Byte offset of the `=` that makes `line` an attribute line in hclwrite's sense, or
+/// `None`. The `=` must come after the first token and outside strings, must not be part
+/// of `==`, `!=`, `<=`, `>=` or `=>`, and the rest of the line must close every bracket
+/// it opens (a value that continues on the next lines is not aligned).
+fn assign_at(line: &str) -> Option<usize> {
+    #[derive(Clone, Copy, PartialEq)]
+    enum Frame {
+        Code,
+        Str,
+        /// `${ … }` / `%{ … }` inside a string, with its own brace depth.
+        Interp(u32),
+    }
+    let bytes = line.as_bytes();
+    let first = line.len() - line.trim_start().len();
+    if first == line.len() {
         return None;
     }
-    let after = body[key_end..].trim_start();
-    if after.starts_with("= ") || after == "=" {
-        Some((indent, &body[..key_end]))
-    } else {
-        None
+    let mut stack = vec![Frame::Code];
+    let mut eq: Option<usize> = None;
+    let mut net: i32 = 0;
+    let mut i = first;
+    while i < bytes.len() {
+        let c = bytes[i];
+        let top = *stack.last().unwrap();
+        match top {
+            Frame::Str => match c {
+                b'\\' => i += 1,
+                b'"' => {
+                    stack.pop();
+                }
+                b'$' | b'%' if bytes.get(i + 1) == Some(&c) => i += 1,
+                b'$' | b'%' if bytes.get(i + 1) == Some(&b'{') => {
+                    stack.push(Frame::Interp(0));
+                    i += 1;
+                }
+                _ => {}
+            },
+            Frame::Interp(depth) => match c {
+                b'"' => stack.push(Frame::Str),
+                b'{' => *stack.last_mut().unwrap() = Frame::Interp(depth + 1),
+                b'}' if depth == 0 => {
+                    stack.pop();
+                }
+                b'}' => *stack.last_mut().unwrap() = Frame::Interp(depth - 1),
+                _ => {}
+            },
+            Frame::Code => {
+                let top_level = stack.len() == 1;
+                match c {
+                    b'"' => stack.push(Frame::Str),
+                    b'#' => break,
+                    b'/' if bytes.get(i + 1) == Some(&b'/') => break,
+                    b'{' | b'[' | b'(' if top_level && eq.is_some() => net += 1,
+                    b'}' | b']' | b')' if top_level && eq.is_some() => net -= 1,
+                    b'=' if top_level && eq.is_none() && i > first => {
+                        let prev = bytes[i - 1];
+                        let next = bytes.get(i + 1).copied();
+                        let operator = matches!(prev, b'=' | b'!' | b'<' | b'>')
+                            || matches!(next, Some(b'=') | Some(b'>'));
+                        if !operator {
+                            eq = Some(i);
+                        }
+                    }
+                    _ => {}
+                }
+            }
+        }
+        i += 1;
     }
+    eq.filter(|_| net == 0)
 }
 
 #[cfg(test)]
@@ -468,5 +603,34 @@ mod tests {
         let a = align_attributes(s);
         assert!(a.contains("  id         = 1\n  cidr_block = \"x\""));
         assert!(a.contains("    a = 1"));
+    }
+
+    #[test]
+    fn object_for_expressions_are_padded() {
+        assert_eq!(
+            space_object_for(
+                "  for_each = {for o in x : o.k => o}\n  s = \"{for}\"\n  l = [for v in y : v]\n"
+            ),
+            "  for_each = { for o in x : o.k => o }\n  s = \"{for}\"\n  l = [for v in y : v]\n"
+        );
+    }
+
+    /// The groups `terraform fmt` makes: a multi-line value's first line takes no part,
+    /// its inner lines align with each other across nesting, and a closing brace ends a
+    /// group.
+    #[test]
+    fn align_like_terraform_fmt() {
+        let s = "resource \"a\" \"b\" {\n  name = \"x\"\n  tags = {\n    Name = \"x\"\n    Environment = \"y\"\n  }\n  ab = 1\n  policy = jsonencode({\n    a = 1\n  })\n  c = \"${a == b}=\"\n  longer_name = x == y ? 1 : 2\n}\n";
+        let a = align_attributes(s);
+        assert_eq!(
+            a,
+            "resource \"a\" \"b\" {\n  name = \"x\"\n  tags = {\n    Name        = \"x\"\n    Environment = \"y\"\n  }\n  ab = 1\n  policy = jsonencode({\n    a = 1\n  })\n  c           = \"${a == b}=\"\n  longer_name = x == y ? 1 : 2\n}\n"
+        );
+        assert_eq!(assign_at("  a = { b = 1 }"), Some(4));
+        assert_eq!(assign_at("  a = {"), None);
+        assert_eq!(assign_at("  for_each = { for o in x : o.k => o }"), Some(11));
+        assert_eq!(assign_at("  \"aws:x\" = \"y\""), Some(10));
+        assert_eq!(assign_at("    x == y"), None);
+        assert_eq!(assign_at("# a = b"), None);
     }
 }

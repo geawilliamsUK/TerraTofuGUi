@@ -123,7 +123,7 @@ fn schema_v2_features() {
         "{compute}"
     );
     assert!(
-        compute.contains("ami                    = data.aws_ami.app_server_ubuntu.id"),
+        compute.contains("ami           = data.aws_ami.app_server_ubuntu.id"),
         "{compute}"
     );
     assert!(compute.contains("vpc_security_group_ids = [\n    aws_security_group.web_sg.id\n  ]"));
@@ -171,7 +171,7 @@ fn schema_v2_features() {
         .insert("ami".into(), ttg_core::Value::Str("ami-0c1c30571d2dafa9e".into()));
     let aws2 = generate(&p2, &cat, "aws", Tool::OpenTofu).unwrap();
     assert!(!aws2.files["compute.tf"].contains("data \"aws_ami\""));
-    assert!(aws2.files["compute.tf"].contains("ami                    = \"ami-0c1c30571d2dafa9e\""));
+    assert!(aws2.files["compute.tf"].contains("ami           = \"ami-0c1c30571d2dafa9e\""));
 }
 
 #[test]
@@ -548,25 +548,27 @@ fn step4_network_database_load_balancer() {
     assert!(net.contains("resource \"aws_nat_gateway\" \"nat\""));
     assert!(net.contains("allocation_id = aws_eip.nat_eip.id"));
     // one association per attached subnet, via for_each_relation
-    assert!(net.contains("resource \"aws_route_table_association\" \"public_routes_assoc_0\""));
-    assert!(net.contains("resource \"aws_route_table_association\" \"public_routes_assoc_1\""));
+    assert!(net.contains("resource \"aws_route_table_association\" \"public_routes_assoc_web_a\""));
+    assert!(net.contains("resource \"aws_route_table_association\" \"public_routes_assoc_web_b\""));
     assert!(net.contains("gateway_id             = aws_internet_gateway.igw.id"));
     assert!(net.contains("nat_gateway_id         = aws_nat_gateway.nat.id"));
     let lb = &aws.files["load_balancer.tf"];
     assert!(lb.contains("load_balancer_type = \"application\""));
-    assert!(lb.contains("resource \"aws_lb_target_group_attachment\" \"web_lb_attach_0\""));
+    assert!(lb.contains("resource \"aws_lb_target_group_attachment\" \"web_lb_attach_app_server\""));
     assert!(lb.contains("target_id        = aws_instance.app_server.id"));
     let db = &aws.files["database.tf"];
     assert!(db.contains("resource \"aws_db_subnet_group\" \"app_db_subnets\""));
-    assert!(db.contains("password               = var.db_password"));
+    assert!(db.contains("password             = var.db_password"));
     assert!(aws.files["variables.tf"].contains("sensitive   = true"));
 
     let az = generate(&p, &cat, "azure", Tool::OpenTofu).unwrap();
     let net = &az.files["network.tf"];
     assert!(!net.contains("internet_gateway"), "IGW is logical on Azure");
     assert!(net.contains("next_hop_type       = \"Internet\""));
-    assert!(net.contains("resource \"azurerm_subnet_nat_gateway_association\" \"private_routes_nat_0\""));
-    assert!(net.contains("resource \"azurerm_subnet_route_table_association\" \"private_routes_assoc_1\""));
+    assert!(net.contains("resource \"azurerm_subnet_nat_gateway_association\" \"private_routes_nat_data_a\""));
+    assert!(
+        net.contains("resource \"azurerm_subnet_route_table_association\" \"private_routes_assoc_data_b\"")
+    );
     let lb = &az.files["load_balancer.tf"];
     assert!(lb.contains("network_interface_id    = azurerm_network_interface.app_server_nic.id"));
     assert!(lb.contains("public_ip_address_id = azurerm_public_ip.web_lb_pip.id"));
@@ -666,7 +668,7 @@ fn job_pipeline_wires_functions_to_everything() {
     assert!(!sls.contains("\"jobrunner_policy\"") || !sls.contains("AdministratorAccess"));
     // database takes its password from the secret; URI secret is composed from the database
     assert!(f("database.tf")
-        .contains("password               = aws_secretsmanager_secret_version.dbpass_version.secret_string"));
+        .contains("password             = aws_secretsmanager_secret_version.dbpass_version.secret_string"));
     assert!(f("secrets.tf").contains("secret_string = format(\"postgresql://%s:%s@%s/%s\""));
     // security group rule sourced from another group, no CIDR
     let net = f("network.tf");
@@ -1671,10 +1673,7 @@ fn kubernetes_example_node_pools_and_workload_identity() {
     );
     assert!(c.contains("capacity_type = \"SPOT\""), "{c}");
     assert!(c.contains("ami_type      = \"AL2023_x86_64_NVIDIA\""), "{c}");
-    assert!(
-        c.contains("labels        = {\n    workload = \"asr\"\n  }"),
-        "{c}"
-    );
+    assert!(c.contains("labels = {\n    workload = \"asr\"\n  }"), "{c}");
     assert!(
         c.contains("desired_size = 0\n    min_size     = 0\n    max_size     = 4"),
         "{c}"
@@ -1860,21 +1859,18 @@ fn kubernetes_example_node_pools_and_workload_identity() {
         c.contains("node_taints     = formatlist(\"%s=%s:%s\", [\"nvidia.com/gpu\"], [\"present\"], [\"NoSchedule\"])"),
         "struct_list columns become the three lists AKS wants: {c}"
     );
-    assert!(
-        c.contains("node_labels           = {\n    workload = \"asr\"\n  }"),
-        "{c}"
-    );
+    assert!(c.contains("node_labels = {\n    workload = \"asr\"\n  }"), "{c}");
     // The federated credential binds the identity to <ns>/<sa> on the cluster's issuer.
     assert!(
         c.contains("resource \"azurerm_federated_identity_credential\" \"api\""),
         "{c}"
     );
     assert!(
-        c.contains("issuer     = azurerm_kubernetes_cluster.platform.oidc_issuer_url"),
+        c.contains("issuer  = azurerm_kubernetes_cluster.platform.oidc_issuer_url"),
         "{c}"
     );
     assert!(
-        c.contains("subject    = format(\"system:serviceaccount:%s:%s\", \"platform\", \"api\")"),
+        c.contains("subject = format(\"system:serviceaccount:%s:%s\", \"platform\", \"api\")"),
         "{c}"
     );
     assert!(
@@ -1882,7 +1878,7 @@ fn kubernetes_example_node_pools_and_workload_identity() {
         "{c}"
     );
     assert!(
-        c.contains("resource \"azurerm_monitor_diagnostic_setting\" \"platform_diag_0\""),
+        c.contains("resource \"azurerm_monitor_diagnostic_setting\" \"platform_diag_cluster_logs\""),
         "{c}"
     );
     // Container Insights is the cluster's own agent writing into the linked workspace.
@@ -1917,7 +1913,7 @@ fn kubernetes_example_node_pools_and_workload_identity() {
         c.contains("resource \"google_container_node_pool\" \"gpu\""),
         "{c}"
     );
-    assert!(c.contains("spot   = true"), "{c}");
+    assert!(c.contains("spot = true"), "{c}");
     assert!(c.contains("guest_accelerator {"), "{c}");
     assert!(c.contains("gpu_driver_version = \"LATEST\""), "{c}");
     assert!(c.contains("min_node_count = 0"), "{c}");
@@ -2298,7 +2294,7 @@ fn edge_aws_https_waf_cdn_and_alias() {
     let net = norm(&g.files["network.tf"]);
     assert!(net.contains("validation_method = \"DNS\""));
     assert!(
-        net.contains("for_each = {for o in aws_acm_certificate.site_cert.domain_validation_options : o.domain_name => o}"),
+        net.contains("for_each = { for o in aws_acm_certificate.site_cert.domain_validation_options : o.domain_name => o }"),
         "{net}"
     );
     assert!(net.contains("name = each.value.resource_record_name"));
@@ -2318,7 +2314,7 @@ fn edge_aws_https_waf_cdn_and_alias() {
         net.contains("rate_based_statement { limit = 2000 aggregate_key_type = \"IP\""),
         "{net}"
     );
-    assert!(net.contains("resource \"aws_wafv2_web_acl_association\" \"edge_waf_assoc_0\""));
+    assert!(net.contains("resource \"aws_wafv2_web_acl_association\" \"edge_waf_assoc_web_lb\""));
     assert!(net.contains("resource_arn = aws_lb.web_lb.arn"));
 
     // CloudFront over the bucket: origin access control plus the reader policy.
@@ -2483,7 +2479,7 @@ fn a_cdn_pulls_its_certificate_and_web_acl_into_us_east_1() {
         "{net}"
     );
     assert!(net.contains(
-        "for_each = {for o in aws_acm_certificate.site_cert_global.domain_validation_options : o.domain_name => o}"
+        "for_each = { for o in aws_acm_certificate.site_cert_global.domain_validation_options : o.domain_name => o }"
     ));
     assert!(
         net.contains("resource \"aws_acm_certificate_validation\" \"site_cert_global_issued\" { provider = aws.us_east_1 certificate_arn = aws_acm_certificate.site_cert_global.arn"),
@@ -3071,7 +3067,7 @@ fn azure_cdn_is_front_door() {
         "patterns_to_match = [ \"/_next/static/*\" ] forwarding_protocol = \"HttpsOnly\" https_redirect_enabled = true link_to_default_domain = true cache { query_string_caching_behavior = \"IgnoreQueryString\" compression_enabled = true"
     ), "{net}");
     assert!(net.contains(
-        "cdn_frontdoor_route_ids = concat([azurerm_cdn_frontdoor_route.app_cdn_route.id], [azurerm_cdn_frontdoor_route.app_cdn_behavior_0.id, azurerm_cdn_frontdoor_route.app_cdn_behavior_1.id])"
+        "cdn_frontdoor_route_ids = concat([azurerm_cdn_frontdoor_route.app_cdn_route.id], [azurerm_cdn_frontdoor_route.app_cdn_behavior_next_static.id, azurerm_cdn_frontdoor_route.app_cdn_behavior_api_files.id])"
     ), "{net}");
     assert!(net.contains(
         "request_header_action { header_action = \"Overwrite\" header_name = \"X-Origin-Verify\" value = random_password.app_cdn_secret.result }"
@@ -3411,9 +3407,9 @@ fn a_registry_can_hold_several_repositories() {
     );
     assert!(
         squash(&aws.files["outputs.tf"]).contains(
-            "value = [ aws_ecr_repository.service_images_repo_0.repository_url, \
-             aws_ecr_repository.service_images_repo_1.repository_url, \
-             aws_ecr_repository.service_images_repo_2.repository_url ]"
+            "value = [ aws_ecr_repository.service_images_repo_api.repository_url, \
+             aws_ecr_repository.service_images_repo_worker.repository_url, \
+             aws_ecr_repository.service_images_repo_migrations.repository_url ]"
         ),
         "{}",
         aws.files["outputs.tf"]
@@ -3507,7 +3503,7 @@ fn topic_subscriptions_reach_people_where_they_can() {
 
     let aws = squash(&generate(&p, &cat, "aws", Tool::OpenTofu).unwrap().files["serverless.tf"]);
     assert!(
-        aws.contains("resource \"aws_sns_topic_subscription\" \"ops_alerts_sub_endpoint_0\""),
+        aws.contains("resource \"aws_sns_topic_subscription\" \"ops_alerts_sub_endpoint_ops_example_com\""),
         "{aws}"
     );
     assert!(

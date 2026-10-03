@@ -125,7 +125,7 @@ fn aws_apps_share_the_environment_cluster_and_keep_their_roles_apart() {
     assert!(!worker.contains("portMappings"), "{worker}");
     assert!(c.contains("load_balancer {\n    target_group_arn = aws_lb_target_group.shop_lb_tg.arn\n    container_name   = \"web\"\n    container_port   = 8080"), "{c}");
     assert!(
-        c.contains("depends_on                        = [\n    aws_lb_listener.shop_lb_listener\n  ]"),
+        c.contains("depends_on = [\n    aws_lb_listener.shop_lb_listener\n  ]"),
         "{c}"
     );
     let lb = &g.files["load_balancer.tf"];

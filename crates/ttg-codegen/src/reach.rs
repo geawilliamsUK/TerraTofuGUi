@@ -456,7 +456,8 @@ fn subnet_egress(p: &Project, cat: &Catalog, provider: &str, subnet: &str) -> Re
     ))
 }
 
-/// Rules of a security group as (direction, protocol, from, to, cidr, source_group).
+/// Rules of a security group as (direction, protocol, from, to, cidr, source_group,
+/// prefix list).
 struct Rule {
     ingress: bool,
     protocol: String,
@@ -464,6 +465,35 @@ struct Rule {
     to: i64,
     cidr: String,
     source_group: String,
+    /// The name of the managed prefix list the rule admits (AWS), which wins over the
+    /// rest of the source: an opaque set of addresses outside the diagram.
+    prefix_list: String,
+}
+
+/// The CloudFront origin-facing list: the addresses CloudFront fetches from.
+const CLOUDFRONT_ORIGIN_FACING: &str = "com.amazonaws.global.cloudfront.origin-facing";
+
+/// The prefix list a rule names: the AWS-managed list's name, or the name a prefix
+/// list on the canvas looks up (its `name` argument, else its display name).
+fn rule_prefix_list(p: &Project, r: &ttg_core::Record) -> String {
+    if let Some(name) = r
+        .get("prefix_list")
+        .map(|v| v.display())
+        .filter(|s| !s.is_empty())
+    {
+        return name;
+    }
+    r.get("source_prefix_list")
+        .and_then(|v| v.as_str())
+        .and_then(|id| p.entity(id))
+        .map(|e| {
+            e.extra_args("aws", "main")
+                .and_then(|x| x.get("name"))
+                .and_then(|v| v.as_str())
+                .map(str::to_string)
+                .unwrap_or(e.name.to_string())
+        })
+        .unwrap_or_default()
 }
 
 /// A group's rules. A cluster's own group is the one its provider makes: all traffic
@@ -479,6 +509,7 @@ fn rules_of(p: &Project, sg: &str) -> Vec<Rule> {
             to: 0,
             cidr: cidr.into(),
             source_group: source_group.into(),
+            prefix_list: String::new(),
         };
         return vec![all(true, "", sg), all(false, "0.0.0.0/0", "")];
     }
@@ -486,13 +517,25 @@ fn rules_of(p: &Project, sg: &str) -> Vec<Rule> {
         return vec![];
     };
     rows.iter()
-        .map(|r| Rule {
-            ingress: r.get("direction").map(|v| v.display()) == Some("ingress".into()),
-            protocol: r.get("protocol").map(|v| v.display()).unwrap_or("tcp".into()),
-            from: r.get("from_port").and_then(|v| v.as_int()).unwrap_or(0),
-            to: r.get("to_port").and_then(|v| v.as_int()).unwrap_or(0),
-            cidr: r.get("cidr").map(|v| v.display()).unwrap_or_default(),
-            source_group: r.get("source_group").map(|v| v.display()).unwrap_or_default(),
+        .map(|r| {
+            let prefix_list = rule_prefix_list(p, r);
+            // A prefix list replaces the rest of the source (the AWS mapping drops it).
+            let other = |k: &str| {
+                if prefix_list.is_empty() {
+                    r.get(k).map(|v| v.display()).unwrap_or_default()
+                } else {
+                    String::new()
+                }
+            };
+            Rule {
+                ingress: r.get("direction").map(|v| v.display()) == Some("ingress".into()),
+                protocol: r.get("protocol").map(|v| v.display()).unwrap_or("tcp".into()),
+                from: r.get("from_port").and_then(|v| v.as_int()).unwrap_or(0),
+                to: r.get("to_port").and_then(|v| v.as_int()).unwrap_or(0),
+                cidr: other("cidr"),
+                source_group: other("source_group"),
+                prefix_list,
+            }
         })
         .collect()
 }
@@ -717,6 +760,18 @@ fn exposure(
             return Some("public HTTPS endpoint".into());
         }
         "load_balancer" if e.field("scheme").map(|v| v.display()) == Some("internet_facing".into()) => {
+            // Locked to CloudFront: every ingress rule admits only its origin-facing list.
+            let ingress: Vec<Rule> = groups
+                .iter()
+                .flat_map(|g| rules_of(p, g))
+                .filter(|r| r.ingress)
+                .collect();
+            if !ingress.is_empty() && ingress.iter().all(|r| r.prefix_list == CLOUDFRONT_ORIGIN_FACING) {
+                return Some(
+                    "internet-facing load balancer that admits only CloudFront (origin-facing prefix list)"
+                        .into(),
+                );
+            }
             return Some("internet-facing load balancer".into());
         }
         "container_app" if e.field("public").and_then(|v| v.as_bool()).unwrap_or(false) && !is_worker(e) => {
