@@ -609,3 +609,56 @@ fn the_cost_estimate_prices_free_form_storage() {
     assert!(storage("azure").starts_with("32 GB"), "{}", storage("azure"));
     assert!(storage("gcp").starts_with("20 GB"), "{}", storage("gcp"));
 }
+
+/// Bringing saved values to their field types touches nothing but the values saved under
+/// an older type: every other field of every example, numbers included (health-check
+/// intervals, timeouts, rate limits), keeps exactly what was stored.
+#[test]
+fn normalizing_the_examples_only_touches_old_values() {
+    let cat = Catalog::builtin();
+    let dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../examples");
+    let allowed = [
+        ("relational_database", "storage"),
+        ("log_group", "retention_days"),
+        ("alarm", "statistic"),
+    ];
+    for entry in std::fs::read_dir(dir).unwrap().flatten() {
+        let path = entry.path();
+        if !path.to_string_lossy().ends_with(".ttg.json") {
+            continue;
+        }
+        let before = ttg_core::project::load(&path).unwrap();
+        let mut after = before.clone();
+        cat.normalize_values(&mut after);
+        for (id, n) in &before.nodes {
+            let m = &after.nodes[id];
+            let keys: std::collections::BTreeSet<&String> = n.config.keys().chain(m.config.keys()).collect();
+            for k in keys {
+                if n.config.get(k) != m.config.get(k) {
+                    assert!(
+                        allowed.contains(&(n.resource_type.as_str(), k.as_str())),
+                        "{}: {id}.{k} changed from {:?} to {:?}",
+                        path.display(),
+                        n.config.get(k),
+                        m.config.get(k)
+                    );
+                }
+            }
+            for (pid, cfg) in &n.provider_config {
+                let other = m.provider_config.get(pid).cloned().unwrap_or_default();
+                for (k, v) in cfg {
+                    if other.get(k) != Some(v) {
+                        assert!(
+                            n.resource_type == "alarm" && pid == "aws" && k == "statistic",
+                            "{}: {id}.{pid}.{k} changed",
+                            path.display()
+                        );
+                    }
+                }
+            }
+        }
+        for (id, c) in &before.containers {
+            assert_eq!(c.config, after.containers[id].config, "{}: {id}", path.display());
+        }
+    }
+}
