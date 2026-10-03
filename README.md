@@ -13,18 +13,26 @@ provider — never a single "portable" HCL file, because no such thing can exist
 
 ![TerraTofu GUI with the three-tier example open](docs/screenshot.png)
 
-Status: **Phase 3** — 41 curated abstract types mapped for AWS, Azure and Google Cloud,
+Status: **Phase 3** — 43 curated abstract types mapped for AWS, Azure and Google Cloud,
 plus every native provider resource through the bundled schema index (see "Beyond the
 curated catalog"). Curated: networking (Virtual Network, Subnet, Internet Gateway, NAT
 Gateway, Route Table, Security Group, Private Endpoint, Network Peering), the internet-facing
 edge (Load Balancer with HTTPS, TLS Certificate, Web Application Firewall, CDN), compute
 (Compute Instance, Autoscaling Group), data (Relational Database, NoSQL Table, Cache, Object
 Storage, File System), serverless (Function, Event Queue, Topic, the Azure-only Storage Queue and
-Service Bus Namespace), containers (Container App, Container Registry, Kubernetes Cluster,
-Kubernetes Node Pool, Kubernetes Workload), DNS (Zone, Record), secrets (Key Vault,
+Service Bus Namespace), containers (Container Environment, Container App, Container Job,
+Container Registry, Kubernetes Cluster, Kubernetes Node Pool, Kubernetes Workload), DNS
+(Zone, Record), secrets (Key Vault,
 Secret, Encryption Key), monitoring (Log Group, Alarm, Budget, Audit Trail), IAM Role, User Identity and the Resource Group container. A
 Kubernetes Workload turns its links into EKS Pod Identity, an AKS federated credential or
 a GKE workload-identity binding plus a least-privilege policy, the way a Function does.
+Container Apps and Jobs drawn inside a **Container Environment** share one ECS cluster /
+Container Apps environment and carry their configuration to every provider: environment
+variables, secrets injected from a linked Secret (one JSON key per variable on AWS), the
+health check, the stop timeout, the CPU architecture and an image from a linked registry.
+Separate task and execution roles, a load balancer forwarding to an app (by IP on AWS,
+through a serverless NEG on Google Cloud), background workers with no ingress and one-shot
+jobs (an ECS task definition, a Container Apps job, a Cloud Run job) are all part of it.
 Gaps a provider cannot
 express (an Azure database's network access, for example) are reported as manual steps,
 never papered over. Every example passes `tofu validate` for all three providers and

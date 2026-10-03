@@ -171,7 +171,7 @@ link carries data, which way it moves and what to call it:
 | `attribute_reference` | workload → database, cache, bucket, file system, table | source → target (both ways) | uses |
 | `attribute_reference` | CDN → bucket or load balancer | source → target | origin |
 | `attachment` | anything → file system | target → source (both ways) | mounted by |
-| `attachment` | load balancer → instance or cluster | source → target | forwards to |
+| `attachment` | load balancer → instance, cluster or container app | source → target | forwards to |
 | `attachment` | scaling group or Kubernetes workload → load balancer | target → source | forwards to |
 | `attachment` | audit trail → bucket | source → target | writes to |
 
@@ -399,7 +399,8 @@ Project + Catalog + provider + tool
   │
   ├─ diagnostics::run          gate: errors abort, warnings become MANUAL_STEPS entries
   ├─ emit (plan phase)         evaluate `when` -> the set of (entity, block) pairs to emit
-  ├─ emit (resolve phase)      ArgSource -> hcl::Expression, collects variables + manual steps
+  ├─ emit (resolve phase)      ArgSource -> hcl::Expression, collects variables + manual steps;
+  │                            identical grants (role assignments, IAM members) kept once
   ├─ graph (petgraph)          topological order of emissions; cycle = error
   ├─ k8s::generate             only with settings.kubernetes_manifests: k8s/*.yaml, render
   │                            scripts, k8s/README.md, plus the k8s_* outputs they read (§6.4)
@@ -642,6 +643,59 @@ project uses is checked against the schema (`versions::mapping_findings`, the sa
 the `schema_check` test runs over the whole catalog) and a mismatch is a warning naming the
 mapping file and argument. `ttg schema refresh --provider-version aws="~> 7.0"` builds an
 index for another major, after which the same diagnostics name what would break there.
+
+### 6.7a Containers: environments, apps and jobs
+
+Three types share one vocabulary (`container_environment.toml`, `container_app.toml`,
+`container_job.toml`):
+
+- **Container Environment** is a container: an `aws_ecs_cluster` (with Container
+  Insights on or off) or an `azurerm_container_app_environment` (with its infrastructure
+  subnet and Log Analytics workspace); logical on Google Cloud, which has no environment.
+  Apps and jobs drawn inside it use it — `{ ancestor = "container_environment" }` decides,
+  and the app's own `cluster` / `env` block is only emitted outside one, so projects drawn
+  before it existed export as they did. Everything derived from an app reads the cluster
+  actually used: the Alarm's `ClusterName` dimension falls back from the app's own
+  cluster block to its environment through a relation source's `ancestor`.
+- **Configuration that travels**: `env` and `secrets` rows, health check (command or HTTP
+  path, interval, timeout, retries, start period), stop timeout, CPU architecture, and an
+  image built from a linked Container Registry's `REGISTRY` connection value plus
+  `repository` and `image_tag` (an input variable while unset). ECS gets them in its
+  container definition (`secrets[].valueFrom = "<arn>:<key>::"`, `healthCheck`,
+  `stopTimeout`, `runtime_platform`), Container Apps as env blocks, Key Vault secret
+  references, a liveness probe and the termination grace period, Cloud Run as env blocks
+  with `secret_key_ref` and a liveness probe. What a provider cannot express (a command
+  probe off AWS, a JSON key in a Key Vault or Secret Manager secret, arm64, Cloud Run's
+  fixed ten-second stop) is a warning or a manual step. Links to a database or cache add
+  `DB_*` / `CACHE_*` variables from their connection values.
+- **Two roles**: 'Task role' (`iam_binding`) is what the code runs as and gets the
+  least-privilege policy built from 'Uses' / 'Reads' / 'Sends to'; 'Execution role'
+  (`attribute_reference` to an `iam_role`) starts the task — the ECS execution role,
+  the Azure identity that reads Key Vault and pulls from ACR (with `AcrPull`), the job's
+  service account on Google Cloud when it has no task role. With one role linked it does
+  both, as before. The IAM Role attaches `AmazonECSTaskExecutionRolePolicy` only when an
+  app or job starts with it, decided with an incoming relation condition whose `where`
+  asks the app whether it has an execution role of its own; the app adds an inline
+  `secretsmanager:GetSecretValue` policy for the secrets it injects. Identical grants
+  from several apps sharing an identity are written once (`emit::dedupe_grants`).
+- **Load balancer → app**: an `ip` target group with the app's port, health-check path and
+  stop timeout as deregistration delay, and the ECS service's `load_balancer` block plus
+  `depends_on` the listener; on Google Cloud a serverless NEG as the backend of the
+  global HTTPS load balancer (no health check, port name or timeout on that backend
+  service) with the service's ingress narrowed to the load balancer; on Azure nothing to
+  attach — the app's own ingress is made external instead, and a manual step says why.
+- **Background workers** have no port mapping, ingress or invoker, and Cloud Run keeps
+  their CPU allocated (`cpu_idle = false`, min = max instances). A Cloud Run worker pool
+  would fit too, but alarms, IAM and the load balancer all address the app as a service.
+- **Jobs**: an ECS task definition plus a `terraform_data` holding what `aws ecs run-task`
+  needs (cluster, task definition, subnets, security groups) as the `<job>_run` output; a
+  manually triggered `azurerm_container_app_job`; a `google_cloud_run_v2_job`.
+
+Reachability treats jobs like apps (they initiate connections from their subnets), a
+background worker listens on no port, and the "no link" note names the link the source
+type offers. An `extra` argument that replaces a mapping's only reference to another of
+the entity's own blocks — a service pointed at a hand-made cluster — is reported, since
+that block is still created and whatever else is derived from it still points at it.
 
 ### 6.7 What an export owns (`ttg-codegen::owned`)
 

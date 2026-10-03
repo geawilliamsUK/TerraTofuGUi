@@ -930,6 +930,40 @@ AAAA record, and Azure's `cdn` was classic Microsoft CDN, which cannot carry a W
 path behaviour, per-path rate rules, a secret origin header, an `origin.` record the
 certificate covers, A and AAAA aliases) and validates on all three providers.
 
+## Round 4: containers (zipOS feedback TF-005 to TF-008, TF-016, TF-021 item 5)
+
+Building zipOS's AWS staging graph needed `$raw` container definitions, a native shared
+cluster, a second role wired in through overrides, native IAM policies and a native task
+definition for the migration — and the alarm on the worker watched an orphaned cluster.
+
+- **Container Environment** (new container type): `aws_ecs_cluster` with Container
+  Insights, `azurerm_container_app_environment`, logical on Google Cloud. Apps and jobs
+  inside it share it; outside one they keep their own cluster / environment.
+- **App configuration** on Container App: `env` and `secrets` rows (a linked Secret, a
+  JSON key per variable on AWS), health check, stop timeout, CPU architecture, image from a
+  linked registry with `repository` and `image_tag`, written for ECS, Container Apps and
+  Cloud Run alike.
+- **Roles**: 'Task role' and 'Execution role'; the execution policy follows the execution
+  link (an incoming condition with `where`), the execution role may read the injected
+  secrets, and 'Uses' / 'Reads' / 'Sends to' links to buckets, secrets, queues, topics and
+  IAM-authenticated databases become the task role's least-privilege policy.
+- **Load balancer → Container App**: `ip` target group, health-check path, deregistration
+  delay, the service's `load_balancer` block; a serverless NEG on Google Cloud.
+- **Background worker** flag and **Container Job** type (ECS task definition plus a run
+  configuration output, Container Apps job, Cloud Run job), priced per run
+  (`job_runs`, `job_run_minutes`); Fargate on arm64 priced at the Graviton rates.
+- **Mapping language**: list sources from table fields (`{ for_each_field, each }`),
+  `connection = "KEY"` on relation sources, `where` on relation conditions, `linked` and
+  `absent` on item conditions; `depends_on` lists are flattened and `concat` drops empty
+  literals. Identical grants are written once.
+- **Diagnostics**: a warning when an `extra` argument orphans one of the entity's own
+  blocks; the reachability note names the link the source type actually offers.
+- `examples/containers.ttg.json` exercises all of it and validates on all three
+  providers. The rebuilt zipOS graph has no `$raw` container definition, no native ECS
+  resource and no execution-role override; its AWS export has one cluster, a task role
+  without the execution policy, the load balancer forwarding to web by IP and the worker
+  alarm on the shared cluster.
+
 ## Explicitly still out of scope
 
 Running `plan`/`apply`, live-account access, multi-user collaboration, drift detection
