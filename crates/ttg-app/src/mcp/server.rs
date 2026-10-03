@@ -403,11 +403,43 @@ pub struct EntityUpdateArgs {
         description = "false: reply with only status, id and changed instead of the whole entity (settings_set { verbose } sets the default for the session)"
     )]
     pub verbose: Option<bool>,
+    #[schemars(
+        description = "Named environment (settings.environments) the config / provider_config values are for: they override the entity's own values there only; null drops that environment's value (back to the base). Works with `entity` or `select`; with it only config, provider_config and present are taken"
+    )]
+    pub environment: Option<String>,
+    #[schemars(
+        description = "With `environment`: false leaves the entity (and its links) out of that environment — the export counts it there — true puts it back"
+    )]
+    pub present: Option<bool>,
 }
 
 impl EntityUpdateArgs {
     /// The single-entity or the bulk command these arguments ask for.
     fn into_command(self) -> Result<AgentCommand, String> {
+        // One environment's values: their own command (`exec/environments.rs`).
+        if let Some(environment) = self.environment {
+            let others = self.name.is_some()
+                || self.manual.is_some()
+                || self.providers.is_some()
+                || self.extra.is_some()
+                || self.classification.is_some()
+                || self.description.is_some()
+                || self.owner.is_some();
+            if others {
+                return Err("with `environment`, entity_update takes only config, provider_config and present (names, flags, extra arguments and metadata are the same in every environment)".into());
+            }
+            return Ok(AgentCommand::EnvUpdate {
+                entity: self.entity,
+                select: self.select.map(Into::into),
+                environment,
+                config: self.config,
+                provider_config: self.provider_config,
+                present: self.present,
+            });
+        }
+        if self.present.is_some() {
+            return Err("`present` is per environment: give `environment` too".into());
+        }
         let meta = super::EntityMeta {
             classification: self.classification,
             description: self.description,
@@ -561,19 +593,40 @@ pub struct LinkAddArgs {
         description = "false: reply with only status, id and changed instead of the whole entity (settings_set { verbose } sets the default for the session)"
     )]
     pub verbose: Option<bool>,
+    #[schemars(
+        description = "Named environments this link belongs to (e.g. [\"prod\"]); [] = every environment. Works on an existing link too"
+    )]
+    pub environments: Option<Vec<String>>,
 }
 
 impl LinkAddArgs {
     /// The single-link or the bulk command these arguments ask for.
     fn into_command(self) -> Result<AgentCommand, String> {
         match (self.source, self.select) {
-            (Some(source), None) => Ok(AgentCommand::LinkAdd {
-                source,
-                target: self.target,
-                relation: self.relation,
-                providers: self.providers,
-                verbose: self.verbose,
-            }),
+            (Some(source), None) => {
+                let add = AgentCommand::LinkAdd {
+                    source: source.clone(),
+                    target: self.target.clone(),
+                    relation: self.relation.clone(),
+                    providers: self.providers,
+                    verbose: self.verbose,
+                };
+                Ok(match self.environments {
+                    None => add,
+                    Some(environments) => AgentCommand::Batch(vec![
+                        add,
+                        AgentCommand::LinkEnvironments {
+                            source,
+                            target: self.target,
+                            relation: self.relation,
+                            environments,
+                        },
+                    ]),
+                })
+            }
+            (None, Some(_)) if self.environments.is_some() => {
+                Err("environment tags are set one link at a time: give `source`".into())
+            }
             (None, Some(select)) => Ok(AgentCommand::BulkLink {
                 select: select.into(),
                 target: self.target,
@@ -842,6 +895,23 @@ pub struct SettingsArgs {
         description = "Session default for entity_add / entity_update / link_add replies: false returns only status, id and changed (a call's own verbose wins). Not saved with the project"
     )]
     pub verbose: Option<bool>,
+    #[schemars(
+        description = "Named environments, in order, e.g. [\"staging\", \"prod\"]: replaces the list; overrides and variable values of an environment no longer listed go with it (the reply names the entities that lost some). [] removes environments altogether. Each environment gets environments/<env>.tfvars and its own state key in the export"
+    )]
+    pub environments: Option<Vec<String>>,
+    #[schemars(
+        description = "Rename an environment, carrying its overrides: { \"from\": \"pilot\", \"to\": \"staging\" }"
+    )]
+    pub rename_environment: Option<RenameArg>,
+    #[schemars(
+        description = "Put in front of every generated resource name, e.g. \"zipos-${var.environment}\" (staging and prod can then share an account); null or \"\" clears it"
+    )]
+    #[serde(default, deserialize_with = "present")]
+    pub name_prefix: Option<serde_json::Value>,
+    #[schemars(
+        description = "Project variables, merged: { \"db_class\": { \"value\": \"db.t4g.small\", \"environments\": { \"prod\": \"db.r6g.large\" }, \"description\": \"…\" } } (a bare value sets the base value; null removes one). Use them in any field as \"${var.db_class}\"; ${var.environment} and ${var.name_prefix} are built in"
+    )]
+    pub variables: Option<serde_json::Map<String, serde_json::Value>>,
     /// Anything else the caller sent: refused with the list of valid keys.
     #[serde(flatten)]
     #[schemars(skip)]
@@ -867,7 +937,18 @@ pub const SETTINGS_KEYS: &[&str] = &[
     "provider_versions",
     "name",
     "verbose",
+    "environments",
+    "rename_environment",
+    "name_prefix",
+    "variables",
 ];
+
+/// `{ "from": …, "to": … }` for `settings_set { rename_environment }`.
+#[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
+pub struct RenameArg {
+    pub from: String,
+    pub to: String,
+}
 
 impl SettingsArgs {
     /// The command, or why the arguments are refused: a key `settings_set` does not
@@ -881,7 +962,28 @@ impl SettingsArgs {
                 SETTINGS_KEYS.join(", ")
             ));
         }
-        Ok(AgentCommand::SettingsSet {
+        let env_keys = self.environments.is_some()
+            || self.rename_environment.is_some()
+            || self.name_prefix.is_some()
+            || self.variables.is_some();
+        let other_keys = self.tool.is_some()
+            || self.provider.is_some()
+            || self.provider_settings.is_some()
+            || self.tags.is_some()
+            || self.kubernetes_manifests.is_some()
+            || self.backend.is_some()
+            || self.state_encryption.is_some()
+            || self.state_encryption_key.is_some()
+            || self.provider_versions.is_some()
+            || self.name.is_some()
+            || self.verbose.is_some();
+        let env = AgentCommand::EnvSettings {
+            environments: self.environments,
+            rename: self.rename_environment.map(|r| (r.from, r.to)),
+            name_prefix: self.name_prefix,
+            variables: self.variables,
+        };
+        let settings = AgentCommand::SettingsSet {
             tool: self.tool,
             provider: self.provider,
             provider_settings: self.provider_settings,
@@ -893,6 +995,11 @@ impl SettingsArgs {
             provider_versions: self.provider_versions,
             name: self.name,
             verbose: self.verbose,
+        };
+        Ok(match (env_keys, other_keys) {
+            (true, true) => AgentCommand::Batch(vec![settings, env]),
+            (true, false) => env,
+            _ => settings,
         })
     }
 }
@@ -911,6 +1018,30 @@ pub struct OpenArgs {
 #[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
 pub struct NewArgs {
     pub name: Option<String>,
+}
+
+#[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
+pub struct PlanArgs {
+    #[schemars(description = "Provider id; defaults to the target provider")]
+    pub provider: Option<String>,
+    #[schemars(
+        description = "Named environment to plan (its environments/<env>.tfvars); defaults to the first"
+    )]
+    pub environment: Option<String>,
+    #[schemars(
+        description = "Export directory; defaults to a folder of its own under the system's temporary directory"
+    )]
+    pub dir: Option<String>,
+    #[schemars(description = "`terraform` or `opentofu`; defaults to the project's tool")]
+    pub tool: Option<String>,
+    #[schemars(
+        description = "Plan against the configured backend (init -reconfigure -backend-config=environments/<env>.backend.hcl) instead of a scratch copy with local state"
+    )]
+    pub real_backend: Option<bool>,
+    #[schemars(
+        description = "Values for variables the files leave unset: { \"db_password\": \"…\" } (passed as -var)"
+    )]
+    pub vars: Option<serde_json::Map<String, serde_json::Value>>,
 }
 
 #[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
@@ -1055,6 +1186,46 @@ impl TtgServer {
             Err(e) => fail(e),
         }
     }
+
+    /// What an export of `provider` attributes to which entity; empty when the project
+    /// cannot be generated (the tool's own errors then come back unattributed).
+    async fn attribution(&self, provider: Option<String>) -> ttg_codegen::plan_run::Attribution {
+        self.exec(AgentCommand::Attribution { provider })
+            .await
+            .ok()
+            .and_then(|v| serde_json::from_value(v).ok())
+            .unwrap_or_default()
+    }
+
+    /// `plan_run`'s second half, once the export is on disk: init and plan off the UI
+    /// thread and the dispatch loop, then the badges on the canvas.
+    async fn plan_after_export(
+        &self,
+        prep: serde_json::Value,
+        real_backend: bool,
+        vars: std::collections::BTreeMap<String, String>,
+    ) -> Result<serde_json::Value, String> {
+        let attribution: ttg_codegen::plan_run::Attribution =
+            serde_json::from_value(prep["attribution"].clone()).map_err(|e| e.to_string())?;
+        let tool: ttg_core::Tool = serde_json::from_value(prep["tool"].clone()).map_err(|e| e.to_string())?;
+        let dir = prep["dir"].as_str().ok_or("no export directory")?.to_string();
+        let opts = ttg_codegen::plan_run::PlanOptions {
+            var_file: prep["var_file"].as_str().map(str::to_string),
+            backend_config: prep["backend_config"].as_str().map(str::to_string),
+            real_backend,
+            vars,
+        };
+        let report = tokio::task::spawn_blocking(move || {
+            ttg_codegen::plan_run::run(std::path::Path::new(&dir), tool, &attribution, &opts)
+        })
+        .await
+        .map_err(|e| format!("plan task failed: {e}"))?;
+        let json = serde_json::to_value(&report).unwrap_or_default();
+        let _ = self.exec(AgentCommand::PlanShow { report: json.clone() }).await;
+        let mut out = json;
+        out["environment"] = prep["environment"].clone();
+        Ok(out)
+    }
 }
 
 #[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
@@ -1120,7 +1291,7 @@ pub struct CostArgs {
     #[schemars(description = "Provider to price (`aws` / `azure` / `gcp`); defaults to the target provider")]
     pub provider: Option<String>,
     #[schemars(
-        description = "Named environment to price. Accepted for forward compatibility; a project without named environments is priced as drawn, and the reply says so"
+        description = "Named environment to price (settings.environments): its overrides, absent entities and variable values apply. Defaults to the environment the canvas shows, else the base values"
     )]
     pub environment: Option<String>,
     #[schemars(
@@ -1653,7 +1824,7 @@ impl TtgServer {
     }
 
     #[tool(
-        description = "Change the tool, target provider, provider variables, project-wide default tags, whether Kubernetes manifests are exported, the state backend, state encryption (and the key it uses) or provider version pins. Unknown keys are refused, listing the valid ones. project_get shows the result under `settings`."
+        description = "Change the tool, target provider, provider variables, project-wide default tags, whether Kubernetes manifests are exported, the state backend, state encryption (and the key it uses), provider version pins, or the named environments, the name prefix and project variables. Unknown keys are refused, listing the valid ones. project_get shows the result under `settings`; per-environment field values are set with entity_update { environment }."
     )]
     async fn settings_set(&self, Parameters(a): Parameters<SettingsArgs>) -> CallToolResult {
         match a.into_command() {
@@ -1686,6 +1857,7 @@ impl TtgServer {
     )]
     async fn export_run(&self, Parameters(a): Parameters<ExportArgs>) -> CallToolResult {
         let dir = a.dir.clone();
+        let provider = a.provider.clone();
         let result = self
             .run(AgentCommand::ExportRun {
                 dir: a.dir,
@@ -1702,6 +1874,8 @@ impl TtgServer {
             .and_then(|c| c.as_text())
             .and_then(|t| serde_json::from_str::<serde_json::Value>(&t.text).ok())
             .unwrap_or_default();
+        // What the files and lines belong to, so each validate error comes back on its entity.
+        let attribution = self.attribution(provider).await;
         // The export reply itself, or the one an approved ticket carries.
         let export = match reply.get("status").and_then(|s| s.as_str()) {
             Some("pending_approval") => {
@@ -1709,7 +1883,9 @@ impl TtgServer {
                 // outcome on the ticket where approval_status reports it.
                 let ticket = reply["ticket"].as_str().unwrap_or_default().to_string();
                 let approvals = self.approvals.clone();
-                tokio::spawn(async move { validate_after_approval(approvals, ticket, dir).await });
+                tokio::spawn(
+                    async move { validate_after_approval(approvals, ticket, dir, attribution).await },
+                );
                 let mut content = result.content;
                 content.push(Content::text(
                     "validate: runs once the export is approved; approval_status { ticket } reports it as result.validate",
@@ -1720,11 +1896,81 @@ impl TtgServer {
             Some("denied") | Some("expired") | Some("failed") => return result,
             _ => reply,
         };
-        // Validate off the UI thread; it can take a minute.
-        let outcome = run_validate(dir, tool_of(&export)).await;
+        // Validate off the UI thread, each error attributed to its entity.
+        let outcome = run_validate(dir, tool_of(&export), attribution).await;
         let mut content = result.content;
-        content.push(Content::text(format!("validate: {outcome}")));
+        let text =
+            serde_json::to_string_pretty(&serde_json::json!({ "validate": outcome })).unwrap_or_default();
+        content.push(Content::text(text));
         CallToolResult::success(content)
+    }
+
+    #[tool(
+        description = "Export, then `init` and `plan` the result, and return the planned changes per entity: { status: planned | no_credentials | failed | binary_not_found, summary, create/update/delete/replace totals, entities: [{ entity, name, create, update, delete, replace, read, no_op, addresses: [{ address, actions, change }] }], diagnostics: [{ severity, summary, detail, file, line, entity, entity_name, definition }] }. A project with environments plans one of them (`environment`, default the first) with its environments/<env>.tfvars. Without `real_backend` it plans in a scratch copy with local state (what applying would create from nothing; the real state is never touched). A plan reads the cloud account, so it needs the provider's credentials; missing ones come back as status no_credentials. `vars` supplies variables the files leave unset (a database password). Runs in the background (a minute or more) and puts +, ~, −, ± badges on the canvas."
+    )]
+    async fn plan_run(&self, Parameters(a): Parameters<PlanArgs>) -> CallToolResult {
+        let tool = match a.tool.as_deref() {
+            None => None,
+            Some("terraform") => Some(ttg_core::Tool::Terraform),
+            Some("opentofu") | Some("tofu") => Some(ttg_core::Tool::OpenTofu),
+            Some(other) => return fail(format!("tool must be terraform or opentofu, not \"{other}\"")),
+        };
+        let prep = match self
+            .exec(AgentCommand::PlanPrepare {
+                dir: a.dir,
+                provider: a.provider,
+                environment: a.environment,
+                tool,
+            })
+            .await
+        {
+            Ok(v) => v,
+            Err(e) => return fail(e),
+        };
+        let real_backend = a.real_backend.unwrap_or(false);
+        let vars: std::collections::BTreeMap<String, String> = a
+            .vars
+            .unwrap_or_default()
+            .into_iter()
+            .map(|(k, v)| (k, v.as_str().map(str::to_string).unwrap_or(v.to_string())))
+            .collect();
+        // The export may wait for the user's approval: then the plan runs once it is
+        // allowed, and approval_status reports it as `result.plan`.
+        if prep.get("status").and_then(|s| s.as_str()) == Some("pending_approval") {
+            let ticket = prep["ticket"].as_str().unwrap_or_default().to_string();
+            let me = self.clone();
+            tokio::spawn(async move {
+                loop {
+                    let Some(t) = me.approvals.get(&ticket) else {
+                        return;
+                    };
+                    match t.outcome {
+                        super::approvals::Outcome::Pending => {
+                            tokio::time::sleep(Duration::from_millis(500)).await
+                        }
+                        super::approvals::Outcome::Applied(result) => {
+                            me.approvals.amend(&ticket, "plan", serde_json::json!("running"));
+                            let outcome = match me.plan_after_export(result, real_backend, vars).await {
+                                Ok(v) => v,
+                                Err(e) => serde_json::json!({ "status": "failed", "summary": e }),
+                            };
+                            me.approvals.amend(&ticket, "plan", outcome);
+                            return;
+                        }
+                        _ => return,
+                    }
+                }
+            });
+            let mut out = prep;
+            out["plan"] = serde_json::json!(
+                "runs once the export is approved; approval_status { ticket } reports it as result.plan"
+            );
+            return ok_json(out);
+        }
+        match self.plan_after_export(prep, real_backend, vars).await {
+            Ok(v) => ok_json(v),
+            Err(e) => fail(e),
+        }
     }
 
     #[tool(
@@ -1973,19 +2219,45 @@ fn tool_of(export: &serde_json::Value) -> ttg_core::Tool {
     }
 }
 
-/// `<tool> init && validate` in `dir`, off the async threads.
-async fn run_validate(dir: String, tool: ttg_core::Tool) -> String {
+/// `<tool> init && validate -json` in `dir`, off the async threads: the summary line and
+/// every diagnostic attributed to its entity, file and line.
+async fn run_validate(
+    dir: String,
+    tool: ttg_core::Tool,
+    a: ttg_codegen::plan_run::Attribution,
+) -> serde_json::Value {
     tokio::task::spawn_blocking(move || {
-        ttg_codegen::validate::run(std::path::Path::new(&dir), tool).summary()
+        match ttg_codegen::plan_run::validate(std::path::Path::new(&dir), tool, &a) {
+            Ok((valid, diagnostics)) => serde_json::json!({
+                "summary": if valid {
+                    "validate passed".to_string()
+                } else {
+                    format!(
+                        "validate FAILED: {} error(s)",
+                        diagnostics.iter().filter(|d| d.severity == "error").count()
+                    )
+                },
+                "valid": valid,
+                "diagnostics": diagnostics,
+            }),
+            Err(e) => serde_json::json!({ "summary": e, "valid": false, "diagnostics": [] }),
+        }
     })
     .await
-    .unwrap_or_else(|e| format!("validate task failed: {e}"))
+    .unwrap_or_else(
+        |e| serde_json::json!({ "summary": format!("validate task failed: {e}"), "valid": false }),
+    )
 }
 
 /// `export_run { validate: true }` behind an approval prompt: wait for the ticket, and
 /// once the export is applied, validate it and add the outcome to the ticket's result
 /// (`running` meanwhile, so a poll in between does not mistake it for skipped).
-async fn validate_after_approval(approvals: Arc<Approvals>, ticket: String, dir: String) {
+async fn validate_after_approval(
+    approvals: Arc<Approvals>,
+    ticket: String,
+    dir: String,
+    attribution: ttg_codegen::plan_run::Attribution,
+) {
     loop {
         let Some(t) = approvals.get(&ticket) else {
             return;
@@ -1994,8 +2266,8 @@ async fn validate_after_approval(approvals: Arc<Approvals>, ticket: String, dir:
             super::approvals::Outcome::Pending => tokio::time::sleep(Duration::from_millis(500)).await,
             super::approvals::Outcome::Applied(result) => {
                 approvals.amend(&ticket, "validate", serde_json::json!("running"));
-                let outcome = run_validate(dir, tool_of(&result)).await;
-                approvals.amend(&ticket, "validate", serde_json::json!(outcome));
+                let outcome = run_validate(dir, tool_of(&result), attribution).await;
+                approvals.amend(&ticket, "validate", outcome);
                 return;
             }
             _ => return,

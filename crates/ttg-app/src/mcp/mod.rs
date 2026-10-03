@@ -631,6 +631,50 @@ pub enum AgentCommand {
         json: String,
         replace: bool,
     },
+
+    // ---- Environments and plans. Their bodies are in `exec/environments.rs`.
+    /// The `settings_set` keys about environments: the list, a rename, the name prefix
+    /// (`Some(null)` clears it) and project variables (merged; `null` removes one).
+    EnvSettings {
+        environments: Option<Vec<String>>,
+        rename: Option<(String, String)>,
+        name_prefix: Option<serde_json::Value>,
+        variables: Option<serde_json::Map<String, serde_json::Value>>,
+    },
+    /// `entity_update { environment, … }`: one environment's values, or its presence, for
+    /// one entity or every entity a selector matches (one undo step, all-or-nothing).
+    EnvUpdate {
+        entity: Option<String>,
+        select: Option<Selector>,
+        environment: String,
+        config: Option<serde_json::Map<String, serde_json::Value>>,
+        provider_config: Option<serde_json::Map<String, serde_json::Value>>,
+        present: Option<bool>,
+    },
+    /// The environments a link belongs to (`[]` = every environment).
+    LinkEnvironments {
+        source: String,
+        target: String,
+        relation: String,
+        environments: Vec<String>,
+    },
+    /// `plan_run`'s first half: export into `dir` and say what its addresses and lines
+    /// belong to. The plan itself runs off the UI thread, in the server.
+    PlanPrepare {
+        /// `None`: a directory of its own under the system's temporary one.
+        dir: Option<String>,
+        provider: Option<String>,
+        environment: Option<String>,
+        tool: Option<ttg_core::Tool>,
+    },
+    /// What an export of a provider attributes to which entity (for `validate`).
+    Attribution {
+        provider: Option<String>,
+    },
+    /// Put a finished plan on the canvas: +, ~, −, ± badges until the next edit.
+    PlanShow {
+        report: serde_json::Value,
+    },
 }
 
 impl AgentCommand {
@@ -657,6 +701,10 @@ impl AgentCommand {
             AgentCommand::ExportRun { dir, .. } if s.confirm_disk => {
                 Some(format!("write an export into {dir}"))
             }
+            AgentCommand::PlanPrepare { dir, .. } if s.confirm_disk => Some(format!(
+                "write an export into {} and plan it",
+                dir.as_deref().unwrap_or("a temporary folder")
+            )),
             AgentCommand::EntityDelete { entities } if s.confirm_delete => {
                 Some(format!("delete {}", entities.join(", ")))
             }
@@ -716,6 +764,8 @@ impl AgentCommand {
                 | AgentCommand::CatalogRelations { .. }
                 | AgentCommand::EntityPreview { .. }
                 | AgentCommand::CostEstimate { .. }
+                | AgentCommand::Attribution { .. }
+                | AgentCommand::PlanShow { .. }
         )
     }
 }

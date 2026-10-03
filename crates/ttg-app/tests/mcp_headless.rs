@@ -2184,20 +2184,16 @@ fn headless_cost_estimate() {
         .clone();
     assert_eq!(a["source"], json!("call"), "{a}");
 
-    // An environment is accepted and said to be ignored; a region is priced as asked.
+    // An environment the project does not have is refused naming why (headless_environments
+    // prices real ones); a region is priced as asked.
     let (err, env) = c.call(
         "cost_estimate",
         json!({"environment": "prod", "region": "us-east-1"}),
     );
+    assert!(err, "{env}");
+    assert!(env.to_string().contains("no environments"), "{env}");
+    let (err, env) = c.call("cost_estimate", json!({"region": "us-east-1"}));
     assert!(!err, "{env}");
-    assert!(
-        env["notes"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .any(|n| n.as_str().unwrap().contains("prod")),
-        "{env}"
-    );
     assert_eq!(env["price_region"], json!("us-east-1"));
 
     // Refusals name what would have worked.
@@ -3032,4 +3028,94 @@ fn headless_native_data_sources_and_extra_removal() {
         .unwrap_or_default()
         .to_string();
     assert!(db.contains("password             = var.db_password"), "{db}");
+}
+
+/// Environments through MCP: `settings_set { environments, name_prefix, variables }`,
+/// `entity_update { environment }` (one entity, a selection, presence), what the export
+/// makes of them, and the cost estimate of one environment. `plan_run` answers in its
+/// own shape even where no tool or credentials make a plan.
+#[test]
+fn headless_environments() {
+    let server = start("three-tier.ttg.json");
+    let mut c = Client::new(&server);
+    c.initialize();
+    assert!(tool_names(&mut c).iter().any(|t| t == "plan_run"));
+    let (err, s) = c.call(
+        "settings_set",
+        json!({
+            "environments": ["pilot", "prod"],
+            "name_prefix": "tt-${var.environment}",
+            "variables": {"db_class": {"value": "db.t4g.small", "environments": {"prod": "db.r6g.large"}}},
+            "tool": "opentofu"
+        }),
+    );
+    assert!(!err, "{s}");
+    let (err, bad) = c.call("settings_set", json!({"environments": ["Prod"]}));
+    assert!(err, "upper case is refused: {bad}");
+    let (err, u) = c.call(
+        "entity_update",
+        json!({"entity": "app db", "environment": "prod", "config": {"high_availability": true},
+               "provider_config": {"aws": {"instance_class": "${var.db_class}"}}}),
+    );
+    assert!(!err, "{u}");
+    assert_eq!(
+        u["entities"][0]["overrides"]["config"]["high_availability"],
+        json!(true),
+        "{u}"
+    );
+    let (err, u) = c.call(
+        "entity_update",
+        json!({"select": {"types": ["nat_gateway"]}, "environment": "pilot", "present": false}),
+    );
+    assert!(!err, "{u}");
+    let (err, refused) = c.call(
+        "entity_update",
+        json!({"entity": "app db", "environment": "qa", "config": {}}),
+    );
+    assert!(err, "{refused}");
+    let (err, refused) = c.call("entity_update", json!({"entity": "app db", "present": false}));
+    assert!(err, "present needs an environment: {refused}");
+    let (_, p) = c.call("project_get", json!({"fields": ["settings", "nodes"]}));
+    assert_eq!(p["settings"]["environments"], json!(["pilot", "prod"]));
+    let (err, pre) = c.call("export_preview", json!({"provider": "aws"}));
+    assert!(!err, "{pre}");
+    let files = &pre["files"];
+    assert!(
+        files["environments/prod.tfvars"]
+            .as_str()
+            .unwrap()
+            .contains("db.r6g.large"),
+        "{files}"
+    );
+    assert!(
+        files["network.tf"].as_str().unwrap().contains("count"),
+        "the NAT is counted"
+    );
+    let (err, d) = c.call("diagnostics", json!({}));
+    assert!(!err, "{d}");
+    assert!(d["other_environments"].is_array(), "{d}");
+    let (err, cost) = c.call("cost_estimate", json!({"environment": "prod"}));
+    assert!(!err, "{cost}");
+    let (err, cost_pilot) = c.call("cost_estimate", json!({"environment": "pilot"}));
+    assert!(!err, "{cost_pilot}");
+    assert!(
+        cost["monthly"].as_f64().unwrap() > cost_pilot["monthly"].as_f64().unwrap(),
+        "prod (Multi-AZ, a NAT) costs more than pilot"
+    );
+    let dir = std::env::temp_dir().join(format!("ttg-headless-plan-{}", std::process::id()));
+    let (err, plan) = c.call(
+        "plan_run",
+        json!({"environment": "pilot", "dir": dir.to_string_lossy(), "vars": {"db_password": "x-not-real-x"}}),
+    );
+    assert!(!err, "{plan}");
+    assert!(
+        ["planned", "no_credentials", "failed", "binary_not_found"]
+            .contains(&plan["status"].as_str().unwrap()),
+        "{plan}"
+    );
+    assert!(
+        plan["entities"].is_array() && plan["diagnostics"].is_array(),
+        "{plan}"
+    );
+    let _ = std::fs::remove_dir_all(&dir);
 }

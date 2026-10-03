@@ -244,7 +244,7 @@ impl TtgApp {
     /// The entities a selector matches, in the order the project lists them. Refuses a
     /// selector with no criteria and one that matches nothing, both with a message that
     /// says what to give instead.
-    fn select_entities(&mut self, s: &Selector) -> Result<Vec<Id>, String> {
+    pub(super) fn select_entities(&mut self, s: &Selector) -> Result<Vec<Id>, String> {
         if s.is_empty() {
             return Err(
                 "the selection is empty: give `types`, `name_glob` and/or `ids` (an empty selector would match every entity, which no bulk edit means)"

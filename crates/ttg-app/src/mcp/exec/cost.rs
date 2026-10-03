@@ -52,15 +52,24 @@ impl TtgApp {
             ));
         }
         let mut notes: Vec<String> = Vec::new();
-        // Named environments are not part of the project yet. When they are, the project
-        // resolved for the environment is what gets estimated; the estimate itself only
-        // ever sees a `&Project`.
-        let project = &self.project;
-        if let Some(env) = &q.environment {
-            notes.push(format!(
-                "environment \"{env}\" ignored: this project has no named environments, so it is priced as drawn"
-            ));
+        // The project as it is in the environment asked for (or the one the canvas
+        // shows): overrides folded in, entities absent there left out, variables filled in.
+        let env = q.environment.clone().or_else(|| self.env.current.clone());
+        if let Some(e) = &env {
+            if !self.project.settings.environments.contains(e) {
+                return Err(if self.project.settings.environments.is_empty() {
+                    format!("the project has no environments, so there is no \"{e}\"")
+                } else {
+                    format!(
+                        "no environment \"{e}\" (environments: {})",
+                        self.project.settings.environments.join(", ")
+                    )
+                });
+            }
+            notes.push(format!("priced with the values of the \"{e}\" environment"));
         }
+        let resolved = self.project.resolved(env.as_deref());
+        let project: &ttg_core::Project = &resolved;
         let mut opts = cost::Options {
             region: q.region.clone(),
             ..Default::default()

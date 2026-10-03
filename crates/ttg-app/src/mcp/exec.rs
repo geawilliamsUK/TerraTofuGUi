@@ -23,6 +23,10 @@ mod cost;
 mod import;
 pub(crate) use import::import_check;
 
+// Environment settings and values, link environment tags, and the UI-thread halves of
+// `plan_run`.
+mod environments;
+
 /// What `entity_move` / `entity_resize` were pointed at. Resources live in the project;
 /// notes, logical nodes and grouping boxes live in one view, so they are only movable
 /// while that view is the one being worked on.
@@ -92,6 +96,7 @@ impl TtgApp {
             "config": e.config,
             "provider_config": e.provider_config,
             "extra": e.extra,
+            "overrides": self.project.overrides_of(id),
             "classification": e.classification,
             "description": e.description,
             "owner": e.owner,
@@ -1403,6 +1408,35 @@ impl TtgApp {
                 assumptions,
                 region,
             }),
+            // Environments and plans; their bodies live in `exec/environments.rs`.
+            AgentCommand::EnvSettings {
+                environments,
+                rename,
+                name_prefix,
+                variables,
+            } => self.env_settings(environments, rename, name_prefix, variables),
+            AgentCommand::EnvUpdate {
+                entity,
+                select,
+                environment,
+                config,
+                provider_config,
+                present,
+            } => self.env_update(entity, select, environment, config, provider_config, present),
+            AgentCommand::LinkEnvironments {
+                source,
+                target,
+                relation,
+                environments,
+            } => self.link_environments(source, target, relation, environments),
+            AgentCommand::PlanPrepare {
+                dir,
+                provider,
+                environment,
+                tool,
+            } => self.plan_prepare(dir, provider, environment, tool),
+            AgentCommand::Attribution { provider } => self.attribution_json(provider),
+            AgentCommand::PlanShow { report } => self.plan_show(report),
             AgentCommand::ExportDiff { dir, provider, k8s } => {
                 let provider = provider.unwrap_or(self.project.settings.target_provider.clone());
                 let g = ttg_codegen::generate(
@@ -1620,6 +1654,11 @@ impl TtgApp {
         }
         if f.field_type == FieldType::EntityRef && v.as_str() == Some("") {
             return Ok(None);
+        }
+        // A project variable reference (`${var.web_tasks}`) stands for a value of any
+        // type; it is checked once resolved, for each environment.
+        if let Some(s) = v.as_str().filter(|s| s.contains("${var.")) {
+            return Ok(Some(Value::Str(s.to_string())));
         }
         let mut val: Value =
             serde_json::from_value(v.clone()).map_err(|e| format!("field \"{}\": {e}", f.name))?;
@@ -1904,10 +1943,23 @@ impl TtgApp {
             .iter()
             .map(|d| one(self, d))
             .collect();
+        // Named environments: what the environments not shown would say, each tagged.
+        let other_envs: Vec<J> = self
+            .other_environment_diagnostics()
+            .to_vec()
+            .iter()
+            .map(|d| {
+                let mut j = one(self, &d.diagnostic);
+                j["environment"] = json!(d.environment);
+                j
+            })
+            .collect();
         json!({
             "provider": self.project.settings.target_provider,
+            "environment": self.env.current,
             "diagnostics": mine,
             "other_providers": others,
+            "other_environments": other_envs,
         })
     }
 
