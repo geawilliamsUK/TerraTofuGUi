@@ -62,6 +62,10 @@ pub enum Code {
     /// Two arguments of one generated block that the provider refuses together at plan
     /// time, though `validate` passes (`crate::conflicts`).
     Conflict,
+    /// Named environments: their names, the overrides entities carry, and differences
+    /// between environments the export cannot express as variables
+    /// (`crate::environments`).
+    Environment,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -99,7 +103,12 @@ pub struct Consumed {
 
 /// Run every catalog-aware check for the given target provider.
 pub fn run(full: &Project, cat: &Catalog, provider: &str) -> Vec<Diagnostic> {
-    let mut out = Vec::new();
+    // Environments, overrides and project variables are checked as written; everything
+    // else on the values they resolve to (the base values: an environment's own run is
+    // `run(&p.for_environment(env), …)`).
+    let mut out = crate::environments::checks(full, cat);
+    let resolved = full.resolved(None);
+    let full: &Project = &resolved;
     let push = |out: &mut Vec<Diagnostic>, entity: Option<&str>, sev, code, msg: String| {
         out.push(Diagnostic {
             entity: entity.map(|s| s.to_string()),
@@ -1665,7 +1674,7 @@ fn network_checks(p: &Project, cat: &Catalog, provider: &str, out: &mut Vec<Diag
                     .provider_field("aws", "availability_zone")
                     .and_then(|v| v.as_str())
                 {
-                    if !az.is_empty() && !az.starts_with(&region) {
+                    if !az.is_empty() && !az.starts_with(&region) && !crate::emit::is_zone_letter(az) {
                         push(
                             e.id,
                             Severity::Error,

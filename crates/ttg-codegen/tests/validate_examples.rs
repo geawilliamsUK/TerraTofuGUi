@@ -1,10 +1,13 @@
 //! Runs `tofu validate` / `terraform validate` on every example project for every
 //! provider that can be exported — every root of it, the `bootstrap/` root(s) included —
 //! and on `hardened` with each state backend and state encryption on, which is what
-//! produces the bootstrap roots. Every export must also already be formatted: `fmt -check
-//! -recursive` passes with each installed binary. Skips (passes) when neither binary is
-//! installed, so the ordinary test suite stays dependency-free; CI installs OpenTofu so it
-//! always runs there. Set `TTG_REQUIRE_VALIDATE=1` to make a missing binary a failure.
+//! produces the bootstrap roots, and on `three-tier` with environments that leave a
+//! resource out, a name prefix and a project variable (counts, `one()`, templates and
+//! `.tfvars`-driven variables on every provider). Every export must also already be
+//! formatted: `fmt -check -recursive` passes with each installed binary. Skips (passes)
+//! when neither binary is installed, so the ordinary test suite stays dependency-free; CI
+//! installs OpenTofu so it always runs there. Set `TTG_REQUIRE_VALIDATE=1` to make a
+//! missing binary a failure.
 
 use std::path::{Path, PathBuf};
 use ttg_catalog::Catalog;
@@ -92,6 +95,47 @@ fn state_variants() -> Vec<(String, Project)> {
         .collect()
 }
 
+/// `three-tier` (which already has `pilot` and `prod`) with the rest of what environments
+/// can say: the NAT gateway absent from pilot (counted, read through `one()`), a name
+/// prefix built from the environment, a project variable for the instance class, and a
+/// subnet whose zone is a letter that follows the region.
+fn environment_variants() -> Vec<(String, Project)> {
+    let mut p = ttg_core::project::load(
+        &Path::new(env!("CARGO_MANIFEST_DIR")).join("../../examples/three-tier.ttg.json"),
+    )
+    .unwrap();
+    p.settings.name_prefix = Some("tt-${var.environment}".into());
+    p.settings.variables.insert(
+        "db_class".into(),
+        ttg_core::ProjectVariable {
+            value: ttg_core::Value::Str("db.t4g.small".into()),
+            description: "RDS instance class".into(),
+            environments: [("prod".to_string(), ttg_core::Value::Str("db.r6g.large".into()))].into(),
+        },
+    );
+    for n in p.nodes.values_mut() {
+        match n.name.as_str() {
+            "nat" => {
+                n.overrides.entry("pilot".into()).or_default().absent = true;
+            }
+            "app db" => {
+                n.provider_config.entry("aws".into()).or_default().insert(
+                    "instance_class".into(),
+                    ttg_core::Value::Str("${var.db_class}".into()),
+                );
+            }
+            "web a" => {
+                n.provider_config
+                    .entry("aws".into())
+                    .or_default()
+                    .insert("availability_zone".into(), ttg_core::Value::Str("a".into()));
+            }
+            _ => {}
+        }
+    }
+    vec![("environments".to_string(), p)]
+}
+
 #[test]
 fn every_example_validates() {
     // Prefer OpenTofu; fall back to Terraform. Either validates both flavours of output
@@ -128,6 +172,7 @@ fn every_example_validates() {
         })
         .collect();
     projects.extend(state_variants());
+    projects.extend(environment_variants());
     let mut bootstraps = 0;
     for (stem, project) in &projects {
         cat.ensure_native_types(project);

@@ -62,6 +62,10 @@ pub struct Generated {
     /// What each entity produced, in dependency order, for callers that want to show
     /// one entity's HCL without slicing it out of a file (see [`Generated::entity_preview`]).
     pub entity_blocks: IndexMap<Id, EntityBlocks>,
+    /// The values that differ between the project's environments, each lifted into a
+    /// variable with one value per environment (`crate::environments`). Empty for a
+    /// project without environments.
+    pub lifted: Vec<crate::environments::Lifted>,
 }
 
 /// The blocks one entity produced, kept next to the rendered files.
@@ -71,8 +75,12 @@ pub struct EntityBlocks {
     pub file: String,
     /// `aws_s3_bucket.logs`, or `data.aws_iam_policy_document.role_trust` for a data source.
     pub addresses: Vec<String>,
-    comment: String,
-    blocks: Vec<Block>,
+    /// First and last line (1-based, inclusive) of the entity's section of `file`: its
+    /// `# ---` introduction and its blocks. A tool diagnostic whose range starts inside
+    /// is about this entity.
+    pub lines: (usize, usize),
+    pub(crate) comment: String,
+    pub(crate) blocks: Vec<Block>,
 }
 
 impl EntityBlocks {
@@ -109,6 +117,28 @@ pub struct EntityPreview {
 }
 
 impl Generated {
+    /// Every resource and data-source address in the export, mapped to the entity that
+    /// produced it. A plan's `resource_changes[].address` (with any `[index]` dropped)
+    /// looks up here.
+    pub fn address_map(&self) -> std::collections::BTreeMap<String, Id> {
+        self.entity_blocks
+            .iter()
+            .flat_map(|(id, b)| b.addresses.iter().map(move |a| (a.clone(), id.clone())))
+            .collect()
+    }
+
+    /// The entity whose blocks cover `line` (1-based) of `file`, a path relative to the
+    /// export directory. `None` for the files no entity owns (`variables.tf`,
+    /// `versions.tf`, …) and for the lines between sections.
+    pub fn entity_at(&self, file: &str, line: usize) -> Option<&Id> {
+        let file = file.replace('\\', "/");
+        let file = file.trim_start_matches("./");
+        self.entity_blocks
+            .iter()
+            .find(|(_, b)| b.file == file && b.lines.0 <= line && line <= b.lines.1)
+            .map(|(id, _)| id)
+    }
+
     /// Slice one entity's share out of this export. `p` and `cat` must be what it was
     /// generated from. The blocks are the ones the emitter recorded for the entity, so
     /// a repeated block (one per rule, one per add-on) comes back as every instance.
@@ -251,7 +281,24 @@ struct Emitter<'a> {
 
 /// Generate the complete file set for one provider. Errors if diagnostics contain any
 /// `Error`, or if a mapping cannot be resolved.
+///
+/// A project with named environments is generated once per environment and the results
+/// merged into one root whose differing values are variables, with a `.tfvars` and a
+/// backend configuration per environment (`crate::environments`); a project without is
+/// generated exactly once, as it always was.
 pub fn generate(p: &Project, cat: &Catalog, provider: &str, tool: Tool) -> Result<Generated, GenError> {
+    if p.settings.environments.is_empty() {
+        // Project variables (and the name prefix) still have their base values to fill in.
+        generate_one(&p.resolved(None), cat, provider, tool)
+    } else {
+        crate::environments::generate(p, cat, provider, tool)
+    }
+}
+
+/// [`generate`] for one set of values: the project exactly as given, its overrides
+/// ignored. The environments module calls it once per environment, on the project
+/// resolved for that environment.
+pub fn generate_one(p: &Project, cat: &Catalog, provider: &str, tool: Tool) -> Result<Generated, GenError> {
     if cat.provider(provider).is_none() {
         return Err(GenError::UnknownProvider(provider.to_string()));
     }
@@ -550,7 +597,6 @@ pub(crate) fn emit_unchecked(
     let header = em.profile.file_header(&pdef.provider.display_name);
     let mut files: IndexMap<String, String> = IndexMap::new();
 
-    let mut by_file: IndexMap<String, Vec<(String, Vec<Block>)>> = IndexMap::new();
     let mut entity_blocks: IndexMap<Id, EntityBlocks> = IndexMap::new();
     for id in &order {
         let e = p.entity(id).unwrap();
@@ -579,18 +625,13 @@ pub(crate) fn emit_unchecked(
                         _ => format!("{}.{}", b.resource_type, b.local),
                     })
                     .collect(),
-                comment: comment.clone(),
-                blocks: blocks.clone(),
+                lines: (0, 0),
+                comment,
+                blocks,
             },
         );
-        by_file.entry(file).or_default().push((comment, blocks));
     }
-    let mut file_names: Vec<String> = by_file.keys().cloned().collect();
-    file_names.sort();
-    for name in file_names {
-        let content = files::render_resource_file(&header, &by_file[&name]);
-        files.insert(format!("{name}.tf"), content);
-    }
+    files.extend(render_entity_files(&header, &mut entity_blocks));
     let moves = if LEGACY_INDEX_MOVES {
         let written: HashSet<String> = emitted
             .iter()
@@ -620,7 +661,12 @@ pub(crate) fn emit_unchecked(
     // The state: backend and encryption go into the same `terraform {}` block as the
     // version constraints, so `versions.tf` says everything `init` needs to know.
     let mut state_blocks = Vec::new();
-    if let Some(cfg) = state::configured_backend(p) {
+    if !p.settings.environments.is_empty() {
+        // One state per environment: the key (or path) is left to each environment's
+        // `-backend-config` file, and a project without a backend keeps its local
+        // states apart too.
+        state_blocks.push(state::partial_backend_block(p));
+    } else if let Some(cfg) = state::configured_backend(p) {
         state_blocks.push(state::backend_block(p, &cfg, None));
     }
     if let Some(plan) = &encryption {
@@ -704,7 +750,46 @@ pub(crate) fn emit_unchecked(
         manual_steps: em.manual,
         diagnostics: diags,
         entity_blocks,
+        lifted: Vec::new(),
     })
+}
+
+/// The resource files, one per file name in name order, each rendered from its
+/// entities' blocks in dependency order; fills in each entity's line range as it goes.
+pub(crate) fn render_entity_files(
+    header: &str,
+    entity_blocks: &mut IndexMap<Id, EntityBlocks>,
+) -> IndexMap<String, String> {
+    let mut names: Vec<String> = Vec::new();
+    for b in entity_blocks.values() {
+        if !names.contains(&b.file) {
+            names.push(b.file.clone());
+        }
+    }
+    names.sort();
+    let mut out = IndexMap::new();
+    for name in names {
+        let ids: Vec<Id> = entity_blocks
+            .iter()
+            .filter(|(_, b)| b.file == name)
+            .map(|(id, _)| id.clone())
+            .collect();
+        let entries: Vec<(String, Vec<Block>)> = ids
+            .iter()
+            .map(|id| {
+                (
+                    entity_blocks[id].comment.clone(),
+                    entity_blocks[id].blocks.clone(),
+                )
+            })
+            .collect();
+        let (content, lines) = files::render_resource_file_with_lines(header, &entries);
+        for (id, l) in ids.iter().zip(lines) {
+            entity_blocks.get_mut(id).unwrap().lines = l;
+        }
+        out.insert(name, content);
+    }
+    out
 }
 
 /// The first manual step of an export with a bootstrap root: apply that root first, then
@@ -851,7 +936,7 @@ fn provider_ref(local_name: &str, alias: &str) -> Expression {
     ))
 }
 
-fn var_ref(name: &str) -> Expression {
+pub(crate) fn var_ref(name: &str) -> Expression {
     Expression::Traversal(Box::new(
         Traversal::builder(Variable::unchecked("var")).attr(name).build(),
     ))
@@ -1155,7 +1240,7 @@ pub(crate) fn toml_expr(v: &toml::Value) -> Option<Expression> {
     })
 }
 
-fn value_expr(v: &Value) -> Expression {
+pub(crate) fn value_expr(v: &Value) -> Expression {
     match v {
         Value::Bool(b) => Expression::Bool(*b),
         Value::Int(i) => Expression::Number(Number::from(*i)),
@@ -1239,6 +1324,12 @@ fn transformed(v: &Value, t: Option<ttg_catalog::Transform>) -> Value {
         (Some(t), Value::List(l)) => Value::List(l.iter().map(|s| t.apply(s)).collect()),
         _ => v.clone(),
     }
+}
+
+/// A zone given as its letter alone (`a`), to be put after the region's name.
+pub fn is_zone_letter(z: &str) -> bool {
+    let z = z.trim();
+    z.len() == 1 && z.chars().all(|c| c.is_ascii_lowercase())
 }
 
 /// Scalar value of a field or provider field, used for lookups and rows.
@@ -1685,7 +1776,8 @@ impl<'a> Emitter<'a> {
             ArgSource::Literal(l) => toml_expr(&l.value),
             ArgSource::Field(f) => {
                 let v = if f.field == "name" {
-                    Some(Value::Str(e.name.to_string()))
+                    // The provider-facing name: the display name behind the name prefix.
+                    Some(Value::Str(self.p.resource_name(e.name)))
                 } else {
                     e.field(&f.field).cloned()
                 };
@@ -1703,8 +1795,14 @@ impl<'a> Emitter<'a> {
             ArgSource::ProviderField(f) => match e
                 .provider_field(self.provider, &f.provider_field)
                 .filter(|v| !v.is_empty())
-                .and_then(|v| shaped_field(v, f.column.as_deref(), f.transform, f.wrap))
-            {
+                .and_then(|v| match (&f.zone_of, v.as_str()) {
+                    // A bare zone letter follows the region variable.
+                    (Some(region), Some(z)) if is_zone_letter(z) => {
+                        self.used_vars.insert(region.clone());
+                        Some(raw_expr(&format!("\"${{var.{region}}}{}\"", z.trim())))
+                    }
+                    _ => shaped_field(v, f.column.as_deref(), f.transform, f.wrap),
+                }) {
                 Some(x) => Some(x),
                 None => match &f.fallback {
                     Some(fb) => self.resolve(e, m, fb, &format!("{at}.fallback"), item)?,
@@ -1877,10 +1975,12 @@ impl<'a> Emitter<'a> {
                         let Some(te) = self.p.entity(&subject) else {
                             continue;
                         };
-                        let Some(v) =
+                        let read = if name == "name" {
+                            Some(Value::Str(self.p.resource_name(te.name)))
+                        } else {
                             diagnostics::field_or_default(self.cat, self.provider, &te, name, false)
-                                .filter(|v| !v.is_empty())
-                        else {
+                        };
+                        let Some(v) = read.filter(|v| !v.is_empty()) else {
                             continue;
                         };
                         exprs.push(value_expr(&transformed(&v, r.transform)));
@@ -2203,7 +2303,7 @@ impl<'a> Emitter<'a> {
             };
             let ph = &after[..end];
             let val = if ph == "name" {
-                Some(e.name.to_string())
+                Some(self.p.resource_name(e.name))
             } else if let Some(pf) = ph.strip_prefix("provider.") {
                 e.provider_field(self.provider, pf).map(|v| v.display())
             } else if let Some(s) = ph.strip_prefix("settings.") {

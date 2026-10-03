@@ -100,6 +100,21 @@ pub struct Settings {
     /// Also show cost estimates in this currency, at a fixed rate. Prices are USD.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cost_currency: Option<crate::DisplayCurrency>,
+    /// Named environments (`pilot`, `prod`), in order. Empty: the project has none and
+    /// exports exactly as before. Entities override field values per environment
+    /// (`overrides`); the export keeps one root per provider, with a `.tfvars` and a
+    /// state key per environment (see `crate::environment`).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub environments: Vec<String>,
+    /// Put in front of every generated resource name (`zipos-${var.environment}` gives
+    /// `zipos-staging-db`), so environments can share one account. May use project
+    /// variables, `${var.environment}` among them.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub name_prefix: Option<String>,
+    /// Project variables: declared once, used in any field value as `${var.<name>}`,
+    /// with a value per environment (see `crate::environment`).
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub variables: BTreeMap<String, crate::environment::ProjectVariable>,
 }
 
 fn default_provider() -> String {
@@ -120,6 +135,9 @@ impl Default for Settings {
             kubernetes_manifests: false,
             cost_assumptions: Default::default(),
             cost_currency: None,
+            environments: Vec::new(),
+            name_prefix: None,
+            variables: BTreeMap::new(),
         }
     }
 }
@@ -250,6 +268,10 @@ pub struct Node {
     /// Who looks after it: a team or a person. Emitted as an `Owner` tag / `owner` label.
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub owner: String,
+    /// Field values that differ per named environment (`settings.environments`):
+    /// environment -> the values replacing `config` / `provider_config` there.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub overrides: crate::environment::Overrides,
 }
 
 /// A resource that can hold other resources (VPC, Resource Group, Project).
@@ -286,6 +308,10 @@ pub struct Container {
     /// Who looks after it (see `Node::owner`).
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub owner: String,
+    /// Field values that differ per named environment (`settings.environments`):
+    /// environment -> the values replacing `config` / `provider_config` there.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub overrides: crate::environment::Overrides,
 }
 
 /// Kinds of relationship an edge can express. Direction is always
@@ -380,6 +406,10 @@ pub struct Edge {
     /// Providers this link is part of (empty = every provider).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub providers: Vec<ProviderId>,
+    /// Named environments this link is part of (empty = every environment), so prod's
+    /// second route table can take over a subnet that pilot routes through the first.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub environments: Vec<String>,
 }
 
 /// Where an edge attaches to its endpoints. Absent means automatic.
@@ -1016,6 +1046,7 @@ impl Project {
             relation,
             layout: None,
             providers: Vec::new(),
+            environments: Vec::new(),
         });
         true
     }
@@ -1372,6 +1403,7 @@ mod tests {
                     classification: None,
                     description: String::new(),
                     owner: String::new(),
+                    overrides: Default::default(),
                 },
             );
         }

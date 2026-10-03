@@ -134,6 +134,27 @@
               "type": "null"
             }
           ]
+        },
+        "environments": {
+          "description": "Named environments (`pilot`, `prod`), in order. Empty: the project has none and\nexports exactly as before. Entities override field values per environment\n(`overrides`); the export keeps one root per provider, with a `.tfvars` and a\nstate key per environment (see `crate::environment`).",
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "name_prefix": {
+          "description": "Put in front of every generated resource name (`zipos-${var.environment}` gives\n`zipos-staging-db`), so environments can share one account. May use project\nvariables, `${var.environment}` among them.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "variables": {
+          "description": "Project variables: declared once, used in any field value as `${var.<name>}`,\nwith a value per environment (see `crate::environment`).",
+          "type": "object",
+          "additionalProperties": {
+            "$ref": "#/$defs/ProjectVariable"
+          }
         }
       }
     },
@@ -211,6 +232,63 @@
       "required": [
         "code",
         "rate"
+      ]
+    },
+    "ProjectVariable": {
+      "description": "A project variable: declared once in the settings, used in field values as\n`${var.<name>}`, given a value per environment. Where the values differ the export\ndeclares it as a Terraform variable of the same name, set in each environment's\n`.tfvars`; where they do not, the value is written in place.",
+      "type": "object",
+      "properties": {
+        "value": {
+          "description": "The value outside any environment, and in every environment without its own.",
+          "$ref": "#/$defs/Value"
+        },
+        "description": {
+          "type": "string"
+        },
+        "environments": {
+          "description": "Environment → its value.",
+          "type": "object",
+          "additionalProperties": {
+            "$ref": "#/$defs/Value"
+          }
+        }
+      },
+      "required": [
+        "value"
+      ]
+    },
+    "Value": {
+      "anyOf": [
+        {
+          "type": "boolean"
+        },
+        {
+          "type": "integer",
+          "format": "int64"
+        },
+        {
+          "type": "number",
+          "format": "double"
+        },
+        {
+          "type": "string"
+        },
+        {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        {
+          "description": "Rows of a `struct_list` field (schema_version 2 definitions).",
+          "type": "array",
+          "items": {
+            "type": "object",
+            "additionalProperties": {
+              "$ref": "#/$defs/Value"
+            }
+          }
+        }
       ]
     },
     "Container": {
@@ -304,46 +382,19 @@
         "owner": {
           "description": "Who looks after it (see `Node::owner`).",
           "type": "string"
+        },
+        "overrides": {
+          "description": "Field values that differ per named environment (`settings.environments`):\nenvironment -> the values replacing `config` / `provider_config` there.",
+          "type": "object",
+          "additionalProperties": {
+            "$ref": "#/$defs/EnvOverride"
+          }
         }
       },
       "required": [
         "id",
         "name",
         "container_type"
-      ]
-    },
-    "Value": {
-      "anyOf": [
-        {
-          "type": "boolean"
-        },
-        {
-          "type": "integer",
-          "format": "int64"
-        },
-        {
-          "type": "number",
-          "format": "double"
-        },
-        {
-          "type": "string"
-        },
-        {
-          "type": "array",
-          "items": {
-            "type": "string"
-          }
-        },
-        {
-          "description": "Rows of a `struct_list` field (schema_version 2 definitions).",
-          "type": "array",
-          "items": {
-            "type": "object",
-            "additionalProperties": {
-              "$ref": "#/$defs/Value"
-            }
-          }
-        }
       ]
     },
     "Position": {
@@ -403,6 +454,33 @@
           "const": "payment"
         }
       ]
+    },
+    "EnvOverride": {
+      "description": "What one environment changes on one entity. A value here replaces the entity's own\nvalue for that field in that environment; a field without one keeps the base value.\nAn override cannot remove a value, only replace it.",
+      "type": "object",
+      "properties": {
+        "config": {
+          "description": "Abstract field values, as in the entity's `config`.",
+          "type": "object",
+          "additionalProperties": {
+            "$ref": "#/$defs/Value"
+          }
+        },
+        "provider_config": {
+          "description": "Provider field values, as in the entity's `provider_config`.",
+          "type": "object",
+          "additionalProperties": {
+            "type": "object",
+            "additionalProperties": {
+              "$ref": "#/$defs/Value"
+            }
+          }
+        },
+        "absent": {
+          "description": "The entity does not exist in this environment: it, and every link to and from it,\nis left out there (a container's contents move up to its parent).",
+          "type": "boolean"
+        }
+      }
     },
     "Node": {
       "description": "A leaf resource on the canvas.",
@@ -500,6 +578,13 @@
         "owner": {
           "description": "Who looks after it: a team or a person. Emitted as an `Owner` tag / `owner` label.",
           "type": "string"
+        },
+        "overrides": {
+          "description": "Field values that differ per named environment (`settings.environments`):\nenvironment -> the values replacing `config` / `provider_config` there.",
+          "type": "object",
+          "additionalProperties": {
+            "$ref": "#/$defs/EnvOverride"
+          }
         }
       },
       "required": [
@@ -533,6 +618,13 @@
         },
         "providers": {
           "description": "Providers this link is part of (empty = every provider).",
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "environments": {
+          "description": "Named environments this link is part of (empty = every environment), so prod's\nsecond route table can take over a subnet that pilot routes through the first.",
           "type": "array",
           "items": {
             "type": "string"

@@ -7,7 +7,7 @@ use hcl::{Block, Expression, Identifier, Object, ObjectKey};
 use ttg_catalog::{Catalog, HelperProviderDef, ProviderDef};
 use ttg_core::Project;
 
-fn fmt_block(b: &Block) -> String {
+pub(crate) fn fmt_block(b: &Block) -> String {
     let s = hcl::format::to_string(b).expect("hcl formatting cannot fail for a built tree");
     let mut s = collapse_empty_braces(&align_attributes(&space_object_for(&s)));
     while s.ends_with("\n\n") {
@@ -96,16 +96,32 @@ fn collapse_empty_braces(s: &str) -> String {
 
 /// A `.tf` file of resource blocks, each entity introduced by a comment.
 pub fn render_resource_file(header: &str, entries: &[(String, Vec<Block>)]) -> String {
+    render_resource_file_with_lines(header, entries).0
+}
+
+/// [`render_resource_file`], plus the first and last line (1-based, inclusive) of each
+/// entry: its `# ---` comment through the end of its last block. `validate -json` and
+/// `plan -json` report errors by file and line, and this is how they find their entity.
+pub fn render_resource_file_with_lines(
+    header: &str,
+    entries: &[(String, Vec<Block>)],
+) -> (String, Vec<(usize, usize)>) {
     let mut out = String::from(header);
+    let mut lines = Vec::with_capacity(entries.len());
+    let newlines = |s: &str| s.bytes().filter(|b| *b == b'\n').count();
     for (comment, blocks) in entries {
         out.push('\n');
+        let first = newlines(&out) + 1;
         out.push_str(&format!("# --- {comment}\n"));
         for b in blocks {
             out.push_str(&fmt_block(b));
             out.push('\n');
         }
+        // Every block ends in a newline and is followed by a blank line; the last line
+        // of the entry is the one before that blank.
+        lines.push((first, newlines(&out) - 1));
     }
-    out
+    (out, lines)
 }
 
 pub fn render_variables(header: &str, vars: &[&VarSpec]) -> String {
@@ -325,25 +341,44 @@ impl StateSummary {
         roots: &[crate::state::BootstrapRoot],
     ) -> StateSummary {
         use crate::state::{self, KeySource};
+        // With named environments there is one state per environment; list them all.
+        let envs: Vec<Option<&str>> = if p.settings.environments.is_empty() {
+            vec![None]
+        } else {
+            p.settings.environments.iter().map(|e| Some(e.as_str())).collect()
+        };
+        let each = |f: &dyn Fn(Option<&str>) -> String| {
+            envs.iter()
+                .map(|e| match e {
+                    Some(name) => format!("{} ({name})", f(*e)),
+                    None => f(None),
+                })
+                .collect::<Vec<_>>()
+                .join(", ")
+        };
         let backend = state::configured_backend(p)
             .filter(|b| b.backend_type != "local")
             .map(|b| {
                 let at = match b.backend_type.as_str() {
-                    "s3" => format!(
-                        "s3://{}/{}",
-                        b.args.get("bucket").cloned().unwrap_or_default(),
-                        state::state_key(p, &b, None)
-                    ),
-                    "gcs" => format!(
-                        "gs://{}/{}/default.tfstate",
-                        b.args.get("bucket").cloned().unwrap_or_default(),
-                        state::state_prefix(p, &b, None)
-                    ),
+                    "s3" => each(&|e| {
+                        format!(
+                            "s3://{}/{}",
+                            b.args.get("bucket").cloned().unwrap_or_default(),
+                            state::state_key(p, &b, e)
+                        )
+                    }),
+                    "gcs" => each(&|e| {
+                        format!(
+                            "gs://{}/{}/default.tfstate",
+                            b.args.get("bucket").cloned().unwrap_or_default(),
+                            state::state_prefix(p, &b, e)
+                        )
+                    }),
                     _ => format!(
-                        "storage account `{}`, container `{}`, blob `{}`",
+                        "storage account `{}`, container `{}`, blob {}",
                         b.args.get("storage_account_name").cloned().unwrap_or_default(),
                         b.args.get("container_name").cloned().unwrap_or_default(),
-                        state::state_key(p, &b, None)
+                        each(&|e| format!("`{}`", state::state_key(p, &b, e)))
                     ),
                 };
                 (b.backend_type.clone(), at)
@@ -379,9 +414,13 @@ impl StateSummary {
                 (r.dir.clone(), what)
             })
             .collect();
-        let local_path = state::configured_backend(p)
-            .and_then(|b| b.args.get("path").cloned())
-            .unwrap_or("terraform.tfstate".into());
+        let local_path = if p.settings.environments.is_empty() {
+            state::configured_backend(p)
+                .and_then(|b| b.args.get("path").cloned())
+                .unwrap_or("terraform.tfstate".into())
+        } else {
+            each(&|e| format!("`{}`", state::environment_arg_value(p, e.unwrap_or_default()).1))
+        };
         StateSummary {
             backend,
             local_path,
@@ -400,10 +439,17 @@ pub fn render_readme(
     state: &StateSummary,
 ) -> String {
     let bin = profile.binary();
+    let usage = match p.settings.environments.first() {
+        None => format!("{bin} init\n{bin} validate\n{bin} plan\n{bin} apply"),
+        Some(env) => format!(
+            "{bin} init -reconfigure -backend-config=environments/{env}.backend.hcl\n{bin} validate\n\
+             {bin} plan -var-file=environments/{env}.tfvars -out={env}.tfplan\n{bin} apply {env}.tfplan"
+        ),
+    };
     let mut s = format!(
         "# {} — {} ({})\n\n\
          Generated by TerraTofu GUI. Provider: **{}** (`{}` {}).\n\n\
-         ## Usage\n\n```\n{bin} init\n{bin} validate\n{bin} plan\n{bin} apply\n```\n\n\
+         ## Usage\n\n```\n{usage}\n```\n\n\
          Input variables are declared in `variables.tf`; put values in a `terraform.tfvars` file \
          or pass `-var`. Provider docs: {}\n",
         p.name,
@@ -448,10 +494,14 @@ pub fn render_readme(
             }
         )),
         None => s.push_str(&format!(
-            "The state is a local file (`{}`). It records every attribute of every resource, \
+            "The state is a local file ({}). It records every attribute of every resource, \
              generated secrets included: configure a remote backend and, with OpenTofu, state \
              encryption in the app's Settings before sharing it.\n",
-            state.local_path
+            if p.settings.environments.is_empty() {
+                format!("`{}`", state.local_path)
+            } else {
+                format!("one per environment: {}", state.local_path)
+            }
         )),
     }
     match &state.encryption {

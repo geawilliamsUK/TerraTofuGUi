@@ -929,6 +929,12 @@ pub struct SrcProviderField {
     /// the rows (v2). Mutually exclusive with `wrap` and `transform`.
     #[serde(default)]
     pub column: Option<String>,
+    /// The value is a zone of the region held by this provider variable: a full zone
+    /// name (`eu-west-2a`) is written as it is, a bare zone letter (`a`) as
+    /// `"${var.<zone_of>}a"`, so the zone follows the region. Not with `wrap`, `transform`
+    /// or `column`.
+    #[serde(default)]
+    pub zone_of: Option<String>,
 }
 #[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]

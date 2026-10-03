@@ -34,7 +34,21 @@ fn manifest_file(name: &str) -> bool {
     name.ends_with(".yaml") || name.ends_with(".sh") || name.ends_with(".ps1") || name == "README.md"
 }
 
+/// Each environment's values, backend configuration and (when they differ) manual steps.
+/// A `*.auto.tfvars` file is someone else's: the tools load it on their own, and the
+/// export never writes one.
+fn environment_file(name: &str) -> bool {
+    name.ends_with(".backend.hcl")
+        || name.ends_with(".MANUAL_STEPS.md")
+        || (name.ends_with(".tfvars") && !name.ends_with(".auto.tfvars"))
+}
+
 const OWNED: &[OwnedDir] = &[
+    OwnedDir {
+        dir: crate::environments::DIR,
+        deep: false,
+        owns: environment_file,
+    },
     OwnedDir {
         dir: "",
         deep: false,
@@ -147,6 +161,7 @@ mod tests {
             manual_steps: Vec::new(),
             diagnostics: Vec::new(),
             entity_blocks: Default::default(),
+            lifted: Vec::new(),
         }
     }
 

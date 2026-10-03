@@ -13,7 +13,11 @@
       }
     },
     "backend": null,
-    "state_encryption": false
+    "state_encryption": false,
+    "environments": [
+      "pilot",
+      "prod"
+    ]
   },
   "containers": {
     "rg-1a2b3c4d": {
@@ -305,7 +309,15 @@
         "y": 620
       },
       "parent": "vnet-5e6f7a8b",
-      "manual": false
+      "manual": false,
+      "overrides": {
+        "prod": {
+          "config": {
+            "high_availability": true,
+            "backup_retention_days": 14
+          }
+        }
+      }
     },
     "sg-4d5e6f7a": {
       "id": "sg-4d5e6f7a",

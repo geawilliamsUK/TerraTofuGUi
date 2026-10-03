@@ -37,7 +37,7 @@ status = "full"
 name = "availability_zone"
 label = "Availability zone"
 type = "string"
-description = "Optional AZ, e.g. eu-west-2a. Leave empty to let AWS choose."
+description = "Optional AZ: a full name (eu-west-2a), or just its letter (a) to follow the region setting, so the same diagram deploys to another region. Leave empty to let AWS choose."
 
 [[providers.aws.fields]]
 name = "map_public_ip"
@@ -52,7 +52,7 @@ resource = "aws_subnet"
 [providers.aws.blocks.args]
 vpc_id                  = { relation = "network_membership", attr = "id" }
 cidr_block              = { field = "cidr_block" }
-availability_zone       = { provider_field = "availability_zone", optional = true }
+availability_zone       = { provider_field = "availability_zone", optional = true, zone_of = "region" }
 map_public_ip_on_launch = { provider_field = "map_public_ip", optional = true }
 tags                    = { object = { Name = { field = "name" } } }
 

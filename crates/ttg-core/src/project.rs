@@ -114,6 +114,7 @@ mod tests {
                 classification: None,
                 description: String::new(),
                 owner: String::new(),
+                overrides: Default::default(),
             },
         );
         let s = to_string(&p).unwrap();

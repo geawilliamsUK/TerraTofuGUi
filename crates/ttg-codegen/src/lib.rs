@@ -18,6 +18,7 @@ pub mod diagnostics;
 pub mod diff;
 pub mod edge;
 pub mod emit;
+pub mod environments;
 pub mod files;
 pub mod k8s;
 pub mod layers;

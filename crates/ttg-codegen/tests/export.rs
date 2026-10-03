@@ -1626,7 +1626,8 @@ fn helper_provider_is_only_required_when_used() {
 #[test]
 fn older_projects_gain_the_safe_defaults() {
     let cat = Catalog::builtin();
-    let p = example("three-tier.ttg.json");
+    // Pilot: the example's prod overrides the database's backup retention.
+    let p = example("three-tier.ttg.json").for_environment("pilot");
     let norm = |s: &str| s.split_whitespace().collect::<Vec<_>>().join(" ");
     let g = generate(&p, &cat, "aws", Tool::OpenTofu).unwrap();
     let st = norm(&g.files["storage.tf"]);
@@ -4455,4 +4456,31 @@ fn owner_and_description_become_tags_labels_and_comments() {
     // AWS keeps the project's tags on the provider, where the resource's value wins.
     let g = generate(&p, &cat, "aws", Tool::OpenTofu).unwrap();
     assert!(norm(&g.files["providers.tf"]).contains("Owner = \"platform\""));
+}
+
+/// `zone_of`: a subnet's zone given as its letter follows the region variable, so the
+/// diagram deploys to another region unchanged; a full zone name stays as written, and
+/// the zone check accepts the letter.
+#[test]
+fn a_zone_letter_follows_the_region() {
+    let mut p = example("three-tier.ttg.json");
+    let a = p
+        .nodes
+        .values_mut()
+        .find(|n| n.name == "web a")
+        .expect("subnet web a");
+    a.provider_config
+        .get_mut("aws")
+        .unwrap()
+        .insert("availability_zone".into(), ttg_core::Value::Str("a".into()));
+    let cat = Catalog::builtin();
+    let d = ttg_codegen::diagnostics::run(&p, &cat, "aws");
+    assert!(!d.iter().any(|x| x.message.contains("is not in region")), "{d:?}");
+    let g = generate(&p, &cat, "aws", Tool::OpenTofu).unwrap();
+    let net = &g.files["network.tf"];
+    assert!(
+        net.contains("availability_zone       = \"${var.region}a\""),
+        "{net}"
+    );
+    assert!(net.contains("\"eu-west-2b\""), "full names stay");
 }

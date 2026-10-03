@@ -423,6 +423,7 @@ mod tests {
                 classification: None,
                 description: String::new(),
                 owner: String::new(),
+                overrides: Default::default(),
             },
         );
         for (id, x) in [("a", 100), ("b", 400)] {
@@ -443,6 +444,7 @@ mod tests {
                     classification: None,
                     description: String::new(),
                     owner: String::new(),
+                    overrides: Default::default(),
                 },
             );
         }

@@ -7,6 +7,7 @@
 
 pub mod cidr;
 pub mod cost;
+pub mod environment;
 pub mod flow_layout;
 pub mod graph;
 pub mod ir;
@@ -21,6 +22,7 @@ pub mod value;
 pub mod view;
 
 pub use cost::{CostAssumptions, DisplayCurrency};
+pub use environment::{EnvOverride, Overrides, ProjectVariable};
 pub use ir::*;
 pub use value::{Record, Value};
 

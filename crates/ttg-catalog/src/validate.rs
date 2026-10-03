@@ -1193,6 +1193,18 @@ fn check_source(ctx: &mut SourceCtx, at: &str, src: &ArgSource, errs: &mut Vec<S
                 ctx.v2 = true;
                 check_source(ctx, &format!("{at}.fallback"), fb, errs);
             }
+            if let Some(region) = &f.zone_of {
+                if !ctx.vars.contains(&region.as_str()) {
+                    errs.push(e(format!(
+                        "zone_of names '{region}', which is not a variable of this provider"
+                    )));
+                }
+                if f.wrap.is_some() || f.transform.is_some() || f.column.is_some() {
+                    errs.push(e(
+                        "zone_of cannot be combined with wrap, transform or column".into()
+                    ));
+                }
+            }
         }
         ArgSource::Var(v) => {
             if !ctx.vars.contains(&v.var.as_str()) {

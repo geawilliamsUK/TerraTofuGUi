@@ -241,9 +241,9 @@ pub fn backend_from_json(v: &serde_json::Value) -> Result<Option<BackendConfig>,
 
 /// The folder the state is kept under: `<key_prefix>` (the `gcs` backend's own
 /// `prefix` is accepted for it; default: the project name in kebab case), then the
-/// environment when there is one. Named environments are a later package; every caller
-/// passes `None` today, and the key already has room for one:
-/// `<key_prefix>/<environment>/terraform.tfstate`.
+/// environment when there is one: `<key_prefix>/<environment>/terraform.tfstate`. A
+/// project with named environments writes that per environment into
+/// `environments/<env>.backend.hcl` ([`environment_arg_value`]).
 pub fn state_prefix(p: &Project, cfg: &BackendConfig, environment: Option<&str>) -> String {
     let base = ["key_prefix", "prefix"]
         .iter()
@@ -316,6 +316,68 @@ pub fn backend_block(p: &Project, cfg: &BackendConfig, environment: Option<&str>
         }
     };
     b.build()
+}
+
+/// The backend a project with environments writes: the configured one, or a `local`
+/// backend when none is, so that each environment still gets a state of its own.
+pub fn environment_backend(p: &Project) -> BackendConfig {
+    configured_backend(p).unwrap_or(BackendConfig {
+        backend_type: "local".into(),
+        args: Default::default(),
+    })
+}
+
+/// The one argument of a backend that differs per environment: the object key (`s3`,
+/// `azurerm`), the prefix (`gcs`) or the file (`local`).
+pub fn environment_arg(backend_type: &str) -> &'static str {
+    match backend_type {
+        "s3" | "azurerm" => "key",
+        "gcs" => "prefix",
+        _ => "path",
+    }
+}
+
+/// `backend "<type>" { … }` without the argument that differs per environment: a
+/// partial configuration, completed at `init` by `-backend-config=environments/<env>.backend.hcl`.
+pub fn partial_backend_block(p: &Project) -> Block {
+    let cfg = environment_backend(p);
+    let full = backend_block(p, &cfg, None);
+    let drop = environment_arg(&cfg.backend_type);
+    let mut b = Block::builder("backend");
+    for l in full.labels.iter() {
+        b = b.add_label(l.clone());
+    }
+    for s in full.body.iter() {
+        match s {
+            hcl::Structure::Attribute(a) if a.key() == drop => {}
+            other => b = b.add_structure(other.clone()),
+        }
+    }
+    b.build()
+}
+
+/// The value of [`environment_arg`] for one environment: the state key with the
+/// environment in it (`<key_prefix>/<env>/terraform.tfstate`), the `gcs` prefix, or for
+/// local state `terraform.tfstate.d/<env>/terraform.tfstate` — where workspaces would
+/// keep it — or the configured path with the environment put before its file name.
+pub fn environment_arg_value(p: &Project, env: &str) -> (String, String) {
+    let cfg = environment_backend(p);
+    let arg = environment_arg(&cfg.backend_type);
+    let value = match cfg.backend_type.as_str() {
+        "s3" | "azurerm" => state_key(p, &cfg, Some(env)),
+        "gcs" => state_prefix(p, &cfg, Some(env)),
+        _ => {
+            let env = env_segment(Some(env)).unwrap_or_default();
+            match cfg.args.get("path").map(|s| s.trim()).filter(|s| !s.is_empty()) {
+                Some(path) => match path.rsplit_once('/') {
+                    Some((dir, file)) => format!("{dir}/{env}/{file}"),
+                    None => format!("{env}/{path}"),
+                },
+                None => format!("terraform.tfstate.d/{env}/terraform.tfstate"),
+            }
+        }
+    };
+    (arg.to_string(), value)
 }
 
 /// The backend the export writes, if the settings hold a valid one.
@@ -655,6 +717,7 @@ fn node(cat: &Catalog, id: &str, name: &str, resource_type: &str) -> Node {
         classification: None,
         description: String::new(),
         owner: String::new(),
+        overrides: Default::default(),
     }
 }
 
@@ -709,6 +772,7 @@ fn add_store(mini: &mut Project, main: &Project, cfg: &BackendConfig, cat: &Cata
                 classification: None,
                 description: String::new(),
                 owner: String::new(),
+                overrides: Default::default(),
             };
             mini.containers.insert(rg.id.clone(), rg);
             n.parent = Some(STORE_RG_ID.into());

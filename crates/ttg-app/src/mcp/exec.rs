@@ -680,6 +680,7 @@ impl TtgApp {
                     relation: rel,
                     layout: None,
                     providers: Vec::new(),
+                    environments: Vec::new(),
                 };
                 if ttg_codegen::diagnostics::is_redundant_edge(&self.project, &self.catalog, &probe) {
                     return Err(

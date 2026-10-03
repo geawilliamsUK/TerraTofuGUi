@@ -385,6 +385,7 @@ mod tests {
             classification: None,
             description: String::new(),
             owner: String::new(),
+            overrides: Default::default(),
         }
     }
     fn sz(_: &Project, _: &str) -> Size {
@@ -411,6 +412,7 @@ mod tests {
                 classification: None,
                 description: String::new(),
                 owner: String::new(),
+                overrides: Default::default(),
             },
         );
         for (id, par) in [("a", None), ("b", Some("c")), ("d", Some("c"))] {

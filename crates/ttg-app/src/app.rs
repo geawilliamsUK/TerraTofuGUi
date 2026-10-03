@@ -617,6 +617,7 @@ impl TtgApp {
                         classification: None,
                         description: String::new(),
                         owner: String::new(),
+                        overrides: Default::default(),
                     },
                 );
             }
@@ -638,6 +639,7 @@ impl TtgApp {
                         classification: None,
                         description: String::new(),
                         owner: String::new(),
+                        overrides: Default::default(),
                     },
                 );
             }
