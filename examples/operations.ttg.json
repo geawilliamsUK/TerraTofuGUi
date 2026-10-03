@@ -254,7 +254,7 @@
       "name": "network flows",
       "resource_type": "log_group",
       "config": {
-        "retention_days": "90"
+        "retention_days": 90
       },
       "provider_config": {},
       "position": {

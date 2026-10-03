@@ -215,7 +215,7 @@
       "name": "app logs",
       "resource_type": "log_group",
       "config": {
-        "retention_days": "30"
+        "retention_days": 30
       },
       "provider_config": {},
       "position": {
@@ -254,8 +254,7 @@
       },
       "provider_config": {
         "aws": {
-          "metric_name": "CPUUtilization",
-          "statistic": "Average"
+          "metric_name": "CPUUtilization"
         },
         "azure": {
           "metric_namespace": "Microsoft.App/containerApps",

@@ -461,7 +461,7 @@
       "name": "cluster logs",
       "resource_type": "log_group",
       "config": {
-        "retention_days": "30"
+        "retention_days": 30
       },
       "provider_config": {},
       "position": {
@@ -496,7 +496,7 @@
       "name": "app logs",
       "resource_type": "log_group",
       "config": {
-        "retention_days": "90"
+        "retention_days": 90
       },
       "provider_config": {},
       "position": {
@@ -513,7 +513,7 @@
       "config": {
         "engine": "postgres",
         "size": "small",
-        "storage": "32",
+        "storage": 32,
         "database_name": "core",
         "admin_username": "dbadmin",
         "iam_authentication": true

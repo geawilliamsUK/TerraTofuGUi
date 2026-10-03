@@ -355,7 +355,7 @@
       "config": {
         "engine": "postgres",
         "size": "small",
-        "storage": "32",
+        "storage": 32,
         "database_name": "jobs",
         "admin_username": "dbadmin"
       },

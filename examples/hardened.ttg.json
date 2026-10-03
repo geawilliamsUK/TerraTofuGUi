@@ -190,7 +190,7 @@
       "config": {
         "engine": "postgres",
         "size": "medium",
-        "storage": "64",
+        "storage": 64,
         "database_name": "records",
         "admin_username": "dbadmin",
         "high_availability": true,
@@ -224,7 +224,9 @@
         "expire_days": 365,
         "noncurrent_expire_days": 30,
         "abort_multipart_days": 7,
-        "cors_origins": ["https://app.example.com"]
+        "cors_origins": [
+          "https://app.example.com"
+        ]
       },
       "provider_config": {
         "aws": {
@@ -320,7 +322,7 @@
       "name": "app logs",
       "resource_type": "log_group",
       "config": {
-        "retention_days": "365"
+        "retention_days": 365
       },
       "provider_config": {},
       "position": {

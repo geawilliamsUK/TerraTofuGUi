@@ -253,7 +253,7 @@
       "config": {
         "engine": "postgres",
         "size": "small",
-        "storage": "32",
+        "storage": 32,
         "database_name": "jobs",
         "admin_username": "dbadmin"
       },
@@ -402,7 +402,7 @@
       "name": "pipeline logs",
       "resource_type": "log_group",
       "config": {
-        "retention_days": "30"
+        "retention_days": 30
       },
       "provider_config": {},
       "position": {

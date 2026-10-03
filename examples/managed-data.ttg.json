@@ -1,0 +1,542 @@
+{
+  "schema_version": 1,
+  "name": "managed-data",
+  "settings": {
+    "tool": "opentofu",
+    "target_provider": "aws",
+    "provider_settings": {
+      "aws": {
+        "region": "eu-west-2"
+      },
+      "azure": {
+        "location": "uksouth"
+      },
+      "gcp": {
+        "region": "europe-west2",
+        "project": "ttg-managed-data"
+      }
+    },
+    "backend": null,
+    "state_encryption": false,
+    "tags": {
+      "Project": "ManagedData"
+    }
+  },
+  "containers": {
+    "rg-md": {
+      "id": "rg-md",
+      "name": "managed data",
+      "container_type": "resource_group",
+      "config": {},
+      "provider_config": {},
+      "position": {
+        "x": 40,
+        "y": 40
+      },
+      "size": {
+        "w": 1500,
+        "h": 900
+      },
+      "parent": null,
+      "manual": false
+    },
+    "vnet-md": {
+      "id": "vnet-md",
+      "name": "core",
+      "container_type": "virtual_network",
+      "config": {
+        "cidr_block": "10.50.0.0/16"
+      },
+      "provider_config": {},
+      "position": {
+        "x": 80,
+        "y": 100
+      },
+      "size": {
+        "w": 760,
+        "h": 520
+      },
+      "parent": "rg-md",
+      "manual": false
+    },
+    "kv-md": {
+      "id": "kv-md",
+      "name": "vault",
+      "container_type": "key_vault",
+      "config": {},
+      "provider_config": {
+        "azure": {
+          "vault_name": "ttg-managed-kv-x47"
+        }
+      },
+      "position": {
+        "x": 900,
+        "y": 100
+      },
+      "size": {
+        "w": 300,
+        "h": 200
+      },
+      "parent": "rg-md",
+      "manual": false
+    }
+  },
+  "nodes": {
+    "sub-pub-a": {
+      "id": "sub-pub-a",
+      "name": "public a",
+      "resource_type": "subnet",
+      "config": {
+        "cidr_block": "10.50.0.0/24"
+      },
+      "provider_config": {
+        "aws": {
+          "availability_zone": "eu-west-2a"
+        }
+      },
+      "position": {
+        "x": 120,
+        "y": 160
+      },
+      "parent": "vnet-md",
+      "manual": false
+    },
+    "sub-pub-b": {
+      "id": "sub-pub-b",
+      "name": "public b",
+      "resource_type": "subnet",
+      "config": {
+        "cidr_block": "10.50.1.0/24"
+      },
+      "provider_config": {
+        "aws": {
+          "availability_zone": "eu-west-2b"
+        }
+      },
+      "position": {
+        "x": 340,
+        "y": 160
+      },
+      "parent": "vnet-md",
+      "manual": false
+    },
+    "sub-db-a": {
+      "id": "sub-db-a",
+      "name": "data a",
+      "resource_type": "subnet",
+      "config": {
+        "cidr_block": "10.50.20.0/24"
+      },
+      "provider_config": {
+        "aws": {
+          "availability_zone": "eu-west-2a"
+        },
+        "azure": {
+          "delegation": "postgres_flexible"
+        }
+      },
+      "position": {
+        "x": 120,
+        "y": 420
+      },
+      "parent": "vnet-md",
+      "manual": false
+    },
+    "sub-db-b": {
+      "id": "sub-db-b",
+      "name": "data b",
+      "resource_type": "subnet",
+      "config": {
+        "cidr_block": "10.50.21.0/24"
+      },
+      "provider_config": {
+        "aws": {
+          "availability_zone": "eu-west-2b"
+        },
+        "azure": {
+          "delegation": "postgres_flexible"
+        }
+      },
+      "position": {
+        "x": 340,
+        "y": 420
+      },
+      "parent": "vnet-md",
+      "manual": false
+    },
+    "sg-lb": {
+      "id": "sg-lb",
+      "name": "lb sg",
+      "resource_type": "security_group",
+      "config": {
+        "rules": [
+          {
+            "name": "https",
+            "direction": "ingress",
+            "protocol": "tcp",
+            "from_port": 80,
+            "to_port": 80,
+            "cidr": "0.0.0.0/0",
+            "description": "HTTP from anywhere"
+          },
+          {
+            "name": "all-out",
+            "direction": "egress",
+            "protocol": "all",
+            "from_port": 0,
+            "to_port": 0,
+            "cidr": "0.0.0.0/0",
+            "description": "All outbound"
+          }
+        ]
+      },
+      "provider_config": {},
+      "position": {
+        "x": 560,
+        "y": 160
+      },
+      "parent": "vnet-md",
+      "manual": false
+    },
+    "sg-db": {
+      "id": "sg-db",
+      "name": "db sg",
+      "resource_type": "security_group",
+      "config": {
+        "rules": [
+          {
+            "name": "postgres",
+            "direction": "ingress",
+            "protocol": "tcp",
+            "from_port": 5432,
+            "to_port": 5432,
+            "cidr": "10.50.0.0/16",
+            "description": "PostgreSQL from inside the network"
+          }
+        ]
+      },
+      "provider_config": {},
+      "position": {
+        "x": 560,
+        "y": 420
+      },
+      "parent": "vnet-md",
+      "manual": false
+    },
+    "lb-web": {
+      "id": "lb-web",
+      "name": "web lb",
+      "resource_type": "load_balancer",
+      "config": {
+        "scheme": "internet_facing",
+        "protocol": "http",
+        "listener_port": 80,
+        "target_port": 8080
+      },
+      "provider_config": {},
+      "position": {
+        "x": 340,
+        "y": 290
+      },
+      "parent": "vnet-md",
+      "manual": false
+    },
+    "db-app": {
+      "id": "db-app",
+      "name": "app db",
+      "resource_type": "relational_database",
+      "config": {
+        "engine": "postgres",
+        "size": "medium",
+        "storage": 20,
+        "max_storage_gb": 100,
+        "database_name": "app",
+        "admin_username": "dbadmin",
+        "high_availability": false,
+        "backup_retention_days": 7,
+        "deletion_protection": false,
+        "final_snapshot": true,
+        "iam_authentication": false,
+        "parameters": [
+          {
+            "name": "log_min_duration_statement",
+            "value": "1000",
+            "after_reboot": false
+          }
+        ]
+      },
+      "provider_config": {
+        "aws": {
+          "master_password": "managed",
+          "engine_version": "16",
+          "storage_type": "gp3"
+        },
+        "azure": {
+          "server_name": "ttg-managed-db-x47"
+        }
+      },
+      "position": {
+        "x": 560,
+        "y": 290
+      },
+      "parent": "vnet-md",
+      "manual": false
+    },
+    "sec-app": {
+      "id": "sec-app",
+      "name": "app config",
+      "resource_type": "secret",
+      "config": {
+        "value_outside": true,
+        "generate_value": false,
+        "recovery_window_days": 7
+      },
+      "provider_config": {},
+      "position": {
+        "x": 940,
+        "y": 160
+      },
+      "parent": "kv-md",
+      "manual": false
+    },
+    "log-app": {
+      "id": "log-app",
+      "name": "app logs",
+      "resource_type": "log_group",
+      "config": {
+        "retention_days": 60
+      },
+      "provider_config": {},
+      "position": {
+        "x": 940,
+        "y": 360
+      },
+      "parent": "rg-md",
+      "manual": false
+    },
+    "reg-app": {
+      "id": "reg-app",
+      "name": "app images",
+      "resource_type": "container_registry",
+      "config": {
+        "immutable_tags": true,
+        "scan_on_push": true,
+        "keep_last_images": 20,
+        "expire_images": "tagged",
+        "expire_tag_prefixes": [
+          "v"
+        ]
+      },
+      "provider_config": {
+        "azure": {
+          "registry_name": "ttgmanagedx47"
+        }
+      },
+      "position": {
+        "x": 1180,
+        "y": 360
+      },
+      "parent": "rg-md",
+      "manual": false
+    },
+    "tp-alerts": {
+      "id": "tp-alerts",
+      "name": "alerts",
+      "resource_type": "topic",
+      "config": {},
+      "provider_config": {
+        "azure": {
+          "namespace_name": "ttg-managed-evt-x47"
+        }
+      },
+      "position": {
+        "x": 1180,
+        "y": 520
+      },
+      "parent": "rg-md",
+      "manual": false
+    },
+    "alm-unhealthy": {
+      "id": "alm-unhealthy",
+      "name": "unhealthy targets",
+      "resource_type": "alarm",
+      "config": {
+        "comparison": "greater_than",
+        "evaluation_periods": 2,
+        "period_seconds": "60",
+        "statistic": "auto",
+        "metric": "lb_unhealthy_hosts",
+        "threshold": 0
+      },
+      "provider_config": {},
+      "position": {
+        "x": 80,
+        "y": 700
+      },
+      "parent": "rg-md",
+      "manual": false
+    },
+    "alm-5xx": {
+      "id": "alm-5xx",
+      "name": "5xx rate",
+      "resource_type": "alarm",
+      "config": {
+        "comparison": "greater_than",
+        "evaluation_periods": 1,
+        "period_seconds": "300",
+        "statistic": "auto",
+        "metric": "lb_5xx_rate",
+        "threshold": 1
+      },
+      "provider_config": {},
+      "position": {
+        "x": 300,
+        "y": 700
+      },
+      "parent": "rg-md",
+      "manual": false
+    },
+    "alm-latency": {
+      "id": "alm-latency",
+      "name": "p95 latency",
+      "resource_type": "alarm",
+      "config": {
+        "comparison": "greater_than",
+        "evaluation_periods": 2,
+        "period_seconds": "300",
+        "statistic": "p95",
+        "metric": "lb_latency",
+        "threshold": 0.5
+      },
+      "provider_config": {},
+      "position": {
+        "x": 520,
+        "y": 700
+      },
+      "parent": "rg-md",
+      "manual": false
+    },
+    "alm-storage": {
+      "id": "alm-storage",
+      "name": "db free storage",
+      "resource_type": "alarm",
+      "config": {
+        "comparison": "less_than",
+        "evaluation_periods": 1,
+        "period_seconds": "300",
+        "statistic": "auto",
+        "metric": "db_storage",
+        "threshold": 10
+      },
+      "provider_config": {},
+      "position": {
+        "x": 740,
+        "y": 700
+      },
+      "parent": "rg-md",
+      "manual": false
+    },
+    "alm-cpu": {
+      "id": "alm-cpu",
+      "name": "db cpu",
+      "resource_type": "alarm",
+      "config": {
+        "comparison": "greater_than",
+        "evaluation_periods": 2,
+        "period_seconds": "300",
+        "statistic": "auto",
+        "metric": "cpu",
+        "threshold": 80
+      },
+      "provider_config": {},
+      "position": {
+        "x": 960,
+        "y": 700
+      },
+      "parent": "rg-md",
+      "manual": false
+    }
+  },
+  "edges": [
+    {
+      "source": "lb-web",
+      "target": "sub-pub-a",
+      "relation": "network_membership"
+    },
+    {
+      "source": "lb-web",
+      "target": "sub-pub-b",
+      "relation": "network_membership"
+    },
+    {
+      "source": "lb-web",
+      "target": "sg-lb",
+      "relation": "attribute_reference"
+    },
+    {
+      "source": "db-app",
+      "target": "sub-db-a",
+      "relation": "network_membership"
+    },
+    {
+      "source": "db-app",
+      "target": "sub-db-b",
+      "relation": "network_membership"
+    },
+    {
+      "source": "db-app",
+      "target": "sg-db",
+      "relation": "attribute_reference"
+    },
+    {
+      "source": "alm-unhealthy",
+      "target": "lb-web",
+      "relation": "attribute_reference"
+    },
+    {
+      "source": "alm-unhealthy",
+      "target": "tp-alerts",
+      "relation": "sends_to"
+    },
+    {
+      "source": "alm-5xx",
+      "target": "lb-web",
+      "relation": "attribute_reference"
+    },
+    {
+      "source": "alm-5xx",
+      "target": "tp-alerts",
+      "relation": "sends_to"
+    },
+    {
+      "source": "alm-latency",
+      "target": "lb-web",
+      "relation": "attribute_reference"
+    },
+    {
+      "source": "alm-latency",
+      "target": "tp-alerts",
+      "relation": "sends_to"
+    },
+    {
+      "source": "alm-storage",
+      "target": "db-app",
+      "relation": "attribute_reference"
+    },
+    {
+      "source": "alm-storage",
+      "target": "tp-alerts",
+      "relation": "sends_to"
+    },
+    {
+      "source": "alm-cpu",
+      "target": "db-app",
+      "relation": "attribute_reference"
+    },
+    {
+      "source": "alm-cpu",
+      "target": "tp-alerts",
+      "relation": "sends_to"
+    }
+  ]
+}
