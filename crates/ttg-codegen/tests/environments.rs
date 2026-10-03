@@ -265,3 +265,38 @@ fn a_check_that_fails_in_one_environment_names_it() {
         ttg_codegen::environments::other_environments(&p, &cat, "aws", Tool::OpenTofu, Some("pilot"));
     assert!(others.iter().any(|d| d.environment.as_deref() == Some("prod")));
 }
+
+/// A project variable in a numeric field resolves first and is brought to the field's
+/// type after, so it stays a number even when a value was typed as text.
+#[test]
+fn a_variable_in_a_number_field_stays_a_number() {
+    let mut p = three_tier_envs();
+    p.settings.variables.insert(
+        "db_storage".into(),
+        ProjectVariable {
+            value: Value::Str("50".into()),
+            description: String::new(),
+            environments: [("prod".to_string(), Value::Int(200))].into(),
+        },
+    );
+    let db = id_of(&p, "app db");
+    p.nodes
+        .get_mut(&db)
+        .unwrap()
+        .config
+        .insert("storage".into(), Value::Str("${var.db_storage}".into()));
+    let cat = Catalog::builtin();
+    let g = generate(&p, &cat, "aws", Tool::OpenTofu).unwrap_or_else(|e| panic!("{e}"));
+    let db_tf = g
+        .files
+        .values()
+        .find(|t| t.contains("resource \"aws_db_instance\""))
+        .unwrap();
+    assert!(db_tf.contains("var.db_storage"), "{db_tf}");
+    let pilot = &g.files["environments/pilot.tfvars"];
+    assert!(
+        pilot.contains("db_storage") && pilot.contains("= 50") && !pilot.contains("\"50\""),
+        "{pilot}"
+    );
+    assert!(g.files["variables.tf"].contains("variable \"db_storage\""));
+}

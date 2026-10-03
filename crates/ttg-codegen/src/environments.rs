@@ -358,7 +358,16 @@ pub fn generate(p: &Project, cat: &Catalog, provider: &str, tool: Tool) -> Resul
     if own.iter().any(|d| d.severity == Severity::Error) {
         return Err(GenError::Blocked(own));
     }
-    let resolved: Vec<Project> = envs.iter().map(|e| p.for_environment(e)).collect();
+    // Variables are substituted first, then every value brought to its field's type, so a
+    // `${var.x}` in a number field is a number by the time the environments are compared.
+    let resolved: Vec<Project> = envs
+        .iter()
+        .map(|e| {
+            let mut rp = p.for_environment(e);
+            cat.normalize_values(&mut rp);
+            rp
+        })
+        .collect();
     let mut runs: Vec<(String, Result<Generated, Vec<Diagnostic>>)> = Vec::new();
     for (env, rp) in envs.iter().zip(&resolved) {
         match emit::generate_one(rp, cat, provider, tool) {
@@ -511,6 +520,9 @@ struct Lifter<'a> {
     vars: IndexMap<String, Lifted>,
     /// Project variables a template or reference uses.
     project_vars: BTreeSet<String>,
+    /// A project variable's values as the field it fills typed them (`"50"` written into a
+    /// number field is the number 50), per environment; they win over the raw values.
+    typed_vars: BTreeMap<String, Vec<Option<Expression>>>,
     problems: Vec<(Option<Id>, String)>,
     // The block being merged.
     entity: Option<Id>,
@@ -753,13 +765,34 @@ impl Lifter<'_> {
             let fits = concrete.iter().all(|(i, v)| {
                 let inst = ttg_core::environment::substitute(&t, &facts.vars[*i]);
                 match whole {
-                    Some(_) => value_expr(&inst) == **v,
+                    // The field may have brought the value to its type: compare the text.
+                    Some(_) => {
+                        value_expr(&inst) == **v || literal_text(v).is_some_and(|x| x == inst.display())
+                    }
                     None => Expression::String(inst.display()) == **v,
                 }
             });
             if fits {
                 for r in variable_refs(&t) {
                     self.project_vars.insert(r.to_string());
+                }
+                if let Some(name) = whole {
+                    let typed: Vec<Option<Expression>> = slots
+                        .iter()
+                        .map(|s| match s {
+                            Slot::Val(e) => Some((*e).clone()),
+                            _ => None,
+                        })
+                        .collect();
+                    let entry = self
+                        .typed_vars
+                        .entry(name.to_string())
+                        .or_insert(vec![None; typed.len()]);
+                    for (a, b) in entry.iter_mut().zip(typed) {
+                        if a.is_none() {
+                            *a = b;
+                        }
+                    }
                 }
                 return Some(match whole {
                     Some(name) => var_ref(name),
@@ -1129,6 +1162,16 @@ fn child<'a>(
             Some(e) => pick(e).map(Slot::Val).unwrap_or(Slot::Unset),
         })
         .collect()
+}
+
+/// The text of a plain value (`50`, `"50"`, `true`), for comparing across types.
+fn literal_text(e: &Expression) -> Option<String> {
+    match e {
+        Expression::String(s) => Some(s.clone()),
+        Expression::Number(n) => Some(n.to_string()),
+        Expression::Bool(b) => Some(b.to_string()),
+        _ => None,
+    }
 }
 
 /// Escape text for the inside of an HCL quoted template, keeping its `${var.…}`.
@@ -1527,6 +1570,7 @@ fn merge(
         taken,
         vars: IndexMap::new(),
         project_vars: BTreeSet::new(),
+        typed_vars: BTreeMap::new(),
         problems: Vec::new(),
         entity: None,
         entity_name: String::new(),
@@ -1764,7 +1808,11 @@ fn merge(
             values: envs
                 .iter()
                 .zip(&facts.vars)
-                .map(|(e, vals)| (e.clone(), vals.get(name).map(value_expr)))
+                .enumerate()
+                .map(|(i, (e, vals))| {
+                    let typed = lifter.typed_vars.get(name).and_then(|t| t[i].clone());
+                    (e.clone(), typed.or_else(|| vals.get(name).map(value_expr)))
+                })
                 .collect(),
             options: Vec::new(),
         });
