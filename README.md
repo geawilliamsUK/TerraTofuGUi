@@ -242,7 +242,9 @@ OpenTofu installed, so a definition change that produces invalid HCL fails the b
       arrows when several flows share an endpoint.
     - `+ Note` adds a note box with a title and wrapped body. Pin it to a resource,
       group, flow or logical node in the inspector and it is drawn beside that thing,
-      with a leader line, and travels with it.
+      with a leader line between the nearest edges, and travels with it. A note can be
+      coloured (neutral, info, warning, danger, success or any `#rrggbb`); the Markdown
+      export marks it.
     - `+ Logical` adds an annotation-only node — a browser, a telephony platform, one
       workload inside a cluster — drawn dashed and muted. Nothing is generated for it,
       but flows can start and end there, so eleven arrows need not converge on one box.
@@ -367,6 +369,21 @@ OpenTofu installed, so a definition change that produces invalid HCL fails the b
   environment keeps its own state (`environments/<env>.backend.hcl`); what cannot be said
   that way is refused by name. A subnet's zone may be just its letter (`a`), written as
   `"${var.region}a"` so the diagram follows the region.
+
+- **Disposable** (*Settings ▸ Disposable*, and per environment in *Settings ▸
+  Environments*): a stack that is destroyed and deployed again leaves nothing that stops
+  the next apply — no final database snapshot, secrets deleted without a recovery window,
+  buckets emptied on destroy, the shortest Key Vault soft-delete period, a Cloud SQL name
+  drawn per create. Elsewhere a database's final snapshot is named per creation, so a
+  second destroy does not collide with the first one's.
+- **Alarms that can fire**: an alarm's threshold is checked, per environment, against
+  what it watches — connections above what the database's class allows, a percentage
+  above 100, a value below 0, more nodes than the cluster's pools hold — and the
+  `db_connections_pct` metric gives the threshold as a share of the class's connection
+  limit, worked out at export.
+- **Database URIs**: a Secret built from a database URL-encodes the credentials and asks
+  for TLS (`sslmode=require`, MySQL `ssl-mode=REQUIRED`) when the server forces it, or as
+  its TLS mode says.
 
 - **Plan** (the *Plan* button of the export window, `ttg plan <project> [--environment
   prod]`, or the agent's `plan_run`). Exports, runs `init` and `plan`, and reports the

@@ -1317,6 +1317,70 @@ survived in files TerraTofu did not own.
   edited directory's blocks (compared semantically), a second import finds nothing, and
   the result validates.
 
+## Round 4: deploy-cycle fixes (zipOS feedback TF-025 to TF-027, TF-029 to TF-031)
+
+The staging stack was destroyed and deployed again, and its first apply had to work.
+
+- **Variables an override still reads (TF-025).** The emitter collects every `var.*` a
+  hand-written `$raw` names and, at the end, declares each one a mapping of the export
+  would declare: mapping-level variables, entity variables from any branch of the mapping,
+  stand-ins for external entities. The `$raw` check accepts exactly those (it used to
+  accept any `<slug>_*`). `{"$var": {…}}` lets an extra argument declare a variable of its
+  own. On the zipOS app secret the override stays and keeps `variable "app_secret_value"`.
+- **The database URI (TF-026).** Credentials are `urlencode`d, the scheme follows the
+  engine, and a Secret's TLS mode (`auto`, `disable`, `require`, `verify-full`; the last
+  needs the provider's CA bundle where the app runs) appends `sslmode` / `ssl-mode`.
+  `auto` reads the database's `parameters` (`has_row`): `rds.force_ssl` /
+  `require_secure_transport` on AWS, `require_secure_transport` off on Azure (on by
+  default there), and a new Cloud SQL `ssl_mode` field (written to
+  `ip_configuration.ssl_mode`; Cloud SQL has no TLS database flag, and a `ssl_mode` /
+  `require_ssl` parameter is refused). When the parameter group is a native resource set
+  by an extra argument (zipOS), `auto` cannot see it and says so; the scratch zipOS copy
+  sets `require`.
+- **Disposable (TF-027).** `settings.disposable` and per environment
+  `settings.disposable_environments`, resolved by `Project::for_environment` and tested by
+  mappings with `{ setting = "disposable" }`. AWS: `skip_final_snapshot = true`,
+  `recovery_window_in_days = 0`, `force_destroy = true` on S3. Azure: storage accounts
+  delete their data with them (nothing to set); Key Vault keeps purge protection off and
+  takes `soft_delete_retention_days = 7`; no "keep a copy" step. Google Cloud:
+  `force_destroy`, `retain_backups_on_delete = false`, and the Cloud SQL instance named
+  `<name>-<random_id>` per create because a deleted name stays reserved for a week;
+  Secret Manager frees a name at once. A versioned bucket whose `force_destroy` an extra
+  argument turns off is a warning (`{ extra = "force_destroy", equals = "false" }`), as is
+  deletion protection in a disposable project. Outside disposable projects the final
+  snapshot is `format("%s-final-%s", <name>, random_id.<db>_final_id.hex)`: the
+  `random_id` is created with the server, destroyed with it and drawn afresh by the next
+  create, so each destroy leaves a snapshot of its own name (a timestamp is not stable
+  between plans; `keepers` draws a new suffix on a rename).
+- **Alarms that cannot fire (TF-029).** Mappings declare `limits` (MAPPING_FORMAT.md
+  §2.9): `max_connections` per engine and class / SKU / tier for AWS (from
+  DBInstanceClassMemory), Azure and Cloud SQL, `max_nodes` for a cluster and its pools.
+  A `db_connections_pct` preset writes `floor(<pct> * <max> / 100)`; an unknown class is an
+  error on AWS and leaves the alarm out elsewhere. Checks, run per environment, warn about
+  connections at or above the limit, percentages at or above 100 (or above 100 with
+  `less_than`, always in alarm), anything below 0 (unless missing data breaches), and
+  node counts at or above the pools' maximum. These stay mapping checks rather than
+  posture rules: they are per provider and per metric.
+- **Notes (TF-030).** `view_note_add` honours `x` / `y` with an anchor, `view_note_update`
+  edits in place, note colours (palette or `#rrggbb`) are drawn and exported as Markdown
+  alerts, and the leader joins the nearest edges (`ttg_core::view::leader_line`).
+- **Public IP for outbound (TF-031).** `outbound_public_ip` on Container App and Container
+  Job: `assign_public_ip` on Fargate (`ENABLED` in a job's run output); Container Apps and
+  Cloud Run need none, so it changes nothing there. The load-balancer manual step drops
+  out for a background worker and when a `load_balancer` block is set as an extra
+  argument; a public app with no load balancer keeps today's export.
+
+Acceptance on a scratch copy of `zipos-aws-staging.ttg.json` (disposable, override back on
+the app secret, the TLS mode on the db-url secret, `db_storage` in percent, web and worker
+with a public IP for outbound): `variable "app_secret_value"` declared; the db-url secret
+is `format("postgresql://%s:%s@%s/%s%s", urlencode(…username), urlencode(…password), …,
+"?sslmode=require")`; `skip_final_snapshot = true`, no snapshot identifier,
+`recovery_window_in_days = 0` on both secrets, `force_destroy = true` on the bucket; no
+alarm warning at `db.t4g.micro` (connections 60 against 87); `assign_public_ip = true` on
+both services and no `MANUAL_STEPS.md`; `tofu validate` and `fmt -check` clean. Tests:
+`crates/ttg-codegen/tests/deploy_cycle.rs`, `crates/ttg-app/tests/mcp_notes.rs`, view
+geometry and arch-diff unit tests.
+
 ## Explicitly still out of scope
 
 Running `plan`/`apply`, live-account access, multi-user collaboration, drift detection

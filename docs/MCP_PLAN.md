@@ -396,6 +396,33 @@ the snapshot and reports which command failed), `export_diff` (`ttg_codegen::dif
 against an export directory, nothing written) and `project_changes` (a revision counter
 bumped in `finish()` for user and agent edits alike, with who changed it last).
 
+Added 2026-10-11 (round 4, deploy-cycle fixes, TF-027 and TF-030):
+
+- `view_note_add` honours `x` / `y` with an `anchor`: they are where the note is drawn,
+  stored as the offset from the anchor (`Note::position`), so the note still follows it;
+  beside the anchor is only the default when both are absent (a missing one keeps that
+  spot's coordinate). `w` / `h` are kept as given (at least 120 × 60). It takes `color`.
+- `view_note_update { note, title?, body?, anchor?, color?, x?, y?, w?, h?, view? }`
+  (`AgentCommand::NoteUpdate`): the note by id or title; fields left out keep their
+  value; `anchor: null` removes the anchor and leaves the note where it is drawn, a new
+  anchor with no `x` / `y` puts it beside that; `color: null` goes back to the plain
+  note; everything is checked before anything changes; one undo step. The inspector edits
+  the same fields (a colour row of swatches and a `#rrggbb` box).
+- Note colours: `neutral`, `info`, `warning`, `danger`, `success` (`ttg_core::view::
+  NOTE_COLORS`) or any `#rrggbb` (`view::note_color` normalises and refuses anything
+  else). Drawn as a pale wash of the colour with the colour as the border; `view_get`
+  reports `color`; the Markdown export puts the body of an `info` / `success` / `warning`
+  / `danger` note in a GitHub alert (`> [!NOTE]`, `[!TIP]`, `[!WARNING]`, `[!CAUTION]`)
+  and names any other colour before the text.
+- The anchor line runs between the nearest points of the note's edge and the anchor's
+  box (`view::leader_line`), so a note just below its resource draws a short vertical
+  line. Moving a resource (`entity_move`, a drag) keeps its notes at their offsets; only
+  `layout_tidy` and `view_arrange_notes` re-place them.
+- `settings_set { disposable, disposable_environments }`: the project is built to be
+  destroyed and deployed again (MAPPING_FORMAT.md §2.4 `setting = "disposable"`);
+  `disposable_environments` merges `{ env: bool }` for environments that differ, `null`
+  removes an entry, and only environments the project has are accepted.
+
 ### Resources and notifications
 
 `resources/list` exposes `ttg://project`, `ttg://project/summary`, `ttg://diagnostics`,

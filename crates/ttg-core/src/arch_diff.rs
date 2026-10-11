@@ -1074,4 +1074,25 @@ mod tests {
             ("changed", "label")
         );
     }
+
+    #[test]
+    fn a_note_colour_and_the_disposable_setting_are_changes() {
+        let mut old = base();
+        old.views[0].notes.push(crate::ir::Note {
+            id: "n1".into(),
+            title: "never fires".into(),
+            body: String::new(),
+            position: Default::default(),
+            size: crate::ir::Size { w: 260, h: 120 },
+            anchor: None,
+            color: None,
+        });
+        let mut new = old.clone();
+        new.views[0].notes[0].color = Some("warning".into());
+        new.settings.disposable = true;
+        let d = diff(&old, &new);
+        let a = &d.views.changed[0].annotations[0];
+        assert_eq!((a.kind.as_str(), a.fields[0].path.as_str()), ("note", "color"));
+        assert_eq!(d.settings[0].path, "settings.disposable");
+    }
 }

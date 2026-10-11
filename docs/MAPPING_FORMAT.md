@@ -317,7 +317,31 @@ left is written as itself, so joining a table's rows to a few fixed entries does
   `equals = "false"` holds when it is off. Only the settings in
   `ttg_catalog::CONDITION_SETTINGS` may be named, and the catalog refuses any other. A
   manual step that only describes what the Kubernetes export writes uses it to drop out
-  when the export is on.
+  when the export is on. `{ setting = "disposable" }` holds in a project (or, with
+  environments, an environment) built to be destroyed and deployed again
+  (`settings.disposable`, `settings.disposable_environments`); the mappings use it to
+  leave nothing behind that would stop the next `apply` — no final database snapshot,
+  `recovery_window_in_days = 0`, `force_destroy` on buckets, the shortest Key Vault
+  soft-delete period, a Cloud SQL instance name drawn per create (a `random_id` suffix,
+  because Cloud SQL keeps a deleted name for a week).
+- `{ field = "parameters", has_row = { name = "rds.force_ssl", value = ["1", "on"] } }`
+  (v2) — the table field has a row whose items match every key: a value or a list of
+  accepted values, compared as text without regard to case; `*` accepts any value that is
+  not empty. A `string_list` is a table whose rows have the one item `value`. It is a test
+  of its own: the catalog refuses it on a field that is not a table, a key that is not an
+  item, and alongside `equals`, `starts_with`, `absent`, `one_of` or a numeric comparison.
+  Inside `where` it asks the other end: a Secret's TLS mode reads
+  `{ relation = "reads", target_type = "relational_database", where = { field =
+  "parameters", has_row = { … } } }`.
+- `{ extra = "load_balancer" }` (v2) — the project sets that argument (or nested block)
+  as an extra argument on the entity's primary block for this provider (`block = "…"`
+  names another), to anything but `null`; `equals = "false"` holds only for that value
+  (written as JSON text, without quotes for a string; `"null"` is the argument removed),
+  and `absent = true` inverts. A manual step the extra argument already takes care of
+  drops out with it (a Container App's "front the service with a load balancer" when a
+  `load_balancer` block is set by hand), and a check can see an override that undoes
+  what the mapping does (`force_destroy = false` on a bucket in a disposable project).
+  The catalog refuses a `block` the mapping does not have.
 
 ### 2.5 Outputs and manual steps
 
@@ -708,8 +732,10 @@ because they are still true.
 
 **Design-time checks.** `[[providers.<id>.checks]]` with `when`, optional
 `for_each_field`, `severity = "warning" | "error" | "omit"` and a `message` using `{name}`
-and `{item.<x>}` placeholders. `warning` is the default; errors block export like any
-other diagnostic.
+and `{item.<x>}` placeholders, `{field.<x>}` (a field of the entity, or its default) and
+`{target_limit.<x>}` (that limit, §2.9, of the first entity this one links to that has
+it; `?` when none is known). `warning` is the default; errors block export like any
+other diagnostic. Checks are judged per environment, on the project resolved for it.
 
 `severity = "omit"` is for the case where the provider has no way to express *this one
 entity* and the rest of the design is fine: an Alarm on a metric Azure Monitor does not
@@ -845,6 +871,22 @@ export generates:
   new one;
 - a `$ref` to a repeated block without `key` is a warning: it refers to the first instance.
 
+**Variables a `$raw` reads.** `var.x` counts as declared when the export declares it or
+when a mapping of an emitted entity *would* declare it: a mapping-level variable
+(`db_password`), an entity's own `entity_var` (`<slug>_value`) in whichever branch of its
+mapping declares it, or a stand-in for an entity the export does not create
+(`<slug>_<attr>`). The export then declares it, so an override that replaces the
+mapping's argument but still reads its variable — an app secret's value computed with
+`jsondecode(var.app_secret_value)` — keeps `variable "app_secret_value"` in
+`variables.tf`. Any other name is an error, as before.
+
+**`$var`.** `{"$var": {"name": "release_tag", "type": "string", "description": "…",
+"sensitive": false, "default": "latest"}}` declares an input variable of the project's
+own and stands for `var.release_tag` where it is written; a `$raw` anywhere may then read
+it. Only `name` is required (the type defaults to `string`). A name the export already
+declares, a type that is not a type expression, an unknown key, or two `$var`s of one
+name that disagree are errors.
+
 **`null`.** An extra argument whose value is `null` on an argument the mapping sets
 removes that argument from the generated block, and on a nested block the mapping emits
 removes the block: `manage_master_user_password = true` with `password = null` on an AWS
@@ -853,6 +895,47 @@ anything the mapping does not set has nothing to remove (info). Over MCP, `entit
 stores `null` only for an argument the mapping sets (elsewhere `null` deletes the extra
 argument, as before), and `{"$restore": true}` deletes an override or removal so the
 mapping's own value comes back.
+
+## 2.9 Limits (schema_version 2)
+
+What a resource can reach at its size — the connections a database allows at its
+instance class, the most nodes a cluster's pools can hold — is declared per provider as
+a number worked out from the entity's own values:
+
+```toml
+[providers.aws.limits]
+max_connections = { if = { field = "engine", equals = "mysql" }, then = { map = "instance_class", optional = true, table = { "db.t4g.micro" = 66 } }, else = { map = "instance_class", optional = true, table = { "db.t4g.micro" = 87 } } }
+
+# kubernetes_cluster: its own pool plus every pool that runs on it
+max_nodes = { func = "sum", args = [ { field = "max_nodes" }, { relation = "attachment", incoming = true, target_type = "kubernetes_node_pool", field = "max_nodes" } ] }
+```
+
+Names are lower case. A limit may only use forms that give a literal: `value` (a
+number), `field`, `provider_field` (with `fallback`), `map` (which reads provider fields
+too), `if`, a related entity's `field`, and `func = "sum" | "min" | "max" | "floor"` over
+those; the catalog refuses anything else. A value no table lists is *unknown*, and so is
+a limit whose `if` has no branch that holds — `relational_database` leaves
+`max_connections` unknown when the server sets a `max_connections` parameter of its own.
+
+Two readers:
+
+- `{ relation = "attribute_reference", target_type = "relational_database", limit =
+  "max_connections" }` as an argument source resolves the target's limit to a number
+  (nothing for an unknown one). It cannot be combined with `attr`, `field`, `block` or
+  `connection`, and some mapping of the target type must declare the limit. An Alarm's
+  `db_connections_pct` threshold is
+  `{ raw = "floor(@pct@ * @max@ / 100)", refs = { pct = { field = "threshold" }, max = <that source> } }`,
+  so the HCL says where the number comes from: `floor(80 * 87 / 100)`.
+- The same table as a numeric **bound**: `{ field = "threshold", at_least = { relation =
+  "attribute_reference", target_type = "relational_database", limit = "max_connections" } }`
+  compares with the first such target's limit, and fails when it is unknown, which is how
+  an Alarm's check says "this threshold can never fire", and how
+  `not = { any = [ at_least …, less_than … ] }` says "the limit is unknown".
+
+The tables and where their figures come from are in `relational_database.toml` (RDS:
+`LEAST(DBInstanceClassMemory / 9531392, 5000)` for PostgreSQL and `/ 12582880` for
+MySQL, by class; Azure flexible servers by SKU; Cloud SQL by tier) and
+`kubernetes_cluster.toml`.
 
 ## 3. What the generator does with a mapping
 
