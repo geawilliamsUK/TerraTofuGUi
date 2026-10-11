@@ -986,6 +986,14 @@ pub struct SettingsArgs {
         description = "Project variables, merged: { \"db_class\": { \"value\": \"db.t4g.small\", \"environments\": { \"prod\": \"db.r6g.large\" }, \"description\": \"…\" } } (a bare value sets the base value; null removes one). Use them in any field as \"${var.db_class}\"; ${var.environment} and ${var.name_prefix} are built in"
     )]
     pub variables: Option<serde_json::Map<String, serde_json::Value>>,
+    #[schemars(
+        description = "Built to be destroyed and deployed again (a staging stack torn down at night): no final database snapshot, secrets deleted without a recovery window, buckets emptied on destroy (force_destroy), the shortest Key Vault soft-delete period, and a Cloud SQL name drawn per create. Off by default"
+    )]
+    pub disposable: Option<bool>,
+    #[schemars(
+        description = "Per environment, where it differs from `disposable`: { \"staging\": true, \"prod\": false }. Merged; null removes an entry"
+    )]
+    pub disposable_environments: Option<serde_json::Map<String, serde_json::Value>>,
     /// Anything else the caller sent: refused with the list of valid keys.
     #[serde(flatten)]
     #[schemars(skip)]
@@ -1016,6 +1024,8 @@ pub const SETTINGS_KEYS: &[&str] = &[
     "rename_environment",
     "name_prefix",
     "variables",
+    "disposable",
+    "disposable_environments",
 ];
 
 /// `{ "from": …, "to": … }` for `settings_set { rename_environment }`.
@@ -1051,7 +1061,9 @@ impl SettingsArgs {
             || self.state_encryption_key.is_some()
             || self.provider_versions.is_some()
             || self.name.is_some()
-            || self.verbose.is_some();
+            || self.verbose.is_some()
+            || self.disposable.is_some()
+            || self.disposable_environments.is_some();
         let env = AgentCommand::EnvSettings {
             environments: self.environments,
             rename: self.rename_environment.map(|r| (r.from, r.to)),
@@ -1071,6 +1083,8 @@ impl SettingsArgs {
             posture: self.posture,
             name: self.name,
             verbose: self.verbose,
+            disposable: self.disposable,
+            disposable_environments: self.disposable_environments,
         };
         Ok(match (env_keys, other_keys) {
             (true, true) => AgentCommand::Batch(vec![settings, env]),

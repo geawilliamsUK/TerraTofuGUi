@@ -440,6 +440,25 @@ pub fn settings_section(app: &mut TtgApp, ui: &mut Ui) {
                     {
                         remove = Some(e.clone());
                     }
+                    let mut disposable = app.project.settings.disposable_in(Some(e));
+                    if ui
+                        .checkbox(&mut disposable, "disposable")
+                        .on_hover_text(
+                            "Destroyed and deployed again (staging): no final database snapshot, secrets \
+                             deleted at once, buckets emptied on destroy. Unticked follows the project's \
+                             Disposable setting.",
+                        )
+                        .changed()
+                    {
+                        let before = app.snapshot();
+                        let s = &mut app.project.settings;
+                        if disposable == s.disposable {
+                            s.disposable_environments.remove(e);
+                        } else {
+                            s.disposable_environments.insert(e.clone(), disposable);
+                        }
+                        app.finish(before);
+                    }
                 });
             }
             if let Some((from, to)) = rename {

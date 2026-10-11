@@ -1212,6 +1212,8 @@ impl TtgApp {
                 posture,
                 name,
                 verbose,
+                disposable,
+                disposable_environments,
             } => {
                 let posture = match posture {
                     None => None,
@@ -1220,6 +1222,19 @@ impl TtgApp {
                 if let Some(n) = &name {
                     if n.trim().is_empty() {
                         return Err("name must not be empty".into());
+                    }
+                }
+                let mut per_env: Vec<(String, Option<bool>)> = Vec::new();
+                for (env, v) in disposable_environments.unwrap_or_default() {
+                    if !self.project.settings.environments.contains(&env) {
+                        return Err(format!(
+                            "disposable_environments: \"{env}\" is not an environment of the project (settings_set environments lists them)"
+                        ));
+                    }
+                    match v {
+                        J::Null => per_env.push((env, None)),
+                        J::Bool(b) => per_env.push((env, Some(b))),
+                        _ => return Err(format!("disposable_environments.{env} must be true, false or null")),
                     }
                 }
                 // Everything is checked before anything changes, so a refused call leaves
@@ -1335,6 +1350,19 @@ impl TtgApp {
                 if let Some(v) = verbose {
                     self.mcp.terse_replies = !v;
                 }
+                if let Some(d) = disposable {
+                    self.project.settings.disposable = d;
+                }
+                for (env, v) in per_env {
+                    match v {
+                        Some(b) => {
+                            self.project.settings.disposable_environments.insert(env, b);
+                        }
+                        None => {
+                            self.project.settings.disposable_environments.remove(&env);
+                        }
+                    }
+                }
                 self.finish(before);
                 let s = &self.project.settings;
                 Ok(json!({
@@ -1344,6 +1372,8 @@ impl TtgApp {
                     "tool": s.tool,
                     "provider": s.target_provider,
                     "kubernetes_manifests": s.kubernetes_manifests,
+                    "disposable": s.disposable,
+                    "disposable_environments": s.disposable_environments,
                     "backend": s.backend,
                     "state_encryption": s.state_encryption,
                     "state_encryption_key": s.state_encryption_key,

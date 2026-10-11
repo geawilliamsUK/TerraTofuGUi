@@ -1623,6 +1623,21 @@ pub fn settings_ui(app: &mut TtgApp, ui: &mut Ui) {
         app.project.settings.kubernetes_manifests = k8s;
         app.finish(before);
     }
+    let mut disposable = app.project.settings.disposable;
+    if ui
+        .checkbox(&mut disposable, "Disposable (destroyed and deployed again)")
+        .on_hover_text(
+            "For a stack that is torn down and recreated: no final database snapshot, secrets \
+             deleted without a recovery window, buckets emptied on destroy, the shortest Key Vault \
+             soft-delete period, a Cloud SQL name drawn per create. Each environment can differ \
+             (Environments below).",
+        )
+        .changed()
+    {
+        let before = app.snapshot();
+        app.project.settings.disposable = disposable;
+        app.finish(before);
+    }
     ui.add_space(8.0);
     backend_ui(app, ui);
     ui.add_space(8.0);

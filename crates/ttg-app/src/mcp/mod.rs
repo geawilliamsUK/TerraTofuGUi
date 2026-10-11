@@ -562,6 +562,10 @@ pub enum AgentCommand {
         /// Session default for entity_add / entity_update / link_add replies: `false`
         /// returns only status, id and changed. Not saved with the project.
         verbose: Option<bool>,
+        /// `settings.disposable`.
+        disposable: Option<bool>,
+        /// Merged into `settings.disposable_environments`; null removes an entry.
+        disposable_environments: Option<serde_json::Map<String, serde_json::Value>>,
     },
     ProjectSave {
         path: Option<String>,
