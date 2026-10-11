@@ -190,3 +190,31 @@ from `master` so the next test runs the current code.
 | Package | Scope | Items |
 |---|---|---|
 | **WP28 Deploy-cycle fixes** | a mapping's variables stay declared while an override's `$raw` still uses them; the database connection URI url-encodes its credentials and carries `sslmode` when the server forces TLS; a "disposable" environment setting (timestamped final snapshot or none, zero recovery window, `force_destroy` on buckets) plus a diagnostic for versioned buckets that cannot be destroyed; a connections alarm as a percentage of the class's `max_connections`, and a diagnostic when a threshold exceeds what the target can reach; anchored notes honour their position and size, `view_note_update`, anchor lines from the nearest edge, note colours; "public IP for outbound" separate from public ingress, and no front-it-with-a-load-balancer step when one is linked | TF-025, TF-026, TF-027, TF-029, TF-030, TF-031 |
+
+### Status (2026-10-11)
+
+Every package of rounds 3 and 4 is merged on `master` (`59259b0`), each verified with
+both clippy configurations, the strict catalog check, the full suite with `tofu validate`
+and `fmt -check` on all three providers and both tools, and AWS credentials hidden from
+every test. The catalog has 43 curated types; the MCP server has 65 tools. The release
+binaries are rebuilt from this commit.
+
+Acceptance on the two real designs, as saved (both files untouched):
+
+- **zipOS staging**: 0 errors on AWS and GCP; the AWS export validates with no
+  hand-written files and one manual step. The reachability audit raises no errors, only
+  that `web` and `worker` reach the database without a `Uses` link. Azure reports seven
+  real requirements (names, Key Vault placement, a Service Bus namespace).
+- **CallScope**: 0 errors on Azure and GCP; the AWS export is held back by eight design
+  findings the new checks exist for: seven private endpoints that admit nothing until the
+  cluster carries `nodes-sg` (R3.1), and a CloudFront origin the load balancer's
+  certificate does not cover (an `origin.<domain>` alias and SAN). The audit lists the
+  blocked paths those cause.
+
+A refinement after review: reachability now counts a `$ref` / `$raw` reference, or a
+native policy naming both a role the source runs as and the target, as the link a path
+needs, which removed four false "blocked" findings on zipOS.
+
+Open, with the reason: `container_job` repeats most of `container_app`'s mapping (about
+900 lines) because the mapping language has no include; a shared-mapping mechanism would
+remove that.
