@@ -318,7 +318,14 @@ fn headless_server_tools_resources_and_batch() {
     );
     assert!(!err, "{upd}");
     // Clean diagnostics for the entity: no "no longer exists" complaint about the name.
-    assert_eq!(upd["diagnostics"], json!([]), "{upd}");
+    // (Nothing carries the new group yet, which the posture rules note.)
+    let complaints: Vec<&Value> = upd["diagnostics"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|d| !d.as_str().unwrap_or_default().contains("(posture rule '"))
+        .collect();
+    assert!(complaints.is_empty(), "{upd}");
     let stored_id = upd["entity"]["config"]["rules"][0]["source_group"]
         .as_str()
         .unwrap_or_default()
