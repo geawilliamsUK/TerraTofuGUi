@@ -29,6 +29,8 @@ mod mcp;
 mod menu;
 mod palette;
 mod region;
+mod revisions;
+mod revisions_ui;
 mod rule_edges;
 mod schema_editor;
 mod view_tools;

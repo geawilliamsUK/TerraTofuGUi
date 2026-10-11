@@ -34,6 +34,7 @@ definitions/               DATA, not code — the resource mapping catalog (TOML
   providers/azure.toml
   resources/*.toml         one file per abstract resource type
   prices/<provider>.toml   bundled list prices for the cost estimate (see PRICES.md)
+  patterns/*.json          built-in patterns (parameterised groups of entities and links, §6.11)
 crates/
   ttg-core                 IR types, project file (JSON), structural validation, dependency graph
   ttg-catalog              loads + validates definition files; typed schema for the mapping format
@@ -224,7 +225,8 @@ payment.
                  "staging": { "absent": true } },                        //   and presence (§6.9)
   "classification": "personal",         // optional: public | internal | confidential | personal | payment
   "description": "Call recordings",     // optional: why it exists
-  "owner": "Platform team"              // optional: who looks after it
+  "owner": "Platform team",             // optional: who looks after it
+  "adopt": { "aws": { "main": "vpc-0abc1234" } }  // optional: existing resources to import (§6.11)
 }
 ```
 
@@ -991,6 +993,98 @@ status `no_credentials` rather than `failed`. `PlanReport` is the shape the CLI'
 `ttg plan --json`, the MCP `plan_run` and the GUI share; the GUI puts `+`, `~`, `−`, `±`
 badges on the entities until the next edit.
 
+### 6.11 Reviewing and reshaping a design: diff, checkpoints, patterns, adoption, import
+
+**Architecture diff** (`ttg_core::arch_diff`). `diff(old, new)` compares two projects in
+diagram terms. Entities are matched by id, then — among the rest — by slugified name and
+type when that pairs them one to one (an entity deleted and drawn again, pasted or
+imported is "changed, id old → new", not "removed and added"). Per entity it reports a
+rename, a containment move (old and new container by name) and every leaf that differs
+under `config`, `provider_config`, `extra`, `adopt` and `overrides` (per environment:
+`overrides.prod.config.replicas`, `overrides.pilot.absent`), plus `manual`, `providers`,
+classification, description and owner. Links are compared with their old ends mapped to
+the new ids, by `(source, target, relation)`; a link whose `providers` or `environments`
+changed is "changed". Views are matched by name: description, legend, the filter's leaves,
+whether it has a layout of its own, how many entities it places differently, and its
+groups, flows, notes and logical nodes by id (added / removed / changed, geometry left
+out). Settings are compared leaf by leaf (`settings.tags.Project`,
+`settings.environments`, `settings.variables.db_class.environments.prod`). Positions and
+sizes are never compared: every drag would be a change. The result serializes as JSON,
+and `to_markdown(from, to, type_label)` renders it for a pull-request description — a
+summary line, tables of added and removed entities, a list of changed ones with
+`old → new` per field, then links, views and settings.
+
+**Checkpoints** (`ttg-app::revisions`). A checkpoint is a named copy of the whole project,
+kept in a sidecar beside the project file — `shop.checkpoints.json` next to
+`shop.ttg.json`, `{ "checkpoints_version": 1, "checkpoints": [{ name, created_unix,
+project }] }` — so it never reaches an export, the project schema or the project file's
+diff, and a project file copied elsewhere does not drag its history along. A project never
+saved keeps its checkpoints in memory; the first save writes them beside the new file
+(opening or starting another project drops them). Restoring is one undo step and asks
+first, in the GUI and over MCP, when the diagram has unsaved changes. `project_diff`
+compares the open project with `saved` (the file on disk), a checkpoint, or another file.
+
+**Patterns** (`ttg_codegen::patterns`, data in `definitions/patterns/*.json`). A pattern
+is parameters, entities (key, type, name, parent, offset, size, config, provider_config,
+extra, `when`) and links, with `{param|filter}` templates in its strings (filters `kebab`,
+`alnum`, `slug`, `lower`, `upper`, `max:N`; `{project}` built in) and entity parameters
+(`"entity": "<type>"`, optionally a `list`) that reach existing entities as `$param` in
+links and as `$param` / `@param` (that entity / its container) in `parent`. `expand`
+checks the parameters (unknown, missing, wrong type of entity), the names (no collision
+with the project, as slugs) and turns the pattern into the very commands `project_apply`
+takes — `entity_add`, `entity_resize`, `entity_update`, `link_add` — so the app runs it
+through `run_batch` (one undo step, all-or-nothing, every value, parent and relation
+checked as an agent's would be). An entity whose container does not allow its type goes
+into the nearest ancestor that does, and containers grow around what was inserted. New
+entities carry no environment overrides: they are the same in every environment until
+someone says otherwise. `check` validates a pattern against the catalog (types, fields,
+parents, relations, templates, `when`); a test runs it on every built-in, and the app's
+test inserts each built-in into an example and validates the export on all three
+providers. `infer` makes a pattern from a selection: links among the entities come along,
+a link to anything outside becomes an optional entity parameter, and leading words the
+names share become a `name` parameter, templated in names and provider values. Saved
+patterns live in the user's folder (`%APPDATA%\TerraTofu GUI\patterns` on Windows, beside
+eframe's `data`; `TTG_PATTERNS_DIR` overrides it); built-in names are reserved. Inserting
+a pattern in the GUI needs the `mcp` feature (default on), whose executor it uses.
+
+**Adoption** (`ttg_codegen::adopt`). An entity's `adopt` map (provider → block key,
+`<block>/<row key>` or address → cloud id) makes the export write `imports.tf`, one
+`import { to = <address> id = "<id>" }` per id whose block it writes (Terraform 1.5+,
+OpenTofu 1.6+, within the existing version floors). Repeated blocks are separate resources
+named by key, so an instance is adopted by its key and no `for_each` import is needed.
+`Code::Adopt` warnings name the blocks of an adopted entity that have no id (they will be
+created), keys that name nothing, data sources and entities that are also flagged
+external. With environments the merged root gets the import blocks once
+(`environment_imports`, called after the merge): the same id everywhere, or — when an id
+uses a project variable (`${var.vpc_id}`, substituted per environment like any field) —
+`id = { "pilot" = "…", "prod" = "…" }[var.environment]`. An adopted block some environment
+leaves out is counted there, and an import cannot depend on the environment, so that is an
+error, from the diagnostics (an `absent` override) and from the export (a repeated row only
+some environments have). The `manual` flag stays what it was: nothing generated, inputs
+instead.
+
+**Directory import** (`ttg_codegen::import_dir`). `import_dir(project, catalog, dir,
+provider)` reads the top-level `.tf` files of a directory TerraTofu exported (the file
+header names the provider and tool; a directory without one is refused) and compares each
+resource and data block with what the project generates now — `emit_unchecked`, or for a
+project with environments the merged root `generate` writes. Addresses are mapped to
+`(entity, block key, instance)` through the plan, spelled by `adopt::instance_address`
+(the one place that agrees with `Plan::addresses`, which a test pins). Per changed block,
+each differing argument becomes an `extra` override: a literal where the value is one, a
+`$ref` (with `block` and `key` / `index`) where it is exactly a reference to a known
+block, a `$raw` otherwise, `null` for a deleted argument; a changed nested block is
+replaced whole, and a repeated block takes overrides only when every instance changed the
+same way. Blocks the plan does not know become native entities named after their label,
+their arguments in `extra`, references converted the same way — hand-written files such
+as `data.tf` included, which the report then lists for deletion. Generated blocks missing
+from the directory are reported, never deleted. `moved.tf`, `imports.tf` and
+`environments/` are the export's own bookkeeping and are skipped; other subdirectories,
+`locals`, modules and edits to variables, outputs or providers are listed as not
+imported. Comparison is semantic (`semantic_blocks`: attributes by name, nested blocks by
+name in order, object keys as text, expressions as formatted text), which is also what
+the round-trip test uses: export, edit by hand, import, export again, and the second
+export declares exactly the edited directory's blocks.
+
 ## 7. GUI architecture (`ttg-app`)
 
 | module | responsibility |
@@ -1003,6 +1097,8 @@ badges on the entities until the next edit.
 | `clipboard.rs` | copy/paste of a sub-diagram as JSON (fresh ids, de-duplicated names, edges between copied items kept) |
 | `environments.rs` | the environment selector, per-environment values in the inspector (badge, reset, "In this environment"), the Environments settings (list, name prefix, project variables), the Plan button and its canvas badges, attributed validate and plan results |
 | `cost_panel.rs` | the Cost window: estimate for a chosen provider, per resource / type / view, assumptions and display currency editable in place |
+| `revisions.rs` | checkpoints (the sidecar, cached per project file), the base a diff compares with, adoption edits, directory-import previews and their application, the user's pattern folder (§6.11) |
+| `revisions_ui.rs` | File ▸ Compare with… / Checkpoints… / Import exported directory…, Edit ▸ Insert pattern… / Save selection as pattern…, and the inspector's "Adopt existing" section per provider |
 | `views.rs` | the view bar (tabs, description, legend toggle, annotation buttons), the filter menu, and the per-frame visible set (`ttg_codegen::views::visible_set` plus the "a fitted container with no visible members is not drawn" rule) |
 | `annotations.rs` | drawing and editing a view's groups, flows, notes and logical nodes; the legend panel (and the strip of the canvas "zoom to fit" leaves it); geometry delegated to `ttg_core::view`. Flows fan out along a shared side, follow `canvas::routed_path` when *Route around nodes* is on, and place their labels clear of nodes, badges and each other — along the arrow first, then stepped off it on a leader line |
 | `view_tools.rs` | the View menu's view tools (flows from links, tidy by flows, arrange notes, "Where personal data goes") as single undo steps, and presentation mode: the step state, its keys and the caption |

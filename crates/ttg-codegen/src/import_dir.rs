@@ -200,6 +200,14 @@ pub fn header_of(text: &str) -> Option<(Option<Tool>, String)> {
     Some((tool, provider.trim().trim_end_matches('.').to_string()))
 }
 
+/// Generated files that only carry state bookkeeping (`moved` and `import` blocks); an
+/// import skips them.
+const GENERATED_ONLY: [&str; 2] = ["moved.tf", "imports.tf"];
+
+/// Subdirectories an export writes and an import leaves alone without remark: the
+/// per-environment `.tfvars` and backend files.
+const GENERATED_DIRS: [&str; 1] = [crate::environments::DIR];
+
 fn read_dir_tf(dir: &Path) -> Result<Vec<(String, String)>, String> {
     let rd = std::fs::read_dir(dir).map_err(|e| format!("cannot read {}: {e}", dir.display()))?;
     let mut out = Vec::new();
@@ -530,6 +538,10 @@ pub fn import_dir(
         if header.is_none() {
             header = h.clone();
         }
+        // State bookkeeping the export writes (renames, adoptions): nothing to import.
+        if h.is_some() && GENERATED_ONLY.contains(&name.as_str()) {
+            continue;
+        }
         let body = hcl::parse(text).map_err(|e| format!("{name} does not parse as HCL: {e}"))?;
         files.push(TfFile {
             name: name.clone(),
@@ -562,8 +574,15 @@ pub fn import_dir(
     }
     cat.ensure_native_types(project);
     let gen_tool = tool.unwrap_or(project.settings.tool);
-    let generated = crate::emit::emit_unchecked(project, cat, &provider, gen_tool)
-        .map_err(|e| format!("the project does not generate for {provider}: {e}"))?;
+    // Compared with what the export writes: for a project with environments that is the
+    // merged root (counts, lifted variables), which only an export-clean project has.
+    let base = project.resolved(None);
+    let generated = if project.settings.environments.is_empty() {
+        crate::emit::emit_unchecked(&base, cat, &provider, gen_tool)
+    } else {
+        crate::emit::generate(project, cat, &provider, gen_tool)
+    }
+    .map_err(|e| format!("the project does not generate for {provider}: {e}"))?;
 
     // What the project generates, block by block.
     let mut gen_blocks: HashMap<String, Block> = HashMap::new();
@@ -584,7 +603,7 @@ pub fn import_dir(
     }
 
     // Generated addresses -> entity, block and instance.
-    let layer = crate::layers::project_for(project, cat, &provider);
+    let layer = crate::layers::project_for(&base, cat, &provider);
     let plan = Plan::build(
         &layer,
         cat,
@@ -602,9 +621,9 @@ pub fn import_dir(
                 .unwrap_or(false);
             for (n, i) in pl.instances.iter().enumerate() {
                 let address = if is_data {
-                    format!("data.{}.{}", pl.resource, i.local)
+                    crate::adopt::instance_address(pl, i, true)
                 } else {
-                    format!("{}.{}", pl.resource, i.local)
+                    crate::adopt::instance_address(pl, i, false)
                 };
                 let instance = pl.repeated.then(|| match &i.key {
                     Some(k) => J::String(k.clone()),
@@ -642,16 +661,25 @@ pub fn import_dir(
         owned_changed: Vec::new(),
         notes: Vec::new(),
     };
-    if std::fs::read_dir(dir)
+    let mut subdirs: Vec<String> = std::fs::read_dir(dir)
         .map(|rd| {
             rd.flatten()
-                .any(|e| e.path().is_dir() && !e.file_name().to_string_lossy().starts_with('.'))
+                .filter(|e| e.path().is_dir())
+                .map(|e| e.file_name().to_string_lossy().to_string())
+                .filter(|n| !n.starts_with('.') && !GENERATED_DIRS.contains(&n.as_str()))
+                .collect()
         })
-        .unwrap_or(false)
-    {
-        out.notes.push(
-            "subdirectories (bootstrap/, k8s/) are not imported; only the top-level .tf files are".into(),
-        );
+        .unwrap_or_default();
+    subdirs.sort();
+    if !subdirs.is_empty() {
+        out.notes.push(format!(
+            "{} not imported; only the top-level .tf files are",
+            subdirs
+                .iter()
+                .map(|d| format!("{d}/"))
+                .collect::<Vec<_>>()
+                .join(", ")
+        ));
     }
 
     // The directory's blocks.

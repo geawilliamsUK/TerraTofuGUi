@@ -112,6 +112,8 @@ pub fn run(full: &Project, cat: &Catalog, provider: &str) -> Vec<Diagnostic> {
     // else on the values they resolve to (the base values: an environment's own run is
     // `run(&p.for_environment(env), …)`).
     let mut out = crate::environments::checks(full, cat);
+    // Adopted entities some environment leaves out (read from the overrides, as written).
+    out.extend(crate::adopt::environment_checks(full, cat, provider));
     let resolved = full.resolved(None);
     let full: &Project = &resolved;
     let push = |out: &mut Vec<Diagnostic>, entity: Option<&str>, sev, code, msg: String| {

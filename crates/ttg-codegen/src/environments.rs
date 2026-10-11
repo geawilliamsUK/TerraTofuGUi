@@ -405,6 +405,17 @@ pub fn generate(p: &Project, cat: &Catalog, provider: &str, tool: Tool) -> Resul
             return Err(GenError::Blocked(problems));
         }
     };
+    // Import blocks for adopted entities, once for the merged root (`adopt`).
+    match crate::adopt::environment_imports(cat, provider, tool, &resolved, &gens) {
+        Ok(Some(text)) => {
+            merged.files.insert("imports.tf".into(), text);
+        }
+        Ok(None) => {}
+        Err(mut problems) => {
+            problems.extend(diags);
+            return Err(GenError::Blocked(problems));
+        }
+    }
     diags.sort_by_key(|a| std::cmp::Reverse(a.severity));
     merged.diagnostics = diags;
     Ok(merged)

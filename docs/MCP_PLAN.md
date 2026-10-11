@@ -74,6 +74,49 @@ absent entities and variables applied); without it, the environment the canvas s
 the base values. An unknown environment is refused naming the right ones. The budget
 warning (`code: "Cost"`) arrives through `diagnostics`.
 
+Added 2026-10-11 (round 3 diff, patterns and adoption, and round 4 import of generated
+directories; 55 → 63 tools). The tools are a second `#[tool_router]` in
+`mcp/server/design.rs`, merged with the first in `TtgServer::new` (`#[tool_handler]` now
+reads the merged `self.tool_router` instead of building `Self::tool_router()` per call);
+their bodies are in `mcp/exec/revisions.rs` over `crate::revisions`, which the GUI windows
+share (ARCHITECTURE.md §6.11):
+
+- `project_diff { against, format? }` — `against` is `"saved"` (the file on disk), a
+  checkpoint's name or a `.ttg.json` path; the reply has `against`, `summary`, `changed`,
+  the structure (`diff`) and its pull-request `markdown` (`format: json | markdown`
+  narrows it). Read-only.
+- `checkpoint_create { name, replace? }`, `checkpoint_list`, `checkpoint_restore
+  { name }`. Checkpoints live in `<project>.checkpoints.json` beside the project file
+  (in memory until a never-saved project is saved), never in the export or the schema.
+  A name in use is refused without `replace`. Restoring is one undo step; with unsaved
+  changes in the window app it asks first (an approval ticket), like `project_open`.
+  `project_apply`'s description suggests a checkpoint before a large batch.
+- `pattern_list` (built-ins and the user's, with parameters), `pattern_apply { name,
+  params?, x?, y?, parent? }` and `pattern_save { name, entities, description?,
+  replace? }`. `pattern_apply` expands the pattern (`ttg_codegen::patterns::expand`) into
+  `entity_add` / `entity_resize` / `entity_update` / `link_add` commands parsed by
+  `command_from_json` and run by `run_batch` — the same path and checks as
+  `project_apply`, one undo step, nothing left on failure — then grows the containers it
+  filled; the reply lists the entities with their ids and the warnings and errors on them.
+  Unknown, missing or wrongly typed parameters and colliding names are refused before
+  anything changes. `pattern_save` writes `<app data>/patterns/<slug>.json`
+  (`TTG_PATTERNS_DIR` in tests); built-in names are refused.
+- `entity_update { adopt, adopt_provider? }` (`AgentCommand::EntityAdopt`, wrapping the
+  rest of the update when there is one, one undo step): block key / `<block>/<row key>` /
+  address → cloud id, `null` or `""` removing one, or keyed by provider first. Every key
+  is checked against the blocks the entity generates before anything changes (an address
+  is stored as its key); the reply carries `entity.adopt`, `imports` (key, address, id per
+  provider) and `adopt_warnings`. Not with `select` or `environment`.
+- `project_import_dir { dir, provider?, apply? }` — without `apply` a preview that changes
+  nothing (`report` with overrides, new native entities, deleted blocks, what was skipped,
+  hand-written files to delete; the architecture `diff`; `markdown` of both); with
+  `apply: true` the same, applied as one undo step (the window app asks first). An import
+  that would not apply is refused before the prompt.
+
+Headless tests: `crates/ttg-app/tests/mcp_revisions.rs` (`headless_diff_checkpoints_and_patterns`,
+`headless_adopt_and_import_dir`, on copies of the examples in a scratch directory, since
+checkpoints write beside the project file).
+
 Added 2026-10-03 (round 3, environments and plan; `exec/environments.rs`):
 
 - `settings_set { environments, rename_environment, name_prefix, variables }` (the

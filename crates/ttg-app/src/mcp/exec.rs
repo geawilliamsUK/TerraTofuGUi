@@ -22,6 +22,8 @@ mod cost;
 // `project_import`.
 mod import;
 pub(crate) use import::import_check;
+// `project_diff`, checkpoints, patterns, `entity_update { adopt }`, `project_import_dir`.
+mod revisions;
 
 // Environment settings and values, link environment tags, and the UI-thread halves of
 // `plan_run`.
@@ -1441,6 +1443,34 @@ impl TtgApp {
                 providers,
             } => self.bulk_link(select, target, relation, providers),
             AgentCommand::ProjectImport { json, replace } => self.project_import(json, replace),
+            // Diff, checkpoints, patterns, adoption, directory import (`exec/revisions.rs`).
+            AgentCommand::ProjectDiff { against, format } => self.project_diff_json(&against, format.as_deref()),
+            AgentCommand::CheckpointCreate { name, replace } => self.checkpoint_create_json(&name, replace),
+            AgentCommand::CheckpointList => self.checkpoint_list_json(),
+            AgentCommand::CheckpointRestore { name } => self.checkpoint_restore_json(&name),
+            AgentCommand::PatternList => Ok(revisions::pattern_list_json()),
+            AgentCommand::PatternApply {
+                name,
+                params,
+                x,
+                y,
+                parent,
+            } => self.apply_pattern(&name, &params, x, y, parent.as_deref()),
+            AgentCommand::PatternSave {
+                name,
+                entities,
+                description,
+                replace,
+            } => self.pattern_save_json(&name, &entities, description.as_deref(), replace),
+            AgentCommand::EntityAdopt {
+                entity,
+                adopt,
+                provider,
+                update,
+            } => self.entity_adopt_json(&entity, adopt, provider, update),
+            AgentCommand::ProjectImportDir { dir, provider, apply } => {
+                self.import_dir_json(&dir, provider.as_deref(), apply)
+            }
             AgentCommand::CostEstimate {
                 provider,
                 environment,

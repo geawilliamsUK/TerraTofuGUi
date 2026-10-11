@@ -48,6 +48,9 @@ pub fn show(app: &mut TtgApp, ui: &mut Ui) {
                 ui.close();
             }
             ui.separator();
+            // Compare, checkpoints, import of an edited export (`revisions_ui.rs`).
+            crate::revisions_ui::file_menu(app, ui);
+            ui.separator();
             if ui.button("Project settings…").clicked() {
                 app.show_settings = true;
                 ui.close();
@@ -85,6 +88,9 @@ pub fn show(app: &mut TtgApp, ui: &mut Ui) {
                 app.select_all();
                 ui.close();
             }
+            ui.separator();
+            // Patterns (`revisions_ui.rs`).
+            crate::revisions_ui::edit_menu(app, ui);
             ui.separator();
             ui.menu_button("Arrange", |ui| {
                 use ttg_core::layout::Align;

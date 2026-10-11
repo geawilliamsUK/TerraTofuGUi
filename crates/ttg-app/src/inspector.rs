@@ -505,6 +505,7 @@ fn entity_inspector(app: &mut TtgApp, ui: &mut Ui, id: &Id) {
                         struct_list_editor(app, ui, id, Some(&pid), f);
                     }
                     crate::schema_editor::extra_args_editor(app, ui, id, &pid, m, ttg_catalog::Catalog::is_native(&type_id));
+                    crate::revisions_ui::adopt_section(app, ui, id, &pid);
                     for s in &m.manual_steps {
                         ui.label(RichText::new(format!("• {}", s.title)).small().color(Color32::from_rgb(200, 120, 20)));
                     }

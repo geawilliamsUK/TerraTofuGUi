@@ -692,6 +692,56 @@ pub enum AgentCommand {
     PlanShow {
         report: serde_json::Value,
     },
+
+    // ---- Diff, checkpoints, patterns, adoption and directory import
+    // (`exec/revisions.rs`).
+    /// The architecture diff from `against` (`saved`, a checkpoint's name or a project
+    /// file) to the open project. Read-only.
+    ProjectDiff {
+        against: String,
+        /// `json`, `markdown` or both (`None`).
+        format: Option<String>,
+    },
+    /// Keep the project as it is now under a name.
+    CheckpointCreate {
+        name: String,
+        replace: bool,
+    },
+    CheckpointList,
+    /// Replace the diagram with a checkpoint's copy, as one undo step.
+    CheckpointRestore {
+        name: String,
+    },
+    PatternList,
+    /// Insert a pattern through the same commands as `project_apply`, as one undo step.
+    PatternApply {
+        name: String,
+        params: serde_json::Map<String, serde_json::Value>,
+        x: Option<i32>,
+        y: Option<i32>,
+        parent: Option<String>,
+    },
+    /// Save entities (and the links among them) as a user pattern.
+    PatternSave {
+        name: String,
+        entities: Vec<String>,
+        description: Option<String>,
+        replace: bool,
+    },
+    /// `entity_update { adopt }`: the cloud ids an entity adopts, set after the rest of
+    /// the update (when there is one) in the same undo step.
+    EntityAdopt {
+        entity: String,
+        adopt: serde_json::Map<String, serde_json::Value>,
+        provider: Option<String>,
+        update: Option<Box<AgentCommand>>,
+    },
+    /// Import an edited export directory: a preview, or (`apply`) the change itself.
+    ProjectImportDir {
+        dir: String,
+        provider: Option<String>,
+        apply: bool,
+    },
 }
 
 impl AgentCommand {
@@ -784,6 +834,10 @@ impl AgentCommand {
                 | AgentCommand::CostEstimate { .. }
                 | AgentCommand::Attribution { .. }
                 | AgentCommand::PlanShow { .. }
+                | AgentCommand::ProjectDiff { .. }
+                | AgentCommand::CheckpointList
+                | AgentCommand::PatternList
+                | AgentCommand::ProjectImportDir { apply: false, .. }
         )
     }
 }
@@ -1223,6 +1277,20 @@ impl TtgApp {
                 );
             }
         }
+        // Replacing the diagram with a checkpoint discards unsaved work (Undo brings it
+        // back); an imported directory changes the diagram from files the user should
+        // have looked at.
+        match cmd {
+            AgentCommand::CheckpointRestore { name } if self.dirty => {
+                return Some(format!(
+                    "restore checkpoint \"{name}\", replacing the diagram, which has unsaved changes (Undo brings them back)"
+                ))
+            }
+            AgentCommand::ProjectImportDir { dir, apply: true, .. } => {
+                return Some(format!("apply the hand edits in {dir} to the diagram (one undo step)"))
+            }
+            _ => {}
+        }
         cmd.confirm_reason(&self.mcp.settings)
     }
 
@@ -1242,6 +1310,14 @@ impl TtgApp {
         // An import that could never load is refused now, not after the user said yes.
         if let AgentCommand::ProjectImport { json, .. } = &cmd {
             if let Err(e) = exec::import_check(json) {
+                self.mcp.push_log(label, &Err(e.clone()));
+                let _ = reply.send(Err(e));
+                return;
+            }
+        }
+        // Likewise a directory that cannot be imported.
+        if let AgentCommand::ProjectImportDir { dir, provider, .. } = &cmd {
+            if let Err(e) = self.import_dir_preview(std::path::Path::new(dir), provider.as_deref()) {
                 self.mcp.push_log(label, &Err(e.clone()));
                 let _ = reply.send(Err(e));
                 return;

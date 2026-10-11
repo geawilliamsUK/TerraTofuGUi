@@ -346,6 +346,20 @@ impl Project {
                 *t = substitute(t, &vars).display();
             }
         }
+        // The ids of adopted resources may name project variables too (another VPC per
+        // environment).
+        let adoptions = out
+            .nodes
+            .values_mut()
+            .map(|n| &mut n.adopt)
+            .chain(out.containers.values_mut().map(|c| &mut c.adopt));
+        for a in adoptions {
+            for id in a.values_mut().flat_map(|ids| ids.values_mut()) {
+                if id.contains("${var.") {
+                    *id = substitute(id, &vars).display();
+                }
+            }
+        }
         let prefix = vars.get("name_prefix").map(|v| v.display()).unwrap_or_default();
         out.settings.name_prefix = (!prefix.is_empty()).then_some(prefix);
         out.settings.variables.clear();

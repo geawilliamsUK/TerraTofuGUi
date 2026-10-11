@@ -7,9 +7,12 @@
 //! ttg catalog    [--definitions ./definitions]
 //! ttg view       export <project.ttg.json> <view> [--format md|mermaid|sequence] [--out doc.md]
 //! ttg cost       <project.ttg.json> [--provider aws] [--region eu-west-2] [--by type] [--json]
+//! ttg diff-project <old.ttg.json> <new.ttg.json> [--json] [--exit-code]
+//! ttg import-dir <project.ttg.json> <export dir> [--provider aws] [--out new.ttg.json | --in-place]
 //! ```
 
 mod cost;
+mod review;
 
 use anyhow::{bail, Context, Result};
 use clap::{Parser, Subcommand, ValueEnum};
@@ -220,6 +223,36 @@ enum Cmd {
         /// With `--by tiers`: bands top to bottom instead of left to right.
         #[arg(long)]
         rows: bool,
+    },
+    /// What changed from one project file to another, in architecture terms: entities,
+    /// fields, links, views and settings, as Markdown for a pull request (or JSON).
+    DiffProject {
+        old: PathBuf,
+        new: PathBuf,
+        #[arg(long)]
+        json: bool,
+        /// Exit 1 when the two differ.
+        #[arg(long)]
+        exit_code: bool,
+    },
+    /// Bring hand edits made to a directory TerraTofu exported back into the project:
+    /// changed arguments become extra overrides, new blocks native entities. Prints the
+    /// report and the architecture diff; writes nothing without --out or --in-place.
+    ImportDir {
+        project: PathBuf,
+        dir: PathBuf,
+        /// The provider the directory was exported for; read from its file headers when
+        /// left out.
+        #[arg(long)]
+        provider: Option<String>,
+        /// Write the updated project here.
+        #[arg(long)]
+        out: Option<PathBuf>,
+        /// Overwrite the project file.
+        #[arg(long)]
+        in_place: bool,
+        #[arg(long)]
+        json: bool,
     },
 }
 
@@ -678,6 +711,30 @@ fn main() -> Result<()> {
                 std::process::exit(1);
             }
         }
+        Cmd::DiffProject {
+            old,
+            new,
+            json,
+            exit_code,
+        } => review::diff_project(&cat, &old, &new, json, exit_code)?,
+        Cmd::ImportDir {
+            project,
+            dir,
+            provider,
+            out,
+            in_place,
+            json,
+        } => review::import_dir(
+            &mut cat,
+            review::ImportArgs {
+                project: &project,
+                dir: &dir,
+                provider,
+                out,
+                in_place,
+                json,
+            },
+        )?,
         Cmd::Tidy {
             project,
             out,

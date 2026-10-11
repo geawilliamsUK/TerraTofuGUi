@@ -377,6 +377,35 @@ OpenTofu installed, so a definition change that produces invalid HCL fails the b
   so the provider needs credentials, and their absence is reported as such. *Run
   validate* attributes its errors the same way.
 
+- **Compare and checkpoints** (File ▸ Compare with… / Checkpoints…, `ttg diff-project
+  old.ttg.json new.ttg.json`, the agent's `project_diff` and `checkpoint_*`). What
+  changed since the saved file, a named checkpoint or another project file, in the
+  diagram's terms — entities added, removed, renamed or moved, fields old → new
+  (environment values included), links, views and settings — as Markdown ready for a pull
+  request (*Copy Markdown*). Checkpoints are whole copies of the diagram kept beside the
+  project file in `<name>.checkpoints.json`; restoring one is a single undo step.
+
+- **Patterns** (Edit ▸ Insert pattern…, the agent's `pattern_apply`). Tested groups of
+  resources added in one undo step from a small form: a hardened bucket (versioned, TLS
+  only, public access blocked, its own key and access-log bucket), a queue with a
+  dead-letter queue and alarms for dead letters and message age, a queue-driven GPU
+  worker on Kubernetes, and a web service behind an HTTPS load balancer with a health
+  alarm. Every built-in exports and validates on all three providers. *Save selection as
+  pattern…* keeps your own in the app's `patterns` folder.
+
+- **Adopt existing resources** (the "Adopt existing" section under each provider in the
+  inspector, the agent's `entity_update { adopt }`). Give the id of a resource that
+  already exists for any block an entity generates, and the export writes an `import {}`
+  block into `imports.tf` so the first plan takes it over instead of creating a second
+  one. Unlike *external*, the resource is generated and managed from then on.
+
+- **Import an edited export** (File ▸ Import exported directory…, `ttg import-dir
+  project.ttg.json ./out/aws`, the agent's `project_import_dir`). Arguments changed by hand
+  in a directory TerraTofu exported come back as extra arguments on their entities,
+  resources and data sources added by hand (in its files or your own, such as a
+  `data.tf`) as native entities, and resources deleted there are listed, never deleted.
+  You see the report and the architecture diff before applying it as one undo step.
+
 ![Reachability overlay from the job runner](docs/screenshot-reachability.png)
 
 ![Concrete display of the fan-out example with the "Messaging" view active](docs/screenshot-concrete.png)
@@ -467,14 +496,20 @@ watch it happen. It is off until you switch it on:
    shows what the agent did. Saving to disk only happens when a tool is explicitly asked
    to, and opening another file goes through the same unsaved-changes prompt as the menu.
 
-The 56 tools cover reading (project, catalog, catalog relations, diagnostics,
+The 64 tools cover reading (project, catalog, catalog relations, diagnostics,
 reachability and its audit, export preview, one entity's HCL with `entity_preview`, export diff,
 `view_get`, `view_export`, screenshot, `approval_status`) and editing (add/update/move/resize/
 reparent/delete entities, links, selection, views, tidy/align/distribute, settings,
 save/open/new, `project_import` of a `.ttg.json` given as JSON, export with optional
 validate, undo/redo) and, for environments,
 `settings_set { environments, name_prefix, variables }`, `entity_update { environment }`
-and `plan_run`, which returns the planned changes grouped by resource. An agent documents a view the
+and `plan_run`, which returns the planned changes grouped by resource. For reviewing
+and reshaping a design there are `project_diff { against: "saved" | checkpoint | path }`
+(JSON and pull-request Markdown), `checkpoint_create` / `checkpoint_list` /
+`checkpoint_restore` (worth one before a large `project_apply`), `pattern_list` /
+`pattern_apply` / `pattern_save`, `entity_update { adopt }` for `import {}` blocks, and
+`project_import_dir { dir, apply }`, which previews hand edits to an export and applies
+them on a second call. An agent documents a view the
 way you would: `view_group_add`, `view_flow_add` (with `step` and `color`),
 `view_note_add`, `view_logical_add` and `view_annotation_remove` all take an optional
 `view`, so a whole map can be drawn in one `project_apply` without switching tabs, and
@@ -625,7 +660,7 @@ GitHub Actions.
 
 ```
 definitions/          resource + provider mapping files (data, contributable), and
-                      prices/ for the cost estimate
+                      prices/ for the cost estimate, patterns/ for the built-in patterns
 crates/ttg-core       IR, project file, structural validation, dependency graph
 crates/ttg-catalog    loads and validates definitions
 crates/ttg-codegen    HCL generation, diagnostics, MANUAL_STEPS.md, tool toggle

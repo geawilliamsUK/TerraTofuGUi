@@ -850,9 +850,9 @@ pub fn check(pattern: &Pattern, cat: &Catalog) -> Vec<String> {
 // ------------------------------------------------------------------ saving
 
 /// Make a pattern from entities of `project` (ids). Links among them come along; a link
-/// to an entity outside the selection becomes an entity parameter named after that
-/// entity, defaulting to it, so applying the pattern in the same project wires it up
-/// the same way. When the entities' names share leading words ("orders queue", "orders
+/// to an entity outside the selection becomes an optional entity parameter named after
+/// that entity: given one, the new entities link to it as the saved ones did; left out,
+/// those links are skipped. When the entities' names share leading words ("orders queue", "orders
 /// dlq") those words become a `name` parameter and every name and provider value
 /// spelling them is templated; otherwise the pattern has no parameter of its own.
 pub fn infer(project: &Project, ids: &[Id], name: &str, description: &str) -> Result<Pattern, String> {
@@ -1018,15 +1018,15 @@ pub fn infer(project: &Project, ids: &[Id], name: &str, description: &str) -> Re
         }
         params.push(Param {
             name: pname,
-            description: format!("An existing {t} to link to (was \"{ename}\")"),
+            description: format!(
+                "An existing {t} to link to, as \"{ename}\" was; left out, its links are too"
+            ),
             default: None,
             entity: Some(t),
             list: false,
-            optional: false,
+            optional: true,
         });
     }
-    // An outside entity parameter defaults to nothing: entity parameters are names, and
-    // `expand` resolves them in the project the pattern is applied to.
     Ok(Pattern {
         name: name.trim().to_string(),
         description: description.to_string(),

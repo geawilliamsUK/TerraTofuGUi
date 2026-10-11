@@ -1249,6 +1249,74 @@ Multi-AZ and deletion protection by override, a second NAT and route table in pr
 the prefix `zipos-${var.environment}`, zone letters) validates and plans 97 resources for
 staging and 101 for prod.
 
+## Round 3: diff, patterns and adoption (gap report R3.28–R3.30)
+
+Reviewing a large agent batch meant reading the project file's JSON diff; the same few
+groups of resources (a locked-down bucket, a queue with its dead letters, a GPU worker)
+were drawn again on every design; and an existing VPC or DNS zone could only be turned
+into input variables (`manual`), never taken over.
+
+- **Architecture diff (R3.28)** — `ttg_core::arch_diff`: entities added, removed, renamed
+  (matched by id, then name and type), moved between containers; field, provider-field,
+  extra-argument, adoption and environment-override changes as old → new; links (and
+  their provider and environment tags), views with their annotations, settings. JSON and
+  pull-request Markdown. Surfaces: MCP `project_diff { against: "saved" | checkpoint |
+  path }`, `ttg diff-project a b [--json] [--exit-code]`, File ▸ Compare with….
+- **Checkpoints (R3.28)** — named whole-project copies in `<project>.checkpoints.json`
+  beside the file (in memory until a new project is saved), so exports, the schema and
+  the project file's own diff stay untouched; `checkpoint_create` / `_list` / `_restore`
+  (one undo step, asking first over unsaved work) and File ▸ Checkpoints…;
+  `project_apply`'s description suggests one before a large batch.
+- **Patterns (R3.29)** — `ttg_codegen::patterns` and `definitions/patterns/*.json`:
+  hardened bucket, queue with dead-letter queue and depth / age alarms (a topic when
+  given), queue-driven GPU worker (pool, workload, role, log group, queue), web service
+  behind an HTTPS load balancer (container app in an environment, load balancer, role,
+  logs, unhealthy-target alarm). `pattern_apply` runs the expansion through the
+  `project_apply` path as one undo step; `pattern_save` infers parameters from shared
+  name words and links to outside entities; Edit ▸ Insert pattern… has a parameter form.
+  New entities carry no environment overrides.
+- **Adoption (R3.30)** — `adopt` on entities and containers, `imports.tf` with one
+  `import {}` block per id (`ttg_codegen::adopt`), `Code::Adopt` warnings for blocks still
+  without an id, keys naming nothing, data sources and external entities;
+  `entity_update { adopt }` and the inspector's "Adopt existing" section. With
+  environments the merged root imports once, an id differing per environment through a
+  project variable (`{…}[var.environment]`), and an adopted entity an environment leaves
+  out is refused (it would be counted there).
+- **Tests** — `arch_diff` unit tests (renames, matching by name, moves, fields, links,
+  views and annotations, environment overrides and link environments, Markdown),
+  `patterns` unit tests (templates, consistency of every built-in with the catalog,
+  refusals, inference), the app's `builtin_patterns_apply_cleanly_on_every_provider`
+  (each built-in inserted into an example, clean diagnostics and `tofu validate` on all
+  three providers, one undo; three-tier with environments included),
+  `tests/adopt_and_import.rs` (import blocks validated on all providers and with
+  environments, diagnostics, refusal of an absent adopted entity), `crates/ttg-cli/tests/
+  review.rs`, and the headless `mcp_revisions.rs`. Import blocks are only ever validated;
+  nothing is planned or applied.
+
+## Round 4: import of generated directories (zipOS feedback TF-017)
+
+Edits made to an export in review or CI could not flow back; hand-written additions only
+survived in files TerraTofu did not own.
+
+- `ttg_codegen::import_dir` reads a TerraTofu export's top-level `.tf` files (the header
+  names provider and tool), maps every resource and data block to its entity and block
+  through the plan, and turns what differs from the current generation into `extra`
+  overrides (`$ref` for references, `$raw` for expressions, `null` for deletions); blocks
+  it does not generate, including hand-written files such as `data.tf`, become native
+  entities; deleted generated blocks are reported, not deleted; `moved.tf`, `imports.tf`
+  and `environments/` are skipped as the export's own; edits it cannot express (a repeated
+  block edited unevenly, a labelled nested block, variables and outputs) are listed.
+  For a project with environments it compares with the merged root.
+- Surfaces: `project_import_dir { dir, apply? }` (preview, then apply as one undo step,
+  asking first in the app), `ttg import-dir <project> <dir> [--out | --in-place]`, File ▸
+  Import exported directory… with the report and the architecture diff before *Apply*.
+- Round trip (`imported_directory_round_trips`): export `three-tier` (with its
+  environments), change, add and remove arguments of the bucket, change a nested block,
+  add a resource to a generated file and a hand-written `data.tf` with a data source and a
+  resource reading it, import, export again: the second export declares exactly the
+  edited directory's blocks (compared semantically), a second import finds nothing, and
+  the result validates.
+
 ## Explicitly still out of scope
 
 Running `plan`/`apply`, live-account access, multi-user collaboration, drift detection

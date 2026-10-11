@@ -37,6 +37,9 @@ fn validate(dir: &Path, tool: Tool) {
         Outcome::Ran { success: true, .. } => {}
         other => panic!("validate failed in {}: {}", dir.display(), other.summary()),
     }
+    if let Some(Err(e)) = ttg_codegen::validate::fmt_check(dir, tool) {
+        panic!("fmt -check failed in {}: {e}", dir.display());
+    }
 }
 
 /// An adopted entity gets an `import` block per id, the diagnostics name the blocks
@@ -136,6 +139,95 @@ fn adopted_entities_write_import_blocks_that_validate() {
         }
     }
     let _ = std::fs::remove_dir_all(&root);
+}
+
+/// With environments the merged root imports once: one id everywhere, or per environment
+/// through a project variable (a lookup on `var.environment`); an adopted entity some
+/// environment leaves out is refused, by the diagnostics and by the export.
+#[test]
+fn adoption_with_environments() {
+    let cat = Catalog::builtin();
+    let mut p = example("three-tier.ttg.json");
+    assert!(!p.settings.environments.is_empty(), "three-tier has environments");
+    let envs = p.settings.environments.clone();
+    let vnet = p
+        .containers
+        .values()
+        .find(|c| c.container_type == "virtual_network")
+        .unwrap()
+        .id
+        .clone();
+    p.settings.variables.insert(
+        "vpc_id".into(),
+        ttg_core::environment::ProjectVariable {
+            value: ttg_core::Value::Str("vpc-0base".into()),
+            description: String::new(),
+            environments: envs
+                .iter()
+                .map(|e| (e.clone(), ttg_core::Value::Str(format!("vpc-0{e}"))))
+                .collect(),
+        },
+    );
+    p.adoption_mut(&vnet)
+        .unwrap()
+        .entry("aws".into())
+        .or_default()
+        .insert("main".into(), "${var.vpc_id}".into());
+    let bucket = p
+        .nodes
+        .values()
+        .find(|n| n.resource_type == "object_storage")
+        .unwrap()
+        .id
+        .clone();
+    p.adoption_mut(&bucket)
+        .unwrap()
+        .entry("aws".into())
+        .or_default()
+        .insert("main".into(), "three-tier-assets-x7q2".into());
+    let g = ttg_codegen::generate(&p, &cat, "aws", Tool::OpenTofu).unwrap();
+    let imports = &g.files["imports.tf"];
+    for e in &envs {
+        assert!(
+            imports.contains(&format!("\"{e}\"")) && imports.contains(&format!("= \"vpc-0{e}\"")),
+            "{imports}"
+        );
+    }
+    assert!(imports.contains("[var.environment]"), "{imports}");
+    assert!(imports.contains("id = \"three-tier-assets-x7q2\""), "{imports}");
+    assert_eq!(imports.matches("import {").count(), 2, "{imports}");
+    if let Some(t) = validator() {
+        let dir = scratch("environments");
+        ttg_codegen::export(&p, &cat, "aws", Tool::OpenTofu, &dir).unwrap();
+        validate(&dir, t);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    // Absent from one environment: counted there, so refused.
+    let last = envs.last().unwrap().clone();
+    p.nodes
+        .get_mut(&bucket)
+        .unwrap()
+        .overrides
+        .entry(last.clone())
+        .or_default()
+        .absent = true;
+    let d = ttg_codegen::diagnostics::run(&p, &cat, "aws");
+    assert!(
+        d.iter().any(|x| x.code == ttg_codegen::Code::Adopt
+            && x.severity == ttg_codegen::Severity::Error
+            && x.message.contains(&format!("absent in {last}"))),
+        "{d:#?}"
+    );
+    match ttg_codegen::generate(&p, &cat, "aws", Tool::OpenTofu) {
+        Err(ttg_codegen::GenError::Blocked(ds)) => assert!(
+            ds.iter().any(|x| x.code == ttg_codegen::Code::Adopt
+                && x.message.contains("cannot depend on the environment")),
+            "{ds:#?}"
+        ),
+        Err(e) => panic!("{e}"),
+        Ok(_) => panic!("an adopted entity absent from an environment must not export"),
+    }
 }
 
 #[test]
@@ -273,6 +365,15 @@ fn imported_directory_round_trips() {
         imp.skipped
     );
     assert!(imp.deleted.is_empty(), "{:?}", imp.deleted);
+    // The example has environments: their directory and the bookkeeping files the export
+    // writes are not imported and not complained about.
+    assert!(edited.join("environments").is_dir());
+    assert!(
+        imp.notes.iter().all(|n| !n.contains("environments/")),
+        "{:?}",
+        imp.notes
+    );
+    assert!(imp.owned_changed.is_empty(), "{:?}", imp.owned_changed);
     // The preview: the architecture diff names the new entities and the changed fields.
     let diff = ttg_core::arch_diff::diff(&project, &imp.project);
     assert_eq!(diff.entities.added.len(), 3);

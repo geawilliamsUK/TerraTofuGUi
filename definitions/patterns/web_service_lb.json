@@ -1,6 +1,6 @@
 {
   "name": "Web service behind a load balancer",
-  "description": "A container app in a container environment (a new one, or `environment`) behind a load balancer in `subnets` that forwards to it, with its own role and log group and an alarm when the load balancer's targets fail their health check (notifying `topic` when given).",
+  "description": "A container app in a container environment (a new one, or `environment`) running in `app_subnets`, behind an HTTPS load balancer in `subnets` (serving `certificate`) that forwards to it, with its own role and log group and an alarm when the load balancer's targets fail their health check (notifying `topic` when given).",
   "params": [
     {
       "name": "name",
@@ -21,10 +21,14 @@
     },
     {
       "name": "app_subnets",
-      "description": "Subnets the app's tasks run in (the environment's own when left out)",
+      "description": "Private subnets the app's tasks run in (AWS runs them inside the VPC)",
       "entity": "subnet",
-      "list": true,
-      "optional": true
+      "list": true
+    },
+    {
+      "name": "certificate",
+      "description": "The TLS Certificate the load balancer serves HTTPS with (plain HTTP redirects to it)",
+      "entity": "tls_certificate"
     },
     {
       "name": "port",
@@ -74,8 +78,9 @@
       "at": [320, 50],
       "config": {
         "scheme": "internet_facing",
-        "protocol": "http",
-        "listener_port": 80,
+        "protocol": "https",
+        "listener_port": 443,
+        "redirect_http": true,
         "target_port": "{port}"
       }
     },
@@ -111,9 +116,10 @@
   "links": [
     { "source": "lb", "target": "$subnets", "relation": "network_membership" },
     { "source": "lb", "target": "app", "relation": "attachment" },
+    { "source": "lb", "target": "$certificate", "relation": "attribute_reference" },
     { "source": "app", "target": "role", "relation": "iam_binding" },
     { "source": "app", "target": "logs", "relation": "logs_to" },
-    { "source": "app", "target": "$app_subnets", "relation": "network_membership", "when": "app_subnets" },
+    { "source": "app", "target": "$app_subnets", "relation": "network_membership" },
     { "source": "env", "target": "logs", "relation": "logs_to", "when": "!environment" },
     { "source": "health", "target": "lb", "relation": "attribute_reference" },
     { "source": "health", "target": "$topic", "relation": "sends_to", "when": "topic" }

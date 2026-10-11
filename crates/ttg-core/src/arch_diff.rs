@@ -452,6 +452,11 @@ fn entity_fields(p: &Project, id: &str) -> J {
     if let Some(a) = p.adoption(id) {
         o.insert("adopt".into(), to_json(a));
     }
+    // Per-environment values and presence: `overrides.prod.config.replicas`,
+    // `overrides.pilot.absent`.
+    if let Some(ov) = p.overrides_of(id) {
+        o.insert("overrides".into(), to_json(ov));
+    }
     if e.manual {
         o.insert("manual".into(), J::Bool(true));
     }
@@ -616,15 +621,30 @@ pub fn diff(old: &Project, new: &Project) -> ProjectDiff {
     for (k, e) in &new_links {
         match old_links.get(k) {
             None => out.links.added.push(summary(new, &e.source, &e.target, &k.2)),
-            Some(o) if o.providers != e.providers => out.links.changed.push(LinkChange {
-                link: summary(new, &e.source, &e.target, &k.2),
-                fields: vec![FieldChange {
-                    path: "providers".into(),
-                    old: Some(to_json(&o.providers)),
-                    new: Some(to_json(&e.providers)),
-                }],
-            }),
-            Some(_) => {}
+            Some(o) => {
+                // The provider layers and environments a link belongs to.
+                let mut fields = Vec::new();
+                if o.providers != e.providers {
+                    fields.push(FieldChange {
+                        path: "providers".into(),
+                        old: Some(to_json(&o.providers)),
+                        new: Some(to_json(&e.providers)),
+                    });
+                }
+                if o.environments != e.environments {
+                    fields.push(FieldChange {
+                        path: "environments".into(),
+                        old: Some(to_json(&o.environments)),
+                        new: Some(to_json(&e.environments)),
+                    });
+                }
+                if !fields.is_empty() {
+                    out.links.changed.push(LinkChange {
+                        link: summary(new, &e.source, &e.target, &k.2),
+                        fields,
+                    });
+                }
+            }
         }
     }
     for (k, e) in &old_links {
@@ -978,6 +998,41 @@ mod tests {
         // Serializes for the MCP reply.
         let j = serde_json::to_value(&d).unwrap();
         assert_eq!(j["entities"]["added"][0]["type"], "event_queue");
+    }
+
+    #[test]
+    fn environment_overrides_and_link_environments() {
+        let mut old = base();
+        old.settings.environments = vec!["pilot".into(), "prod".into()];
+        let mut new = old.clone();
+        let q = new.nodes.get_mut("q").unwrap();
+        let prod = q.overrides.entry("prod".into()).or_default();
+        prod.config
+            .insert("visibility_timeout_seconds".into(), Value::Int(300));
+        q.overrides.entry("pilot".into()).or_default().absent = true;
+        new.edges[0].environments = vec!["prod".into()];
+        new.settings.name_prefix = Some("shop-${var.environment}".into());
+        let d = diff(&old, &new);
+        let c = &d.entities.changed[0];
+        let paths: Vec<&str> = c.fields.iter().map(|f| f.path.as_str()).collect();
+        assert_eq!(
+            paths,
+            [
+                "overrides.pilot.absent",
+                "overrides.prod.config.visibility_timeout_seconds"
+            ]
+        );
+        assert_eq!(d.links.changed[0].fields[0].path, "environments");
+        assert_eq!(d.settings[0].path, "settings.name_prefix");
+        let md = d.to_markdown("a", "b", &|t| t.to_string());
+        assert!(
+            md.contains("`overrides.prod.config.visibility_timeout_seconds`: set to `300`"),
+            "{md}"
+        );
+        assert!(
+            md.contains("changed: worker \u{2192} jobs (sends to) (`environments`"),
+            "{md}"
+        );
     }
 
     #[test]

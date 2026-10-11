@@ -175,6 +175,8 @@ pub struct TtgApp {
     pub selected_rule: Option<(Id, usize)>,
     /// The rule row the inspector should open and scroll to: (security group, row).
     pub focus_rule: Option<(Id, usize)>,
+    /// Checkpoints, the compare / pattern / directory-import windows (`revisions.rs`).
+    pub revisions: crate::revisions::Revisions,
     /// Built-in MCP server (off until enabled).
     #[cfg(feature = "mcp")]
     pub mcp: crate::mcp::McpState,
@@ -263,6 +265,7 @@ impl TtgApp {
             rule_edges: crate::rule_edges::RuleEdges::Groups,
             selected_rule: None,
             focus_rule: None,
+            revisions: Default::default(),
             #[cfg(feature = "mcp")]
             mcp: crate::mcp::McpState::default(),
         };
@@ -1011,6 +1014,7 @@ impl TtgApp {
         self.diag_dirty = true;
         self.camera = Camera::default();
         self.activate_view(None);
+        self.revisions.project_replaced();
         self.status = "New project".into();
     }
 
@@ -1055,6 +1059,7 @@ impl TtgApp {
                 self.diag_dirty = true;
                 self.fit_requested = true;
                 self.activate_view(None);
+                self.revisions.project_replaced();
                 self.remember(p.clone());
                 self.status = format!("Opened {}", p.display());
             }
@@ -1651,6 +1656,7 @@ impl TtgApp {
             self.mcp.show_window = open;
         }
         crate::cost_panel::window(self, ctx);
+        crate::revisions_ui::windows(self, ctx);
         if self.show_about {
             let mut open = true;
             egui::Window::new("About TerraTofu GUI")

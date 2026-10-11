@@ -140,6 +140,18 @@ Containers and nodes have the same fields, except that a container's type is
 - **`classification`** (`public`, `internal`, `confidential`, `personal`, `payment`),
   **`description`** and **`owner`** say what the resource is for; they become tags and an
   HCL comment.
+- **`adopt`** takes over resources that already exist instead of creating them:
+  `{ "aws": { "main": "vpc-0abc1234" } }` — provider, then which generated block (`main`,
+  another block key as `catalog_type` lists them, `<block>/<row key>` for one instance of
+  a repeated block such as `repo/zipos-web`, or the address itself), then the resource's
+  id in the cloud (an ARN, an Azure resource id, a Google Cloud resource path — whatever
+  the provider's import documentation asks for). The export writes one
+  `import { to = <address> id = "<id>" }` block per id into `imports.tf`; the first plan
+  imports instead of creating, and a warning lists the entity's blocks that have no id
+  (they will be created). In a project with environments an id may use a project
+  variable (`"${var.vpc_id}"`) to differ per environment; an adopted entity that an
+  environment leaves out is an error. This is not `manual`: an adopted entity is
+  generated and managed from then on, an external one is not generated at all.
 
 ### `config` and `provider_config`
 
@@ -228,6 +240,25 @@ Everything is optional. `tool` is `opentofu` or `terraform`; `target_provider` i
 `ttg check --schema` exits 1 when the file has a schema error or a diagnostic error.
 Unknown keys are warnings; the line of an entity's diagnostics is the line its id key is
 on.
+
+| Also | Run |
+|---|---|
+| What changed between two versions, as Markdown for a pull request (or JSON) | `ttg diff-project old.ttg.json new.ttg.json [--json] [--exit-code]` |
+| Bring hand edits to an export back into the file (preview; `--out` / `--in-place` writes) | `ttg import-dir project.ttg.json ./out/aws [--out edited.ttg.json]` |
+
+## Files beside the project
+
+- **`<name>.checkpoints.json`** — the project's checkpoints (File ▸ Checkpoints…, MCP
+  `checkpoint_create`): `{ "checkpoints_version": 1, "checkpoints": [ { "name",
+  "created_unix", "project": { …a whole project… } } ] }`. Kept apart so a checkpoint
+  never changes the project file, its schema or an export; delete it to drop them all.
+- **Patterns** — `<app data>/patterns/<name>.json` (`%APPDATA%\TerraTofu GUI\patterns` on
+  Windows; `TTG_PATTERNS_DIR` overrides it) holds patterns saved from a selection, in the
+  same format as the built-ins in `definitions/patterns/` (ARCHITECTURE.md §6.11):
+  `name`, `description`, `params` (`name`, `description`, `default`, `entity` type,
+  `list`, `optional`), `entities` (`key`, `type`, `name`, `parent`, `at`, `size`,
+  `config`, `provider_config`, `extra`, `description`, `when`) and `links` (`source`,
+  `target`, `relation`, `providers`, `when`), with `{param|filter}` templates in strings.
 
 ## Workflow: an agent without the MCP server
 

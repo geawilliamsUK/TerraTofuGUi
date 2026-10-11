@@ -3,6 +3,9 @@
 //! Every tool forwards an [`AgentCommand`] to the UI thread and waits for the reply.
 //! The server itself holds no project state, so any number of sessions can share it.
 
+// Tools for diffs, checkpoints, patterns and directory import.
+mod design;
+
 use super::approvals::Approvals;
 use super::{oauth, AgentCommand, AgentReply, Heartbeat, ServerEvent, Started};
 use rmcp::{
@@ -42,7 +45,6 @@ pub struct TtgServer {
     /// Approval tickets, read directly for `approval_status` (no trip through the UI).
     approvals: Arc<Approvals>,
     /// Read by the `#[tool_handler]`-generated `call_tool` / `list_tools`.
-    #[allow(dead_code)]
     tool_router: ToolRouter<Self>,
 }
 
@@ -425,11 +427,57 @@ pub struct EntityUpdateArgs {
         description = "With `environment`: false leaves the entity (and its links) out of that environment — the export counts it there — true puts it back"
     )]
     pub present: Option<bool>,
+    #[schemars(
+        description = "Adopt existing cloud resources: block key (\"main\", a secondary block, \"<block>/<row key>\" for one instance of a repeated block) or the resource address -> the resource's id in the cloud, e.g. {\"main\": \"vpc-0abc1234\"}. The export writes an import block for each (imports.tf), so the first plan takes the resource over instead of creating it. null or \"\" removes one. For adopt_provider (default: the target provider), or keyed by provider first: {\"aws\": {\"main\": \"vpc-0abc1234\"}}. Separate from `manual` (external), which generates nothing"
+    )]
+    pub adopt: Option<serde_json::Map<String, serde_json::Value>>,
+    #[schemars(description = "Provider the adopt ids are for; defaults to the target provider")]
+    pub adopt_provider: Option<String>,
 }
 
 impl EntityUpdateArgs {
+    /// The command these arguments ask for: the update, wrapped in the adoption step
+    /// when `adopt` is given.
+    fn into_command(mut self) -> Result<AgentCommand, String> {
+        let adopt = self.adopt.take();
+        let adopt_provider = self.adopt_provider.take();
+        let Some(adopt) = adopt else {
+            return self.into_update();
+        };
+        let Some(entity) = self.entity.clone() else {
+            return Err(
+                "adopt names one entity's own blocks and cloud ids; give `entity`, not `select`".into(),
+            );
+        };
+        if self.environment.is_some() || self.present.is_some() {
+            return Err(
+                "adopt is the same in every environment (an absent environment simply imports nothing); send it without `environment`".into(),
+            );
+        }
+        let nothing_else = self.name.is_none()
+            && self.config.is_none()
+            && self.provider_config.is_none()
+            && self.manual.is_none()
+            && self.providers.is_none()
+            && self.extra.is_none()
+            && self.classification.is_none()
+            && self.description.is_none()
+            && self.owner.is_none();
+        let update = if nothing_else {
+            None
+        } else {
+            Some(Box::new(self.into_update()?))
+        };
+        Ok(AgentCommand::EntityAdopt {
+            entity,
+            adopt,
+            provider: adopt_provider,
+            update,
+        })
+    }
+
     /// The single-entity or the bulk command these arguments ask for.
-    fn into_command(self) -> Result<AgentCommand, String> {
+    fn into_update(self) -> Result<AgentCommand, String> {
         // One environment's values: their own command (`exec/environments.rs`).
         if let Some(environment) = self.environment {
             let others = self.name.is_some()
@@ -1117,7 +1165,8 @@ impl TtgServer {
             session: SESSIONS.fetch_add(1, Ordering::Relaxed),
             catalog_hash,
             approvals,
-            tool_router: Self::tool_router(),
+            // The diff, checkpoint, pattern and directory-import tools (`server/design.rs`).
+            tool_router: Self::tool_router() + Self::design_router(),
         }
     }
 
@@ -2025,7 +2074,7 @@ impl TtgServer {
     }
 
     #[tool(
-        description = "Apply several diagram writes (entity_*, link_*, view_*, layout_*, selection_set, settings_set) as ONE undo step. Stops at the first failure and rolls the whole batch back. Returns each command's result. With `dry_run: true` the batch is played and then taken back: the reply has each command's result and the diagnostics it would add or remove, and nothing is kept (not in the project, the undo history or the revision counter)."
+        description = "Apply several diagram writes (entity_*, link_*, view_*, layout_*, selection_set, settings_set) as ONE undo step. Stops at the first failure and rolls the whole batch back. Returns each command's result. With `dry_run: true` the batch is played and then taken back: the reply has each command's result and the diagnostics it would add or remove, and nothing is kept (not in the project, the undo history or the revision counter). Before a large batch, checkpoint_create { name } keeps the current state under a name: project_diff { against: name } then shows what the batch changed in architecture terms, and checkpoint_restore { name } goes back to it."
     )]
     async fn project_apply(&self, Parameters(a): Parameters<ApplyArgs>) -> CallToolResult {
         let mut cmds = Vec::with_capacity(a.commands.len());
@@ -2108,7 +2157,8 @@ impl TtgServer {
     }
 }
 
-#[tool_handler]
+// The merged router (`TtgServer::tool_router`, built once in `new`), not `Self::tool_router()`.
+#[tool_handler(router = self.tool_router)]
 impl ServerHandler for TtgServer {
     fn list_resources(
         &self,
@@ -2256,7 +2306,13 @@ impl ServerHandler for TtgServer {
              https://raw.githubusercontent.com/geawilliamsUK/TerraTofuGUi/master/schemas/project.schema.json): \
              project_import {json, replace} loads one in memory, checking it against the schema \
              first; without this server an agent can write the file for the user to open or run \
-             `ttg check --schema` / `ttg export` on.              Views: view_set while a saved view is active rewrites that view's filter (use              view_activate All first to filter without touching it), view_update takes a filter of              its own, view_save refuses a name already in use unless replace is true, and              view_delete removes one.              `terratofu-gui --serve --port N --token T [project]` runs the same server headless, with \
+             `ttg check --schema` / `ttg export` on.              Views: view_set while a saved view is active rewrites that view's filter (use              view_activate All first to filter without touching it), view_update takes a filter of              its own, view_save refuses a name already in use unless replace is true, and              view_delete removes one. \
+             Before a large batch, checkpoint_create {name}; project_diff {against: name | \"saved\" | path} \
+             describes the changes for a pull request; pattern_list / pattern_apply insert tested groups \
+             (hardened bucket, queue with dead-letter queue and alarms, GPU queue worker, web service \
+             behind a load balancer); entity_update {adopt} takes over existing cloud resources with \
+             import blocks; project_import_dir previews (and with apply: true applies) hand edits made \
+             to an exported directory.              `terratofu-gui --serve --port N --token T [project]` runs the same server headless, with \
              no window and no approval prompts, for scripting and CI; with --oauth and \
              --public-url behind an HTTPS tunnel it is reachable from cloud sessions.",
         ))
