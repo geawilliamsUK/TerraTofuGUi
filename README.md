@@ -162,6 +162,21 @@ OpenTofu installed, so a definition change that produces invalid HCL fails the b
   Values only known after `apply` (queue URLs, the file system id, the target group ARN)
   are `k8s_*` outputs that `k8s/render.sh` / `render.ps1` substitute into `k8s/rendered/`,
   and the manual steps the manifests replace leave `MANUAL_STEPS.md`.
+- **Outputs** (Settings ▸ Output, `ttg export --outputs marked|all`, MCP `settings_set
+  { outputs }`): a new project writes only the outputs worth having — each entity's own
+  choice (the inspector's *Outputs* checkboxes, MCP `entity_update { outputs }`), else the
+  ones its mapping marks primary: endpoints, URLs, DNS names, ARNs and ids other systems
+  need, a cluster's name. A project saved before the setting existed keeps writing every
+  output until it is switched to *marked*. What other parts of the export read (the
+  `k8s_*` outputs, the bootstrap root's) is always written.
+- **Modules** (Settings ▸ Output ▸ Layout, `ttg export --layout modules [--module-view
+  VIEW]`, MCP `settings_set { layout, module_view }`): instead of one root, a thin root
+  whose `main.tf` calls `modules/<name>/`, one per top-level container (a network, an
+  Azure resource group, a container environment) or per group of a saved view ("Modules
+  from"). References between modules become module inputs and outputs wired in the root,
+  an aliased provider (CloudFront's us-east-1) is passed explicitly, the environments'
+  variables and `.tfvars` stay in the root, and `moved.tf` moves a state applied with one
+  root into the modules instead of replacing anything.
 - Badges on nodes: red `!` = error (export blocked), orange `!` = warning (manual step),
   `✕` = no mapping for this provider, blue `M` = flagged external/manual.
 - Undo/redo (Ctrl+Z / Ctrl+Y), copy/paste (Ctrl+C / Ctrl+V), delete, select all, save

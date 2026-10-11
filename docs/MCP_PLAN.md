@@ -389,6 +389,18 @@ string argument becomes `"30"`, `"30"` for a number becomes `30`); field values 
 converted to their field's type the same way (`"20"` for an `int` field is stored as 20).
 `catalog_type` lists a field's `units` (the unit an alarm threshold is in, per metric).
 
+Outputs and modules: `settings_set { outputs: "marked" | "all" }` chooses which outputs
+the export writes (a new project starts `marked`; a file without the setting is `all`),
+and `entity_update { outputs: ["endpoint"] }` an entity's own selection, by the output
+names `catalog_type` lists per provider with their `primary` flag (`[]` writes none, `null`
+goes back to the primary ones; an unknown name is refused with the type's list; works
+with `select`). `entity_add` / `project_get` replies carry the entity's `outputs`.
+`settings_set { layout: "flat" | "modules", module_view }` lays the export out as a root
+calling `modules/<name>/` (ARCHITECTURE §6.12), one per top-level container or per group
+of the named saved view; `module_view` must name a saved view, `null` clears it.
+`export_preview`, `entity_preview` and `plan_run` report module addresses
+(`module.network.aws_vpc.main`) in that layout.
+
 Added 2026-09-09: `project_apply` (a list of `{tool, args}` diagram writes executed as
 one undo step; `AgentCommand::Batch` snapshots first, runs each sub-command through the
 normal path, then truncates the history back and pushes one step; any failure restores

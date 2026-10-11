@@ -152,6 +152,9 @@ Containers and nodes have the same fields, except that a container's type is
   variable (`"${var.vpc_id}"`) to differ per environment; an adopted entity that an
   environment leaves out is an error. This is not `manual`: an adopted entity is
   generated and managed from then on, an external one is not generated at all.
+- **`outputs: ["endpoint"]`** lists the outputs of its mapping the export writes when
+  `settings.outputs` is `marked` (the names are in the definition's `[providers.<id>.outputs]`);
+  absent means the ones marked `primary`, `[]` none.
 
 ### `config` and `provider_config`
 
@@ -219,12 +222,19 @@ line attaches to) is optional; `providers` works as on entities.
   "backend": { "type": "s3", "args": { "bucket": "acme-tfstate", "region": "eu-west-2" } },
   "state_encryption": false,
   "provider_versions": { "aws": "~> 6.0" },
-  "kubernetes_manifests": false
+  "kubernetes_manifests": false,
+  "outputs": "marked",
+  "layout": "modules",
+  "module_view": "Modules"
 }
 ```
 
 Everything is optional. `tool` is `opentofu` or `terraform`; `target_provider` is what
-`ttg check` and `ttg export` use when no `--provider` is given.
+`ttg check` and `ttg export` use when no `--provider` is given. `outputs` is `marked` (each
+entity's selected or primary outputs; what the app writes for a new project) or `all`
+(every output; what a file without the key gets). `layout` is `flat` (the default) or
+`modules`: a root calling `modules/<name>/`, one per top-level container or per group of
+the saved view `module_view` names (ARCHITECTURE.md §6.12).
 
 ## Checking and using a file
 

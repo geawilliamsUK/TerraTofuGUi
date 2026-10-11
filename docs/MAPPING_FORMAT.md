@@ -355,6 +355,23 @@ title = "Check the role assignment scope"
 body  = """Markdown body…"""
 ```
 
+**Primary outputs.** `primary = true` marks an output worth having by default: an
+endpoint, a URL, a DNS name, an ARN or id other systems are given, a cluster's name.
+
+```toml
+endpoint = { attr = "endpoint", description = "Connection endpoint (host:port)", primary = true }
+address  = { attr = "address", description = "Host name" }
+```
+
+Which outputs an export writes is the project's `settings.outputs`: with `"marked"` (the
+default for a new project) each entity's own selection (`Node::outputs`, the inspector's
+*Outputs* checkboxes, MCP `entity_update { outputs }`) by output name, or the mapping's
+primary outputs when it selects none; with `"all"` — what a project file that does not
+mention the setting gets — every output, as before. Outputs other parts of the export
+read are not subject to it: the `k8s_*` outputs the manifests render from (§2.7) and the
+bootstrap root's outputs. Mark sparingly; a mapping with none marked writes no output for
+an entity that has not chosen one.
+
 An output may carry `when = <condition>` (v2) and is then only emitted when it holds: the
 ARN of the secret RDS keeps a managed master password in exists only when the database
 asks for one, and an output that indexes into an empty list would fail at `plan`:

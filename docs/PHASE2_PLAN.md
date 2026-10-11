@@ -1381,6 +1381,67 @@ both services and no `MANUAL_STEPS.md`; `tofu validate` and `fmt -check` clean. 
 `crates/ttg-codegen/tests/deploy_cycle.rs`, `crates/ttg-app/tests/mcp_notes.rs`, view
 geometry and arch-diff unit tests.
 
+## Round 3/4: outputs and modules (gap report R3.31, R3.32; zipOS TF-013)
+
+CallScope's export had 114 outputs, every attribute of everything; zipOS's §5 layout is
+`modules/{network,database,storage,secrets,registry,service-web,service-worker,
+task-migrate,edge,monitoring}` behind per-environment roots, and the export was one flat
+root.
+
+- **Outputs only for what is marked** — `primary = true` on a mapping output (set on the
+  endpoints, URLs, DNS names, ARNs and ids other systems are given, a cluster's name:
+  93 across the catalog), a per-entity `outputs` selection (the inspector's *Outputs*
+  checkboxes, MCP `entity_update { outputs }`, `catalog_type` lists the names and flags),
+  and `settings.outputs = "marked" | "all"`. **Default:** a new project (`Project::new_document`:
+  the app's *New*, MCP `project_new`) starts `marked`; a file that does not mention the
+  setting is `all`, so every existing export stays byte-identical until its project is
+  switched. The `k8s_*` outputs and the bootstrap root's outputs are always written.
+  `ttg export --outputs`.
+- **Modules** — `settings.layout = "flat" | "modules"` and `settings.module_view`
+  (`ttg_codegen::modules`, ARCHITECTURE §6.12): the flat export is split after generation
+  into a thin root (`main.tf` with the module calls) and `modules/<name>/` per top-level
+  generating container or per group of the chosen saved view. Cross-module references are
+  module inputs and outputs wired in the root (never `module.x` inside a module), the
+  root's variables pass through under their own names, `depends_on` becomes module-level
+  where that cannot close a cycle and goes through an `id` input otherwise, aliased
+  providers are passed with `providers = {…}` and `configuration_aliases`, `moved.tf`
+  moves every resource from its flat address, `import` blocks follow their resource, the directory import reads `modules/<name>/` back, and
+  `owned` owns `modules/`. Addresses everywhere (`address_map`, `entity_preview`,
+  `addresses_for`, plan attribution, the plan's scratch copy) are the module ones.
+  Settings ▸ Output ▸ Layout / *Modules from*, `ttg export|diff|export-all --layout
+  modules [--module-view VIEW]`, MCP `settings_set { layout, module_view }`.
+- **Environments stay one root.** The `envs/staging`, `envs/prod` roots of §5 would be
+  copies of the same module calls differing only in values, which the environments
+  design already keeps as the root's variables with `environments/<env>.tfvars` and a
+  state per environment; so the modules layout keeps one root per provider and passes
+  the environment-lifted variables to the modules (§6.12 says why at more length).
+- **Tests** — `tests/outputs.rs` (old files keep every output, marked writes the primary
+  ones, entity selections, the new-document default, k8s and bootstrap outputs kept),
+  `tests/modules.rs` (thin root and module files, inputs and outputs, environments'
+  variables passed through and the `.tfvars` unchanged, view groups and a container's own
+  box, the `us_east_1` alias passed explicitly, module-level and input `depends_on`, the
+  address map / `entity_preview` / `addresses_for` / plan attribution with module
+  addresses, switching layouts on disk), and five module-layout variants in the validate
+  suite (three-tier with environments, kubernetes with manifests, hardened with an S3
+  backend and its bootstrap key, edge with view groups and the alias, two networks whose
+  subnets depend on each other) on all three providers with both tools.
+
+Acceptance (a scratch copy of the zipOS graph, never the original): the CloudFront
+origin-facing prefix list became a native data source
+(`native:aws:data.aws_ec2_managed_prefix_list`, `name =
+"com.amazonaws.global.cloudfront.origin-facing"`) that the ALB ingress rule references
+with `$ref` instead of the literal `pl-93a247fa`; the three `$raw` task definitions name
+the ECR repositories by key (`ecr_repo_zipos_web`) instead of index; and a saved view
+"Modules" got one group per §5 module with every entity placed in its group (IAM folded
+into `service-web`, as §5 does; the shared ECS cluster there too). With `layout =
+"modules"` and `module_view = "Modules"` the AWS export is a root with `main.tf` and ten
+modules — `network`, `database`, `storage`, `secrets`, `registry`, `service_web`,
+`service_worker`, `task_migrate`, `edge` (with the `us_east_1` alias passed in),
+`monitoring` — that validates and is `fmt`-clean with OpenTofu and Terraform; exporting
+it into the directory of a flat export of the same graph removes the flat files, and its
+`moved.tf` (113 blocks: the index-to-key renames chained into the module moves) validates
+with both tools. No plan was run (no cloud credentials).
+
 ## Explicitly still out of scope
 
 Running `plan`/`apply`, live-account access, multi-user collaboration, drift detection
