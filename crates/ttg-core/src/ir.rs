@@ -55,6 +55,62 @@ pub struct BackendConfig {
     pub args: BTreeMap<String, String>,
 }
 
+/// Which of the mappings' outputs an export writes into `outputs.tf`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[serde(rename_all = "lowercase")]
+pub enum OutputSelection {
+    /// The outputs each entity selects (`Node::outputs`); an entity that selects none
+    /// gets the ones its mapping marks `primary`.
+    Marked,
+    /// Every output every mapping declares: how exports were before entities could
+    /// select them, and what a project file without the setting gets.
+    #[default]
+    All,
+}
+
+impl OutputSelection {
+    pub const ALL: [OutputSelection; 2] = [OutputSelection::Marked, OutputSelection::All];
+    pub fn key(self) -> &'static str {
+        match self {
+            OutputSelection::Marked => "marked",
+            OutputSelection::All => "all",
+        }
+    }
+    pub fn from_key(s: &str) -> Option<OutputSelection> {
+        OutputSelection::ALL.into_iter().find(|o| o.key() == s.trim())
+    }
+}
+
+/// How an export lays its configuration out.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[serde(rename_all = "lowercase")]
+pub enum Layout {
+    /// One root module per provider, its resources split into files by category.
+    #[default]
+    Flat,
+    /// A thin root calling one module per top-level container (and per group of the
+    /// view `Settings::module_view` names) under `modules/<name>/`.
+    Modules,
+}
+
+impl Layout {
+    pub const ALL: [Layout; 2] = [Layout::Flat, Layout::Modules];
+    pub fn key(self) -> &'static str {
+        match self {
+            Layout::Flat => "flat",
+            Layout::Modules => "modules",
+        }
+    }
+    pub fn from_key(s: &str) -> Option<Layout> {
+        Layout::ALL.into_iter().find(|l| l.key() == s.trim())
+    }
+    pub fn is_flat(&self) -> bool {
+        *self == Layout::Flat
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub struct Settings {
@@ -128,6 +184,26 @@ pub struct Settings {
     /// (staging yes, prod no). Resolved by `Project::for_environment`.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub disposable_environments: BTreeMap<String, bool>,
+    /// Which outputs the export writes: `marked` (what each entity selects, else its
+    /// mapping's primary outputs) or `all`. Absent — every file written before the
+    /// setting existed — means `all`, so those exports do not change; a new project
+    /// starts with `marked` (`Project::new_document`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub outputs: Option<OutputSelection>,
+    /// `flat` (one root) or `modules` (a thin root calling `modules/<name>/`).
+    #[serde(default, skip_serializing_if = "Layout::is_flat")]
+    pub layout: Layout,
+    /// With `layout = modules`: the saved view whose groups become modules (by name),
+    /// before the top-level containers. Absent: containers only.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub module_view: Option<String>,
+}
+
+impl Settings {
+    /// The output selection in force (`all` when the file does not say).
+    pub fn output_selection(&self) -> OutputSelection {
+        self.outputs.unwrap_or_default()
+    }
 }
 
 /// Per-project choices about the posture rules: the ids of the ones turned off. A rule
@@ -172,6 +248,9 @@ impl Default for Settings {
             posture: PostureSettings::default(),
             disposable: false,
             disposable_environments: BTreeMap::new(),
+            outputs: None,
+            layout: Layout::Flat,
+            module_view: None,
         }
     }
 }
@@ -323,6 +402,11 @@ pub struct Node {
     /// Existing cloud resources this entity adopts (`import` blocks), per provider.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub adopt: Adoption,
+    /// The outputs of its mapping the export writes when `settings.outputs` is
+    /// `marked`, by output name (`endpoint`, `arn`); absent = the ones the mapping marks
+    /// `primary`, `[]` = none.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub outputs: Option<Vec<String>>,
 }
 
 /// A resource that can hold other resources (VPC, Resource Group, Project).
@@ -366,6 +450,11 @@ pub struct Container {
     /// Existing cloud resources this container adopts (see `Node::adopt`).
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub adopt: Adoption,
+    /// The outputs of its mapping the export writes when `settings.outputs` is
+    /// `marked`, by output name (`endpoint`, `arn`); absent = the ones the mapping marks
+    /// `primary`, `[]` = none.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub outputs: Option<Vec<String>>,
 }
 
 /// Kinds of relationship an edge can express. Direction is always
@@ -911,6 +1000,8 @@ pub struct EntityRef<'a> {
     pub classification: Option<Classification>,
     pub description: &'a str,
     pub owner: &'a str,
+    /// The outputs it selects (`Node::outputs`).
+    pub outputs: Option<&'a [String]>,
 }
 
 impl<'a> EntityRef<'a> {
@@ -940,6 +1031,15 @@ impl Project {
         }
     }
 
+    /// A project the user starts today: [`Project::new`] plus the defaults that are newer
+    /// than the file format, which a file that does not mention them must not pick up —
+    /// only the outputs the entities mark (`settings.outputs = "marked"`).
+    pub fn new_document(name: &str) -> Self {
+        let mut p = Project::new(name);
+        p.settings.outputs = Some(OutputSelection::Marked);
+        p
+    }
+
     /// Generate a fresh id with a readable prefix, e.g. `subnet-3fa2b9c1`.
     pub fn fresh_id(&self, prefix: &str) -> Id {
         loop {
@@ -967,6 +1067,7 @@ impl Project {
                 classification: n.classification,
                 description: &n.description,
                 owner: &n.owner,
+                outputs: n.outputs.as_deref(),
             });
         }
         self.containers.get(id).map(|c| EntityRef {
@@ -983,6 +1084,7 @@ impl Project {
             classification: c.classification,
             description: &c.description,
             owner: &c.owner,
+            outputs: c.outputs.as_deref(),
         })
     }
 
@@ -1518,6 +1620,7 @@ mod tests {
                     owner: String::new(),
                     overrides: Default::default(),
                     adopt: Default::default(),
+                    outputs: None,
                 },
             );
         }

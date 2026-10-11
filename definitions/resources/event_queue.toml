@@ -93,8 +93,8 @@ tags                        = { object = { Name = { field = "name" } } }
 URL = { self_block = "main", attr = "url" }
 
 [providers.aws.outputs]
-url = { attr = "url", description = "Queue URL" }
-arn = { attr = "arn", description = "Queue ARN" }
+url = { attr = "url", description = "Queue URL", primary = true }
+arn = { attr = "arn", description = "Queue ARN", primary = true }
 
 # ---------------------------------------------------------------- Azure
 [providers.azure]
@@ -166,7 +166,7 @@ NAMESPACE = { if = { ancestor = "servicebus_namespace" }, then = { ancestor = "s
 
 [providers.azure.outputs]
 id   = { attr = "id", description = "Queue id" }
-name = { attr = "name", description = "Queue name" }
+name = { attr = "name", description = "Queue name", primary = true }
 
 # ---------------------------------------------------------------- GCP
 [providers.gcp]
@@ -263,5 +263,5 @@ TOPIC        = { self_block = "main", attr = "id" }
 SUBSCRIPTION = { self_block = "sub", attr = "id" }
 
 [providers.gcp.outputs]
-topic        = { attr = "id", description = "Topic id (publish here)" }
-subscription = { block = "sub", attr = "id", description = "Pull subscription (consume here)" }
+topic        = { attr = "id", description = "Topic id (publish here)", primary = true }
+subscription = { block = "sub", attr = "id", description = "Pull subscription (consume here)", primary = true }

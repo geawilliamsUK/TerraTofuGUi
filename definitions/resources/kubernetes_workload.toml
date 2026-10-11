@@ -335,7 +335,7 @@ if = { relation = "attribute_reference", target_type = "relational_database", ta
 then = { object = { Sid = { value = "DatabaseConnect" }, Effect = { value = "Allow" }, Action = { value = ["rds-db:connect"] }, Resource = { func = "formatlist", args = [ { value = "arn:aws:rds-db:%s:%s:dbuser:%s/%s" }, { var = "region" }, { self_data = "account", attr = "account_id" }, { relation = "attribute_reference", target_type = "relational_database", attr = "resource_id", wrap = "list" }, { field = "db_user", fallback = { field = "service_account", fallback = { field = "name", transform = "kebab" } } } ] } } }
 
 [providers.aws.outputs]
-service_account = { attr = "service_account", description = "ServiceAccount the pods must run as" }
+service_account = { attr = "service_account", description = "ServiceAccount the pods must run as", primary = true }
 
 [[providers.aws.manual_steps]]
 title = "Apply the Deployment and its ServiceAccount"
@@ -517,7 +517,7 @@ role_definition_name = { value = "Storage Blob Data Contributor" }
 principal_id         = { relation = "iam_binding", attr = "principal_id" }
 
 [providers.azure.outputs]
-subject = { attr = "subject", description = "Service account the pods must run as (system:serviceaccount:<ns>:<sa>)" }
+subject = { attr = "subject", description = "Service account the pods must run as (system:serviceaccount:<ns>:<sa>)", primary = true }
 
 [[providers.azure.manual_steps]]
 title = "Label the pods and annotate the ServiceAccount"
@@ -714,7 +714,7 @@ role    = { value = "roles/logging.logWriter" }
 member  = { relation = "iam_binding", attr = "member" }
 
 [providers.gcp.outputs]
-member = { attr = "member", description = "Workload identity member (serviceAccount:<workload pool>[<ns>/<sa>])" }
+member = { attr = "member", description = "Workload identity member (serviceAccount:<workload pool>[<ns>/<sa>])", primary = true }
 
 [[providers.gcp.manual_steps]]
 title = "Annotate the ServiceAccount"

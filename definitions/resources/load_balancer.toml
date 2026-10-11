@@ -301,7 +301,7 @@ port             = { field = "target_port" }
 TARGET_GROUP_ARN = { self_block = "tg", attr = "arn" }
 
 [providers.aws.outputs]
-dns_name = { attr = "dns_name", description = "Public DNS name of the load balancer" }
+dns_name = { attr = "dns_name", description = "Public DNS name of the load balancer", primary = true }
 zone_id  = { attr = "zone_id", description = "Hosted zone id for a Route 53 alias record" }
 
 [[providers.aws.checks]]
@@ -438,7 +438,7 @@ ip_configuration_name   = { value = "internal" }
 backend_address_pool_id = { self_block = "pool", attr = "id" }
 
 [providers.azure.outputs]
-public_ip = { block = "pip", attr = "ip_address", description = "Public IPv4 address of the load balancer" }
+public_ip = { block = "pip", attr = "ip_address", description = "Public IPv4 address of the load balancer", primary = true }
 
 [[providers.azure.manual_steps]]
 title = "AKS traffic goes through an ingress, not this load balancer"
@@ -692,9 +692,9 @@ ip_version            = { value = "IPV6" }
 load_balancing_scheme = { value = "EXTERNAL_MANAGED" }
 
 [providers.gcp.outputs]
-address         = { block = "rule", attr = "ip_address", description = "Frontend IP address" }
-global_address  = { block = "grule", attr = "ip_address", description = "Global frontend IP address of the HTTPS load balancer" }
-global_address6 = { block = "grule6", attr = "ip_address", description = "Global frontend IPv6 address of the HTTPS load balancer" }
+address         = { block = "rule", attr = "ip_address", description = "Frontend IP address", primary = true }
+global_address  = { block = "grule", attr = "ip_address", description = "Global frontend IP address of the HTTPS load balancer", primary = true }
+global_address6 = { block = "grule6", attr = "ip_address", description = "Global frontend IPv6 address of the HTTPS load balancer", primary = true }
 
 [[providers.gcp.checks]]
 severity = "error"

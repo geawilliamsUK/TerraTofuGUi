@@ -418,6 +418,11 @@ pub struct EntityUpdateArgs {
     )]
     pub owner: Option<String>,
     #[schemars(
+        description = "Outputs the export writes for it when settings.outputs is \"marked\" (the default for new projects), by the output names of its type's mappings (catalog_type lists them; e.g. [\"endpoint\", \"address\"]). [] writes none; null goes back to the outputs the mapping marks primary. With settings.outputs = \"all\" every output is written whatever this says"
+    )]
+    #[serde(default, deserialize_with = "present")]
+    pub outputs: Option<serde_json::Value>,
+    #[schemars(
         description = "false: reply with only status, id and changed instead of the whole entity (settings_set { verbose } sets the default for the session)"
     )]
     pub verbose: Option<bool>,
@@ -488,7 +493,8 @@ impl EntityUpdateArgs {
                 || self.extra.is_some()
                 || self.classification.is_some()
                 || self.description.is_some()
-                || self.owner.is_some();
+                || self.owner.is_some()
+                || self.outputs.is_some();
             if others {
                 return Err("with `environment`, entity_update takes only config, provider_config and present (names, flags, extra arguments and metadata are the same in every environment)".into());
             }
@@ -504,10 +510,29 @@ impl EntityUpdateArgs {
         if self.present.is_some() {
             return Err("`present` is per environment: give `environment` too".into());
         }
+        let outputs = match self.outputs {
+            None => None,
+            Some(serde_json::Value::Null) => Some(None),
+            Some(serde_json::Value::Array(items)) => Some(Some(
+                items
+                    .into_iter()
+                    .map(|v| match v {
+                        serde_json::Value::String(s) => Ok(s),
+                        other => Err(format!("`outputs` lists output names; {other} is not one")),
+                    })
+                    .collect::<Result<Vec<_>, _>>()?,
+            )),
+            Some(other) => {
+                return Err(format!(
+                    "`outputs` is a list of output names, [] for none or null for the mapping's primary ones, not {other}"
+                ))
+            }
+        };
         let meta = super::EntityMeta {
             classification: self.classification,
             description: self.description,
             owner: self.owner,
+            outputs,
         };
         match (self.entity, self.select) {
             (Some(entity), None) => Ok(AgentCommand::EntityUpdate {
@@ -1024,6 +1049,19 @@ pub struct SettingsArgs {
     )]
     pub name: Option<String>,
     #[schemars(
+        description = "Which outputs the export writes: \"marked\" (each entity's chosen outputs, entity_update { outputs }, else the ones its mapping marks primary: endpoints, URLs, DNS names, identifiers) or \"all\" (every output of every mapping; what a project saved before this setting existed gets)"
+    )]
+    pub outputs: Option<String>,
+    #[schemars(
+        description = "\"flat\" (one root, resources split into files by category) or \"modules\" (a thin root whose main.tf calls modules/<name>/: one per top-level container, or per group of module_view; references between them become module inputs and outputs, and moved.tf carries a state applied flat into the modules)"
+    )]
+    pub layout: Option<String>,
+    #[schemars(
+        description = "With layout \"modules\": the saved view whose groups become modules (by name), before the containers; null or \"\" for containers only"
+    )]
+    #[serde(default, deserialize_with = "present")]
+    pub module_view: Option<serde_json::Value>,
+    #[schemars(
         description = "Session default for entity_add / entity_update / link_add replies: false returns only status, id and changed (a call's own verbose wins). Not saved with the project"
     )]
     pub verbose: Option<bool>,
@@ -1077,6 +1115,9 @@ pub const SETTINGS_KEYS: &[&str] = &[
     "provider_versions",
     "posture",
     "name",
+    "outputs",
+    "layout",
+    "module_view",
     "verbose",
     "environments",
     "rename_environment",
@@ -1121,7 +1162,10 @@ impl SettingsArgs {
             || self.name.is_some()
             || self.verbose.is_some()
             || self.disposable.is_some()
-            || self.disposable_environments.is_some();
+            || self.disposable_environments.is_some()
+            || self.outputs.is_some()
+            || self.layout.is_some()
+            || self.module_view.is_some();
         let env = AgentCommand::EnvSettings {
             environments: self.environments,
             rename: self.rename_environment.map(|r| (r.from, r.to)),
@@ -1140,6 +1184,9 @@ impl SettingsArgs {
             provider_versions: self.provider_versions,
             posture: self.posture,
             name: self.name,
+            outputs: self.outputs,
+            layout: self.layout,
+            module_view: self.module_view,
             verbose: self.verbose,
             disposable: self.disposable,
             disposable_environments: self.disposable_environments,

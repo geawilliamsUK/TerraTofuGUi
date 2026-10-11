@@ -3,7 +3,8 @@
 //! and on `hardened` with each state backend and state encryption on, which is what
 //! produces the bootstrap roots, and on `three-tier` with environments that leave a
 //! resource out, a name prefix and a project variable (counts, `one()`, templates and
-//! `.tfvars`-driven variables on every provider). Every export must also already be
+//! `.tfvars`-driven variables on every provider), and on five projects in the modules
+//! layout (`module_variants`). Every export must also already be
 //! formatted: `fmt -check -recursive` passes with each installed binary. Skips (passes)
 //! when neither binary is installed, so the ordinary test suite stays dependency-free; CI
 //! installs OpenTofu so it always runs there. Set `TTG_REQUIRE_VALIDATE=1` to make a
@@ -136,6 +137,87 @@ fn environment_variants() -> Vec<(String, Project)> {
     vec![("environments".to_string(), p)]
 }
 
+/// The modules layout: `three-tier` (environments' variables passed to the modules),
+/// `kubernetes` with its manifests (the `k8s_*` outputs read through the modules),
+/// `hardened` with an S3 backend and its key in the bootstrap root, `edge` with a view
+/// whose group puts the CDN, its certificate and its Web ACL in one module (the
+/// `us_east_1` alias passed in), and networks whose subnets depend on each other (through
+/// inputs) and on one another one way (a module-level `depends_on`).
+fn module_variants() -> Vec<(String, Project)> {
+    let load = |name: &str| {
+        ttg_core::project::load(
+            &Path::new(env!("CARGO_MANIFEST_DIR")).join(format!("../../examples/{name}.ttg.json")),
+        )
+        .unwrap()
+    };
+    let modules = |mut p: Project| {
+        p.settings.layout = ttg_core::Layout::Modules;
+        p
+    };
+    let mut out = vec![
+        ("modules-three-tier".to_string(), modules(load("three-tier"))),
+        ("modules-kubernetes".to_string(), {
+            let mut p = modules(load("kubernetes"));
+            p.settings.kubernetes_manifests = true;
+            p
+        }),
+    ];
+    let (_, hardened) = state_variants().remove(0);
+    out.push(("modules-state-s3".into(), modules(hardened)));
+    let mut edge = modules(load("edge"));
+    let id = |p: &Project, name: &str| {
+        p.entities()
+            .iter()
+            .find(|e| e.name == name)
+            .map(|e| e.id.to_string())
+            .unwrap()
+    };
+    let mut v = ttg_core::View::new("Modules", Default::default());
+    for (i, name) in ["assets cdn", "site cert", "edge waf"].iter().enumerate() {
+        let at = ttg_core::Position {
+            x: 5000 + 200 * i as i32,
+            y: 5000,
+        };
+        v.layout.as_mut().unwrap().positions.insert(id(&edge, name), at);
+    }
+    v.groups.push(ttg_core::Group {
+        id: "g-edge".into(),
+        label: "edge".into(),
+        position: ttg_core::Position { x: 4900, y: 4900 },
+        size: ttg_core::Size { w: 800, h: 300 },
+        color: None,
+    });
+    edge.views.push(v);
+    edge.settings.module_view = Some("Modules".into());
+    out.push(("modules-edge-groups".into(), edge));
+    let crossed: Project = serde_json::from_value(serde_json::json!({
+        "schema_version": 1,
+        "name": "crossed",
+        "settings": {"tool": "opentofu", "target_provider": "aws", "layout": "modules",
+                     "provider_settings": {"aws": {"region": "eu-west-2"}}},
+        "containers": {
+            "alpha": {"id": "alpha", "name": "alpha", "container_type": "virtual_network", "config": {"cidr_block": "10.1.0.0/16"}},
+            "beta": {"id": "beta", "name": "beta", "container_type": "virtual_network", "config": {"cidr_block": "10.2.0.0/16"}},
+            "gamma": {"id": "gamma", "name": "gamma", "container_type": "virtual_network", "config": {"cidr_block": "10.3.0.0/16"}}
+        },
+        "nodes": {
+            "a1": {"id": "a1", "name": "a1", "resource_type": "subnet", "parent": "alpha", "config": {"cidr_block": "10.1.1.0/24"}},
+            "a2": {"id": "a2", "name": "a2", "resource_type": "subnet", "parent": "alpha", "config": {"cidr_block": "10.1.2.0/24"}},
+            "b1": {"id": "b1", "name": "b1", "resource_type": "subnet", "parent": "beta", "config": {"cidr_block": "10.2.1.0/24"}},
+            "b2": {"id": "b2", "name": "b2", "resource_type": "subnet", "parent": "beta", "config": {"cidr_block": "10.2.2.0/24"}},
+            "c1": {"id": "c1", "name": "c1", "resource_type": "subnet", "parent": "gamma", "config": {"cidr_block": "10.3.1.0/24"}}
+        },
+        "edges": [
+            {"source": "a1", "target": "b1", "relation": "depends_on"},
+            {"source": "b2", "target": "a2", "relation": "depends_on"},
+            {"source": "c1", "target": "a1", "relation": "depends_on"}
+        ]
+    }))
+    .unwrap();
+    out.push(("modules-crossed".into(), crossed));
+    out
+}
+
 #[test]
 fn every_example_validates() {
     // Prefer OpenTofu; fall back to Terraform. Either validates both flavours of output
@@ -173,6 +255,8 @@ fn every_example_validates() {
         .collect();
     projects.extend(state_variants());
     projects.extend(environment_variants());
+    projects.extend(module_variants());
+    let mut modules_validated = 0;
     let mut bootstraps = 0;
     for (stem, project) in &projects {
         cat.ensure_native_types(project);
@@ -196,6 +280,9 @@ fn every_example_validates() {
                         ));
                     }
                 }
+                if rep.out_dir.join("modules").is_dir() {
+                    modules_validated += 1;
+                }
                 for dir in roots(&rep.out_dir) {
                     ran += 1;
                     if dir != rep.out_dir {
@@ -217,6 +304,11 @@ fn every_example_validates() {
     let _ = std::fs::remove_dir_all(&root);
     assert!(ran > 0, "no example produced an exportable configuration");
     assert!(formatted > 0, "no export was checked with fmt");
+    // Five projects in the modules layout, both flavours, on every provider that takes them.
+    assert!(
+        modules_validated >= 20,
+        "only {modules_validated} exports in the modules layout were validated"
+    );
     // Three backends x both tools, plus the Google Cloud export of the S3 variant (store
     // and key roots) and the Terraform flavours (store only): well over a dozen roots.
     assert!(

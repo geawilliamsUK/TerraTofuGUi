@@ -91,7 +91,7 @@ zone_id                = { relation = "attribute_reference", target_type = "load
 evaluate_target_health = { value = false }
 
 [providers.aws.outputs]
-fqdn = { attr = "fqdn", description = "Fully qualified record name" }
+fqdn = { attr = "fqdn", description = "Fully qualified record name", primary = true }
 
 [[providers.aws.checks]]
 severity = "error"
@@ -196,10 +196,10 @@ block = "record"
 value = { relation = "attribute_reference", target_type = "cdn", block = "domain", attr = "validation_token" }
 
 [providers.azure.outputs]
-a_fqdn     = { block = "a", attr = "fqdn", description = "Fully qualified record name" }
-aaaa_fqdn  = { block = "aaaa", attr = "fqdn", description = "Fully qualified record name" }
-cname_fqdn = { block = "cname", attr = "fqdn", description = "Fully qualified record name" }
-txt_fqdn   = { block = "txt", attr = "fqdn", description = "Fully qualified record name" }
+a_fqdn     = { block = "a", attr = "fqdn", description = "Fully qualified record name", primary = true }
+aaaa_fqdn  = { block = "aaaa", attr = "fqdn", description = "Fully qualified record name", primary = true }
+cname_fqdn = { block = "cname", attr = "fqdn", description = "Fully qualified record name", primary = true }
+txt_fqdn   = { block = "txt", attr = "fqdn", description = "Fully qualified record name", primary = true }
 
 [[providers.azure.checks]]
 severity = "error"
@@ -241,7 +241,7 @@ ttl          = { field = "ttl" }
 rrdatas      = { if = { relation = "attribute_reference", target_type = "load_balancer" }, then = { if = { field = "record_type", equals = "AAAA" }, then = { relation = "attribute_reference", target_type = "load_balancer", block = "grule6", attr = "ip_address", wrap = "list" }, else = { relation = "attribute_reference", target_type = "load_balancer", block = "rule", attr = "ip_address", wrap = "list", fallback = { relation = "attribute_reference", target_type = "load_balancer", block = "grule", attr = "ip_address", wrap = "list" } } }, else = { if = { relation = "attribute_reference", target_type = "cdn" }, then = { if = { field = "record_type", equals = "AAAA" }, then = { relation = "attribute_reference", target_type = "cdn", block = "addr6", attr = "address", wrap = "list", fallback = { relation = "attribute_reference", target_type = "cdn", hop = { relation = "attribute_reference", target_type = "load_balancer" }, block = "grule6", attr = "ip_address", wrap = "list" } }, else = { relation = "attribute_reference", target_type = "cdn", block = "addr", attr = "address", wrap = "list", fallback = { relation = "attribute_reference", target_type = "cdn", hop = { relation = "attribute_reference", target_type = "load_balancer" }, block = "grule", attr = "ip_address", wrap = "list" } } }, else = { field = "values" } } }
 
 [providers.gcp.outputs]
-name = { attr = "name", description = "Fully qualified record name" }
+name = { attr = "name", description = "Fully qualified record name", primary = true }
 
 [[providers.gcp.checks]]
 severity = "error"

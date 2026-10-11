@@ -36,7 +36,7 @@ name = { field = "domain" }
 tags = { object = { Name = { field = "name" } } }
 
 [providers.aws.outputs]
-name_servers = { attr = "name_servers", description = "Name servers to delegate the domain to" }
+name_servers = { attr = "name_servers", description = "Name servers to delegate the domain to", primary = true }
 
 # ---------------------------------------------------------------- Azure
 [providers.azure]
@@ -51,7 +51,7 @@ name                = { field = "domain" }
 resource_group_name = { ancestor = "resource_group", attr = "name" }
 
 [providers.azure.outputs]
-name_servers = { attr = "name_servers", description = "Name servers to delegate the domain to" }
+name_servers = { attr = "name_servers", description = "Name servers to delegate the domain to", primary = true }
 
 # ---------------------------------------------------------------- GCP
 [providers.gcp]
@@ -67,4 +67,4 @@ dns_name   = { func = "format", args = [ { value = "%s." }, { field = "domain" }
 visibility = { value = "public" }
 
 [providers.gcp.outputs]
-name_servers = { attr = "name_servers", description = "Name servers to delegate the domain to" }
+name_servers = { attr = "name_servers", description = "Name servers to delegate the domain to", primary = true }

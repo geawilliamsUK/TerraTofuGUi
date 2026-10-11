@@ -62,7 +62,7 @@ impl Rect {
 }
 
 /// Position of an entity as `view` sees it (a view-owned layout wins).
-fn position_of(p: &Project, view: Option<&View>, id: &str) -> Option<Position> {
+pub fn position_of(p: &Project, view: Option<&View>, id: &str) -> Option<Position> {
     let own = view
         .and_then(|v| v.layout.as_ref())
         .and_then(|l| l.positions.get(id))
@@ -71,7 +71,7 @@ fn position_of(p: &Project, view: Option<&View>, id: &str) -> Option<Position> {
 }
 
 /// Size of an entity as `view` sees it.
-fn size_of(p: &Project, view: Option<&View>, id: &str) -> Option<Size> {
+pub fn size_of(p: &Project, view: Option<&View>, id: &str) -> Option<Size> {
     if let Some(s) = view.and_then(|v| v.layout.as_ref()).and_then(|l| l.sizes.get(id)) {
         return Some(*s);
     }
@@ -489,6 +489,7 @@ mod tests {
                 owner: String::new(),
                 overrides: Default::default(),
                 adopt: Default::default(),
+                outputs: None,
             },
         );
         for (id, x) in [("a", 100), ("b", 400)] {
@@ -511,6 +512,7 @@ mod tests {
                     owner: String::new(),
                     overrides: Default::default(),
                     adopt: Default::default(),
+                    outputs: None,
                 },
             );
         }

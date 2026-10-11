@@ -3368,3 +3368,56 @@ fn headless_subnets_hold_resources_and_tiers_lay_out() {
     assert!(!err, "{got}");
     assert_eq!(got["filter"]["hide_monitoring"], json!(true), "{got}");
 }
+
+#[test]
+fn headless_outputs_and_modules() {
+    let server = start("three-tier.ttg.json");
+    let mut c = Client::new(&server);
+    c.initialize();
+    let (err, t) = c.call("catalog_type", json!({"type_id": "relational_database"}));
+    assert!(!err, "{t}");
+    let outs = &t["providers"]["aws"]["outputs"];
+    assert!(
+        outs.as_array()
+            .unwrap()
+            .iter()
+            .any(|o| o["name"] == json!("endpoint") && o["primary"] == json!(true)),
+        "{outs}"
+    );
+    let (err, s) = c.call("settings_set", json!({"outputs": "marked", "layout": "modules"}));
+    assert!(!err, "{s}");
+    assert_eq!(s["outputs"], json!("marked"), "{s}");
+    assert_eq!(s["layout"], json!("modules"), "{s}");
+    let (err, bad) = c.call("settings_set", json!({"module_view": "No such view"}));
+    assert!(err, "{bad}");
+    let (err, bad) = c.call("entity_update", json!({"entity": "app db", "outputs": ["nope"]}));
+    assert!(
+        err && bad.to_string().contains("endpoint"),
+        "the type's outputs are listed: {bad}"
+    );
+    let (err, u) = c.call(
+        "entity_update",
+        json!({"entity": "app db", "outputs": ["address"]}),
+    );
+    assert!(!err, "{u}");
+    assert_eq!(u["entity"]["outputs"], json!(["address"]), "{u}");
+    let (err, pre) = c.call("export_preview", json!({"provider": "aws"}));
+    assert!(!err, "{pre}");
+    let files = &pre["files"];
+    let outs = files["outputs.tf"].as_str().unwrap();
+    assert!(
+        outs.contains("output \"app_db_address\"") && !outs.contains("output \"app_db_endpoint\""),
+        "{outs}"
+    );
+    assert!(
+        files["main.tf"].as_str().unwrap().contains("module \"main\""),
+        "{files}"
+    );
+    assert!(files["modules/main/network.tf"].is_string(), "{files}");
+    let (err, e) = c.call("entity_preview", json!({"entity": "main", "provider": "aws"}));
+    assert!(!err, "{e}");
+    assert_eq!(e["addresses"], json!(["module.main.aws_vpc.main"]), "{e}");
+    let (err, u) = c.call("entity_update", json!({"entity": "app db", "outputs": null}));
+    assert!(!err, "{u}");
+    assert_eq!(u["entity"]["outputs"], json!(null), "{u}");
+}

@@ -345,7 +345,7 @@ impl TtgApp {
     pub(super) fn bulk_update(&mut self, select: Selector, changes: EntityChanges) -> R {
         if changes.is_empty() {
             return Err(
-                "nothing to update: give config, provider_config, manual, providers, extra, classification, description or owner (a bulk update cannot rename)"
+                "nothing to update: give config, provider_config, manual, providers, extra, classification, description, owner or outputs (a bulk update cannot rename)"
                     .into(),
             );
         }

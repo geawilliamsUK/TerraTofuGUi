@@ -1,8 +1,10 @@
 //! The files an export owns inside its directory, and nothing else.
 //!
 //! An export writes the configuration at the top level and, beside it, directories of
-//! its own: `k8s/` (the Kubernetes manifests, `crate::k8s`) and `bootstrap/` (the root
-//! that creates the state store and key, `crate::state`). Re-exporting must replace what
+//! its own: `k8s/` (the Kubernetes manifests, `crate::k8s`), `bootstrap/` (the root
+//! that creates the state store and key, `crate::state`), `environments/` (each
+//! environment's values and backend, `crate::environments`) and `modules/` (the modules
+//! layout, `crate::modules`). Re-exporting must replace what
 //! it wrote and remove what it would no longer write — a manifest for a workload that is
 //! gone, a bootstrap root after the backend is cleared — but never touch what the user's
 //! tools put there: variable values, state files, `.terraform/` and its lock file, or
@@ -63,6 +65,13 @@ const OWNED: &[OwnedDir] = &[
     // files and `.terraform/` are not `.tf` files and are left where they are.
     OwnedDir {
         dir: crate::state::BOOTSTRAP_DIR,
+        deep: true,
+        owns: root_file,
+    },
+    // `modules/<name>/` of the modules layout: removed with the rest when the project
+    // goes back to the flat layout or a module loses its last entity.
+    OwnedDir {
+        dir: crate::modules::DIR,
         deep: true,
         owns: root_file,
     },
@@ -162,6 +171,7 @@ mod tests {
             diagnostics: Vec::new(),
             entity_blocks: Default::default(),
             lifted: Vec::new(),
+            module_inputs: Default::default(),
         }
     }
 

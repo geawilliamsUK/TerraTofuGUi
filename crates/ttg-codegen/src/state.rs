@@ -719,6 +719,7 @@ fn node(cat: &Catalog, id: &str, name: &str, resource_type: &str) -> Node {
         owner: String::new(),
         overrides: Default::default(),
         adopt: Default::default(),
+        outputs: None,
     }
 }
 
@@ -775,6 +776,7 @@ fn add_store(mini: &mut Project, main: &Project, cfg: &BackendConfig, cat: &Cata
                 owner: String::new(),
                 overrides: Default::default(),
                 adopt: Default::default(),
+                outputs: None,
             };
             mini.containers.insert(rg.id.clone(), rg);
             n.parent = Some(STORE_RG_ID.into());

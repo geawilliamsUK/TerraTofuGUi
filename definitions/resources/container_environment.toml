@@ -67,7 +67,7 @@ name  = { value = "containerInsights" }
 value = { if = { field = "container_insights" }, then = { value = "enabled" }, else = { value = "disabled" } }
 
 [providers.aws.outputs]
-name = { attr = "name", description = "ECS cluster name (aws ecs run-task --cluster)" }
+name = { attr = "name", description = "ECS cluster name (aws ecs run-task --cluster)", primary = true }
 arn  = { attr = "arn", description = "ECS cluster ARN" }
 
 # ---------------------------------------------------------------- Azure
@@ -93,7 +93,7 @@ infrastructure_subnet_id   = { relation = "network_membership", attr = "id" }
 
 [providers.azure.outputs]
 id             = { attr = "id", description = "Container Apps environment id" }
-default_domain = { attr = "default_domain", description = "Domain the environment's apps are served under" }
+default_domain = { attr = "default_domain", description = "Domain the environment's apps are served under", primary = true }
 
 # ---------------------------------------------------------------- GCP
 [providers.gcp]

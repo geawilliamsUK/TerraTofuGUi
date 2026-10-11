@@ -247,8 +247,8 @@ if = { relation = "attachment", target_type = "object_storage" }
 then = { object = { Sid = { value = "Bucket" }, Effect = { value = "Allow" }, Action = { value = ["s3:GetObject", "s3:PutObject", "s3:DeleteObject", "s3:ListBucket"] }, Resource = { func = "concat", args = [ { relation = "attachment", target_type = "object_storage", attr = "arn", wrap = "list" }, { func = "formatlist", args = [ { value = "%s/*" }, { relation = "attachment", target_type = "object_storage", attr = "arn", wrap = "list" } ] } ] } } }
 
 [providers.aws.outputs]
-arn = { attr = "arn", description = "Function ARN" }
-url = { block = "url", attr = "function_url", description = "Public HTTPS URL" }
+arn = { attr = "arn", description = "Function ARN", primary = true }
+url = { block = "url", attr = "function_url", description = "Public HTTPS URL", primary = true }
 
 # ---------------------------------------------------------------- Azure
 [providers.azure]
@@ -460,7 +460,7 @@ block = "enabled_log"
 category = { value = "FunctionAppLogs" }
 
 [providers.azure.outputs]
-hostname = { attr = "default_hostname", description = "Function app host name (HTTP triggers are served here)" }
+hostname = { attr = "default_hostname", description = "Function app host name (HTTP triggers are served here)", primary = true }
 
 [[providers.azure.checks]]
 when = { all = [ { relation = "network_membership" }, { relation = "network_membership", target_provider_field = "delegation", equals = "web_serverfarms", absent = true } ] }
@@ -651,7 +651,7 @@ role   = { value = "roles/storage.objectAdmin" }
 member = { relation = "iam_binding", attr = "member" }
 
 [providers.gcp.outputs]
-url = { attr = "url", description = "HTTPS URL of the function" }
+url = { attr = "url", description = "HTTPS URL of the function", primary = true }
 
 [[providers.gcp.manual_steps]]
 title = "Connector subnet must be a dedicated /28"

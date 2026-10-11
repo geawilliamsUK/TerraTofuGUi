@@ -3,6 +3,7 @@
 //! ```text
 //! ttg check      <project.ttg.json> [--provider aws] [--schema]
 //! ttg export     <project.ttg.json> --provider aws --tool opentofu --out ./out/aws [--validate] [--k8s]
+//!                [--layout flat|modules] [--module-view VIEW] [--outputs marked|all]
 //! ttg export-all <project.ttg.json> --tool opentofu --out ./out [--zip] [--validate] [--k8s]
 //! ttg catalog    [--definitions ./definitions]
 //! ttg view       export <project.ttg.json> <view> [--format md|mermaid|sequence] [--out doc.md]
@@ -15,7 +16,7 @@ mod cost;
 mod review;
 
 use anyhow::{bail, Context, Result};
-use clap::{Parser, Subcommand, ValueEnum};
+use clap::{Args, Parser, Subcommand, ValueEnum};
 use std::path::PathBuf;
 use ttg_catalog::Catalog;
 use ttg_codegen::Severity;
@@ -48,6 +49,39 @@ impl From<ToolArg> for Tool {
         match t {
             ToolArg::Terraform => Tool::Terraform,
             ToolArg::Opentofu => Tool::OpenTofu,
+        }
+    }
+}
+
+/// How an export is laid out and which outputs it writes, over the project's settings.
+#[derive(Args, Clone, Default)]
+struct LayoutArgs {
+    /// `flat` (one root) or `modules` (a thin root calling modules/<name>/), whatever
+    /// the project's own setting says.
+    #[arg(long, value_parser = ["flat", "modules"])]
+    layout: Option<String>,
+    /// With the modules layout: the saved view whose groups become modules.
+    #[arg(long, value_name = "VIEW")]
+    module_view: Option<String>,
+    /// `marked` (each entity's selected or primary outputs) or `all` (every output).
+    #[arg(long, value_parser = ["marked", "all"])]
+    outputs: Option<String>,
+}
+
+impl LayoutArgs {
+    fn apply(&self, p: &mut ttg_core::Project) {
+        if let Some(l) = self.layout.as_deref().and_then(ttg_core::Layout::from_key) {
+            p.settings.layout = l;
+        }
+        if let Some(v) = &self.module_view {
+            p.settings.module_view = Some(v.clone());
+        }
+        if let Some(o) = self
+            .outputs
+            .as_deref()
+            .and_then(ttg_core::OutputSelection::from_key)
+        {
+            p.settings.outputs = Some(o);
         }
     }
 }
@@ -86,6 +120,8 @@ enum Cmd {
         /// CI runners and every developer machine (needs the binary and the network).
         #[arg(long)]
         lock: bool,
+        #[command(flatten)]
+        layout: LayoutArgs,
     },
     /// Show what exporting would change in an existing export directory, without
     /// writing anything. Exits 1 when there are changes.
@@ -104,6 +140,8 @@ enum Cmd {
         /// Compare an export with Kubernetes manifests (see `export --k8s`).
         #[arg(long)]
         k8s: bool,
+        #[command(flatten)]
+        layout: LayoutArgs,
     },
     /// Export one complete project directory per provider under --out.
     ExportAll {
@@ -120,6 +158,8 @@ enum Cmd {
         /// Also write Kubernetes manifests into each <out>/<provider>/k8s/.
         #[arg(long)]
         k8s: bool,
+        #[command(flatten)]
+        layout: LayoutArgs,
     },
     /// Load and validate the definition catalog, then list what it contains.
     Catalog {
@@ -1001,9 +1041,11 @@ fn main() -> Result<()> {
             validate,
             k8s,
             lock,
+            layout,
         } => {
             let mut p = ttg_core::project::load(&project)?;
             p.settings.kubernetes_manifests |= k8s;
+            layout.apply(&mut p);
             cat.ensure_native_types(&p);
             let provider = provider.unwrap_or(p.settings.target_provider.clone());
             let tool: Tool = tool.map(Into::into).unwrap_or(p.settings.tool);
@@ -1040,9 +1082,11 @@ fn main() -> Result<()> {
             out,
             full,
             k8s,
+            layout,
         } => {
             let mut p = ttg_core::project::load(&project)?;
             p.settings.kubernetes_manifests |= k8s;
+            layout.apply(&mut p);
             cat.ensure_native_types(&p);
             let provider = provider.unwrap_or(p.settings.target_provider.clone());
             let tool: Tool = tool.map(Into::into).unwrap_or(p.settings.tool);
@@ -1076,9 +1120,11 @@ fn main() -> Result<()> {
             zip,
             validate,
             k8s,
+            layout,
         } => {
             let mut p = ttg_core::project::load(&project)?;
             p.settings.kubernetes_manifests |= k8s;
+            layout.apply(&mut p);
             cat.ensure_native_types(&p);
             let tool: Tool = tool.map(Into::into).unwrap_or(p.settings.tool);
             std::fs::create_dir_all(&out)?;

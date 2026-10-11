@@ -284,7 +284,7 @@ target_prefix = { func = "format", args = [ { value = "%s/" }, { field = "name",
 NAME = { self_block = "main", attr = "bucket" }
 
 [providers.aws.outputs]
-id  = { attr = "id", description = "Bucket name" }
+id  = { attr = "id", description = "Bucket name", primary = true }
 arn = { attr = "arn", description = "Bucket ARN" }
 
 # ---------------------------------------------------------------- Azure
@@ -418,7 +418,7 @@ ACCOUNT   = { self_block = "main", attr = "name" }
 CONTAINER = { self_block = "container", attr = "name" }
 
 [providers.azure.outputs]
-id = { attr = "id", description = "Storage account id" }
+id = { attr = "id", description = "Storage account id", primary = true }
 
 # ---------------------------------------------------------------- GCP
 [providers.gcp]
@@ -543,7 +543,7 @@ NAME = { self_block = "main", attr = "name" }
 
 [providers.gcp.outputs]
 id  = { attr = "id", description = "Bucket name" }
-url = { attr = "url", description = "gs:// URL" }
+url = { attr = "url", description = "gs:// URL", primary = true }
 
 [[providers.gcp.manual_steps]]
 title = "Let Cloud Storage use the encryption key"

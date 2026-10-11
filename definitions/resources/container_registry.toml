@@ -154,8 +154,8 @@ action       = { object = { type = { value = "expire" } } }
 REGISTRY = { raw = "split(\"/\", @urls@[0])[0]", refs = { urls = { func = "concat", args = [ { self_block = "main", attr = "repository_url", wrap = "list" }, { self_block = "repo", attr = "repository_url", wrap = "list" } ] } } }
 
 [providers.aws.outputs]
-url             = { attr = "repository_url", description = "Repository URL" }
-repository_urls = { block = "repo", attr = "repository_url", description = "URL of each listed repository" }
+url             = { attr = "repository_url", description = "Repository URL", primary = true }
+repository_urls = { block = "repo", attr = "repository_url", description = "URL of each listed repository", primary = true }
 
 # ---------------------------------------------------------------- Azure
 [providers.azure]
@@ -194,7 +194,7 @@ admin_enabled       = { value = false }
 REGISTRY = { self_block = "main", attr = "login_server" }
 
 [providers.azure.outputs]
-url = { attr = "login_server", description = "Registry login server" }
+url = { attr = "login_server", description = "Registry login server", primary = true }
 
 # A Kubernetes Workload that runs its image from here ('Runs image from') is pulled by the
 # cluster's kubelet identity, which has no rights on the registry by default. One step per
@@ -273,4 +273,4 @@ tag_prefixes = { if = { field = "expire_images", equals = "tagged" }, then = { f
 REGISTRY = { func = "format", args = [ { value = "%s-docker.pkg.dev/%s/%s" }, { self_block = "main", attr = "location" }, { self_block = "main", attr = "project" }, { self_block = "main", attr = "repository_id" } ] }
 
 [providers.gcp.outputs]
-id = { attr = "id", description = "Repository id" }
+id = { attr = "id", description = "Repository id", primary = true }

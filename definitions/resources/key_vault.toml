@@ -57,7 +57,7 @@ purge_protection_enabled   = { value = false }
 soft_delete_retention_days = { if = { setting = "disposable" }, then = { value = 7 } }
 
 [providers.azure.outputs]
-uri = { attr = "vault_uri", description = "Vault URI" }
+uri = { attr = "vault_uri", description = "Vault URI", primary = true }
 
 [[providers.azure.manual_steps]]
 title = "Grant the deploying identity rights on the vault"

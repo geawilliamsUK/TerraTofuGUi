@@ -22,8 +22,14 @@
 //!   [`DirImport::deleted`] and left in the diagram: deleting an entity is a decision for
 //!   the user, not something to infer from a missing block.
 //!
-//! Everything else — variables, outputs, providers, `locals`, modules, subdirectories —
-//! is listed, not imported. The result is a new project; nothing is written, and the
+//! An export in the modules layout is read the same way: the blocks in
+//! `modules/<name>/*.tf` are taken with the module's inputs that carry another module's
+//! or the root's values turned back into the flat references they stand for
+//! (`var.vpc_main_id` is `aws_vpc.main.id`), and compared with the modules layout of the
+//! project put back the same way, so an override reads as it would in a flat export.
+//!
+//! Everything else — variables, outputs, providers, `locals`, module calls, other
+//! subdirectories — is listed, not imported. The result is a new project; nothing is written, and the
 //! caller shows [`ttg_core::arch_diff`] between the two before applying it.
 
 use crate::plan::Plan;
@@ -207,6 +213,30 @@ const GENERATED_ONLY: [&str; 2] = ["moved.tf", "imports.tf"];
 /// Subdirectories an export writes and an import leaves alone without remark: the
 /// per-environment `.tfvars` and backend files.
 const GENERATED_DIRS: [&str; 1] = [crate::environments::DIR];
+
+/// The `.tf` files of each `modules/<name>/` of a modules-layout export, named by their
+/// path in the directory (`modules/network/network.tf`).
+fn read_module_tf(dir: &Path) -> Result<Vec<(String, String)>, String> {
+    let mut out = Vec::new();
+    let Ok(rd) = std::fs::read_dir(dir.join(crate::modules::DIR)) else {
+        return Ok(out);
+    };
+    for m in rd.flatten().filter(|m| m.path().is_dir()) {
+        let module = m.file_name().to_string_lossy().to_string();
+        for (name, text) in read_dir_tf(&m.path())? {
+            out.push((format!("{}/{module}/{name}", crate::modules::DIR), text));
+        }
+    }
+    out.sort();
+    Ok(out)
+}
+
+/// The module a file of a modules-layout export belongs to: `network` for
+/// `modules/network/network.tf`.
+fn module_of(name: &str) -> Option<&str> {
+    let rest = name.strip_prefix(crate::modules::DIR)?.strip_prefix('/')?;
+    rest.split_once('/').map(|(m, _)| m)
+}
 
 fn read_dir_tf(dir: &Path) -> Result<Vec<(String, String)>, String> {
     let rd = std::fs::read_dir(dir).map_err(|e| format!("cannot read {}: {e}", dir.display()))?;
@@ -527,7 +557,8 @@ pub fn import_dir(
     dir: &Path,
     provider: Option<&str>,
 ) -> Result<DirImport, String> {
-    let texts = read_dir_tf(dir)?;
+    let mut texts = read_dir_tf(dir)?;
+    texts.extend(read_module_tf(dir)?);
     if texts.is_empty() {
         return Err(format!("{} has no .tf files", dir.display()));
     }
@@ -578,20 +609,44 @@ pub fn import_dir(
     // merged root (counts, lifted variables), which only an export-clean project has.
     let base = project.resolved(None);
     let generated = if project.settings.environments.is_empty() {
-        crate::emit::emit_unchecked(&base, cat, &provider, gen_tool)
+        crate::emit::emit_unchecked(&base, cat, &provider, gen_tool).and_then(|g| {
+            match base.settings.layout {
+                ttg_core::Layout::Flat => Ok(g),
+                ttg_core::Layout::Modules => crate::modules::split(&base, cat, &provider, gen_tool, g),
+            }
+        })
     } else {
         crate::emit::generate(project, cat, &provider, gen_tool)
     }
     .map_err(|e| format!("the project does not generate for {provider}: {e}"))?;
+    // A module's blocks, in both the directory and the generated export, with the values
+    // other scopes hand it written as the flat references they stand for.
+    let unsplit = |name: &str, body: &mut Body| -> Result<(), String> {
+        let Some(m) = module_of(name) else { return Ok(()) };
+        let empty = BTreeMap::new();
+        let inputs = generated.module_inputs.get(m).unwrap_or(&empty);
+        for s in body.0.iter_mut() {
+            if let Structure::Block(b) = s {
+                if address_of(b).is_some() {
+                    crate::modules::unsplit_body(&mut b.body, inputs).map_err(|e| format!("{name}: {e}"))?;
+                }
+            }
+        }
+        Ok(())
+    };
+    for f in files.iter_mut() {
+        unsplit(&f.name, &mut f.body)?;
+    }
 
     // What the project generates, block by block.
     let mut gen_blocks: HashMap<String, Block> = HashMap::new();
     let mut gen_files: HashMap<String, Body> = HashMap::new();
     for (name, text) in &generated.files {
-        if !name.ends_with(".tf") || name.contains('/') {
+        if !name.ends_with(".tf") || (name.contains('/') && module_of(name).is_none()) {
             continue;
         }
-        let body = hcl::parse(text).map_err(|e| format!("generated {name}: {e}"))?;
+        let mut body = hcl::parse(text).map_err(|e| format!("generated {name}: {e}"))?;
+        unsplit(name, &mut body)?;
         for s in body.iter() {
             if let Structure::Block(b) = s {
                 if let Some(a) = address_of(b) {
@@ -666,7 +721,9 @@ pub fn import_dir(
             rd.flatten()
                 .filter(|e| e.path().is_dir())
                 .map(|e| e.file_name().to_string_lossy().to_string())
-                .filter(|n| !n.starts_with('.') && !GENERATED_DIRS.contains(&n.as_str()))
+                .filter(|n| {
+                    !n.starts_with('.') && !GENERATED_DIRS.contains(&n.as_str()) && n != crate::modules::DIR
+                })
                 .collect()
         })
         .unwrap_or_default();
@@ -832,6 +889,7 @@ pub fn import_dir(
                 owner: String::new(),
                 overrides: Default::default(),
                 adopt: Default::default(),
+                outputs: None,
             },
         );
         row += 1;

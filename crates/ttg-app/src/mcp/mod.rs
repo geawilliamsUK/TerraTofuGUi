@@ -291,11 +291,17 @@ pub struct EntityMeta {
     pub classification: Option<String>,
     pub description: Option<String>,
     pub owner: Option<String>,
+    /// The outputs the export writes for it with `settings.outputs = "marked"`:
+    /// `Some(None)` goes back to the mapping's primary ones.
+    pub outputs: Option<Option<Vec<String>>>,
 }
 
 impl EntityMeta {
     pub fn is_empty(&self) -> bool {
-        self.classification.is_none() && self.description.is_none() && self.owner.is_none()
+        self.classification.is_none()
+            && self.description.is_none()
+            && self.owner.is_none()
+            && self.outputs.is_none()
     }
 }
 
@@ -575,6 +581,12 @@ pub enum AgentCommand {
         posture: Option<serde_json::Value>,
         /// The project's name (used in the export's README and the default state key).
         name: Option<String>,
+        /// `marked` or `all`.
+        outputs: Option<String>,
+        /// `flat` or `modules`.
+        layout: Option<String>,
+        /// The saved view whose groups become modules; `Some(null)` / `Some("")` clears it.
+        module_view: Option<serde_json::Value>,
         /// Session default for entity_add / entity_update / link_add replies: `false`
         /// returns only status, id and changed. Not saved with the project.
         verbose: Option<bool>,

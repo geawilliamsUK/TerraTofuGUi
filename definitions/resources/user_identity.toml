@@ -110,10 +110,10 @@ domain       = { field = "domain_prefix" }
 user_pool_id = { self_block = "main", attr = "id" }
 
 [providers.aws.outputs]
-user_pool_id  = { attr = "id", description = "User pool id" }
-endpoint      = { attr = "endpoint", description = "OpenID Connect issuer host for the pool" }
-client_id     = { block = "client", attr = "id", description = "App client id" }
-hosted_domain = { block = "domain", attr = "domain", description = "Hosted UI domain prefix; sign-in lives at https://<prefix>.auth.<region>.amazoncognito.com/login" }
+user_pool_id  = { attr = "id", description = "User pool id", primary = true }
+endpoint      = { attr = "endpoint", description = "OpenID Connect issuer host for the pool", primary = true }
+client_id     = { block = "client", attr = "id", description = "App client id", primary = true }
+hosted_domain = { block = "domain", attr = "domain", description = "Hosted UI domain prefix; sign-in lives at https://<prefix>.auth.<region>.amazoncognito.com/login", primary = true }
 
 # ---------------------------------------------------------------- Azure
 [providers.azure]
@@ -159,7 +159,7 @@ block = "mfa"
 state = { map = "mfa", table = { off = "DISABLED", optional = "ENABLED", required = "MANDATORY" } }
 
 [providers.gcp.outputs]
-name = { attr = "name", description = "Identity Platform config resource name" }
+name = { attr = "name", description = "Identity Platform config resource name", primary = true }
 
 [[providers.gcp.manual_steps]]
 title = "Finish Identity Platform in the console"

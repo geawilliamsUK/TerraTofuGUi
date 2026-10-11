@@ -15,7 +15,7 @@ use crate::tool::Profile;
 use crate::GenError;
 use hcl::{Block, Expression, FuncCall, Identifier, Number, Object, ObjectKey, Traversal, Variable};
 use indexmap::IndexMap;
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use ttg_catalog::{
     ArgSource, BlockDef, Catalog, Condition, MappingStatus, NestedBlockDef, ProviderDef, ProviderMapping,
     Wrap,
@@ -66,6 +66,10 @@ pub struct Generated {
     /// variable with one value per environment (`crate::environments`). Empty for a
     /// project without environments.
     pub lifted: Vec<crate::environments::Lifted>,
+    /// In the modules layout: per module, each input that carries a value of another
+    /// module or of the root -> that value as the flat export writes it
+    /// (`vpc_main_id` -> `aws_vpc.main.id`). Empty in the flat layout.
+    pub module_inputs: BTreeMap<String, BTreeMap<String, String>>,
 }
 
 /// The blocks one entity produced, kept next to the rendered files.
@@ -79,6 +83,9 @@ pub struct EntityBlocks {
     /// `# ---` introduction and its blocks. A tool diagnostic whose range starts inside
     /// is about this entity.
     pub lines: (usize, usize),
+    /// The module the blocks are in with `settings.layout = "modules"` (`file` is then
+    /// `modules/<name>/…` and every address `module.<name>.…`); `None` in the root.
+    pub module: Option<String>,
     pub(crate) comment: String,
     pub(crate) blocks: Vec<Block>,
 }
@@ -290,12 +297,19 @@ struct Emitter<'a> {
 /// merged into one root whose differing values are variables, with a `.tfvars` and a
 /// backend configuration per environment (`crate::environments`); a project without is
 /// generated exactly once, as it always was.
+///
+/// With `settings.layout = "modules"` the finished root is then split into modules
+/// (`crate::modules`).
 pub fn generate(p: &Project, cat: &Catalog, provider: &str, tool: Tool) -> Result<Generated, GenError> {
-    if p.settings.environments.is_empty() {
+    let g = if p.settings.environments.is_empty() {
         // Project variables (and the name prefix) still have their base values to fill in.
-        generate_one(&p.resolved(None), cat, provider, tool)
+        generate_one(&p.resolved(None), cat, provider, tool)?
     } else {
-        crate::environments::generate(p, cat, provider, tool)
+        crate::environments::generate(p, cat, provider, tool)?
+    };
+    match p.settings.layout {
+        ttg_core::Layout::Flat => Ok(g),
+        ttg_core::Layout::Modules => crate::modules::split(p, cat, provider, tool, g),
     }
 }
 
@@ -468,6 +482,9 @@ pub(crate) fn emit_unchecked(
                     }
                 }
                 for (suffix, o) in &m.outputs {
+                    if !output_selected(p, &e, suffix, o) {
+                        continue;
+                    }
                     let key = o.block.clone().unwrap_or(primary.clone());
                     let Some(locals) = em.locals(id, &key) else {
                         continue;
@@ -631,6 +648,7 @@ pub(crate) fn emit_unchecked(
                     })
                     .collect(),
                 lines: (0, 0),
+                module: None,
                 comment,
                 blocks,
             },
@@ -770,6 +788,7 @@ pub(crate) fn emit_unchecked(
         diagnostics: diags,
         entity_blocks,
         lifted: Vec::new(),
+        module_inputs: BTreeMap::new(),
     })
 }
 
@@ -876,6 +895,19 @@ fn bootstrap_step(
         entity: None,
         title: "Apply the bootstrap root first".into(),
         body,
+    }
+}
+
+/// Whether the export writes this output of the entity's mapping: with
+/// `settings.outputs = "all"` (and in files that do not say) every one; with `marked`,
+/// the ones the entity selects, or the mapping's `primary` ones when it selects none.
+pub fn output_selected(p: &Project, e: &EntityRef, name: &str, o: &ttg_catalog::OutputRef) -> bool {
+    match p.settings.output_selection() {
+        ttg_core::OutputSelection::All => true,
+        ttg_core::OutputSelection::Marked => match e.outputs {
+            Some(list) => list.iter().any(|x| x == name),
+            None => o.primary,
+        },
     }
 }
 
@@ -2666,6 +2698,15 @@ pub fn addresses_for(p: &Project, cat: &Catalog, provider: &str, id: &str) -> Ve
                 plan::local_name(p, id, &b.key)
             )),
             None => {}
+        }
+    }
+    // In the modules layout the addresses are the module's (`module.network.aws_vpc.main`).
+    if p.settings.layout == ttg_core::Layout::Modules {
+        if let Some(m) = crate::modules::assign(p, cat, provider)
+            .ok()
+            .and_then(|a| a.get(id).cloned())
+        {
+            out = out.iter().map(|a| crate::modules::qualify(Some(&m), a)).collect();
         }
     }
     out

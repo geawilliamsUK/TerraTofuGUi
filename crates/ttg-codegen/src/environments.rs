@@ -1694,6 +1694,7 @@ fn merge(
                 file: first.file.clone(),
                 addresses,
                 lines: (0, 0),
+                module: None,
                 comment: first.comment.clone(),
                 blocks,
             },
@@ -1937,6 +1938,7 @@ fn merge(
         diagnostics: Vec::new(),
         entity_blocks,
         lifted,
+        module_inputs: Default::default(),
     })
 }
 

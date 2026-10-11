@@ -114,7 +114,7 @@ name           = { func = "format", args = [ { value = "alias/%s" }, { field = "
 target_key_id  = { self_block = "main", attr = "key_id" }
 
 [providers.aws.outputs]
-arn    = { attr = "arn", description = "Key ARN" }
+arn    = { attr = "arn", description = "Key ARN", primary = true }
 key_id = { attr = "key_id", description = "Key id" }
 
 [[providers.aws.manual_steps]]
@@ -168,7 +168,7 @@ block = "automatic"
 time_after_creation = { map = "rotation_days", table = { "90" = "P90D", "180" = "P180D", "365" = "P365D" } }
 
 [providers.azure.outputs]
-id = { attr = "id", description = "Key id (versioned)" }
+id = { attr = "id", description = "Key id (versioned)", primary = true }
 
 # ---------------------------------------------------------------- GCP
 [providers.gcp]
@@ -195,7 +195,7 @@ purpose         = { value = "ENCRYPT_DECRYPT" }
 rotation_period = { map = "rotation_days", table = { "90" = "7776000s", "180" = "15552000s", "365" = "31536000s" } }
 
 [providers.gcp.outputs]
-id = { attr = "id", description = "Crypto key id" }
+id = { attr = "id", description = "Crypto key id", primary = true }
 
 [[providers.gcp.manual_steps]]
 title = "Cloud KMS key rings and keys are never destroyed"

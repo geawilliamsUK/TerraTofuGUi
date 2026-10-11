@@ -77,7 +77,7 @@ HOST = { self_block = "main", attr = "cache_nodes.0.address" }
 PORT = { value = 6379 }
 
 [providers.aws.outputs]
-endpoint = { attr = "cache_nodes.0.address", description = "Redis endpoint address" }
+endpoint = { attr = "cache_nodes.0.address", description = "Redis endpoint address", primary = true }
 
 # ---------------------------------------------------------------- Azure
 [providers.azure]
@@ -112,7 +112,7 @@ HOST = { self_block = "main", attr = "hostname" }
 PORT = { self_block = "main", attr = "ssl_port" }
 
 [providers.azure.outputs]
-hostname = { attr = "hostname", description = "Redis host name" }
+hostname = { attr = "hostname", description = "Redis host name", primary = true }
 
 # ---------------------------------------------------------------- GCP
 [providers.gcp]
@@ -136,5 +136,5 @@ HOST = { self_block = "main", attr = "host" }
 PORT = { self_block = "main", attr = "port" }
 
 [providers.gcp.outputs]
-host = { attr = "host", description = "Redis host" }
-port = { attr = "port", description = "Redis port" }
+host = { attr = "host", description = "Redis host", primary = true }
+port = { attr = "port", description = "Redis port", primary = true }

@@ -65,19 +65,38 @@ impl Attribution {
         a
     }
 
-    /// The entity a resource address belongs to: `module.x.` and `[index]` parts are
-    /// dropped (`aws_subnet.web_0` stays as it is; `aws_nat_gateway.nat[0]` is
-    /// `aws_nat_gateway.nat`).
+    /// The entity a resource address belongs to, `[index]` parts dropped
+    /// (`aws_nat_gateway.nat[0]` is `aws_nat_gateway.nat`). A module address of the
+    /// modules layout (`module.network.aws_subnet.app_a`) is looked up as it is; one the
+    /// export did not write is looked up without its `module.x.` parts.
     pub fn entity_of_address(&self, address: &str) -> Option<&Id> {
-        let mut a = address;
+        let strip = |a: &str| -> String {
+            let mut out = String::with_capacity(a.len());
+            let mut depth = 0;
+            for c in a.chars() {
+                match c {
+                    '[' => depth += 1,
+                    ']' => depth -= 1,
+                    _ if depth == 0 => out.push(c),
+                    _ => {}
+                }
+            }
+            out
+        };
+        let full = strip(address);
+        if let Some(id) = self.addresses.get(&full) {
+            return Some(id);
+        }
+        let mut a = full.as_str();
         while let Some(rest) = a.strip_prefix("module.") {
             a = rest.split_once('.').map(|(_, r)| r).unwrap_or(rest);
         }
-        let base = match a.find('[') {
-            Some(i) => &a[..i],
-            None => a,
-        };
-        self.addresses.get(base)
+        self.addresses.get(a).or_else(|| {
+            self.addresses
+                .iter()
+                .find(|(k, _)| k.starts_with("module.") && k.ends_with(&format!(".{a}")))
+                .map(|(_, id)| id)
+        })
     }
 
     /// The entity whose blocks cover `line` of `file`.
@@ -436,7 +455,7 @@ fn output_text(o: &std::process::Output) -> String {
     )
 }
 
-/// Copy the configuration (top-level `.tf` and `.tfvars` files, `environments/`, the
+/// Copy the configuration (top-level `.tf` and `.tfvars` files, `environments/`, `modules/`, the
 /// lock file) into the scratch directory, with an override that keeps the state local.
 fn scratch_copy(dir: &Path) -> std::io::Result<PathBuf> {
     let scratch = dir.join(SCRATCH_DIR);
@@ -465,6 +484,22 @@ fn scratch_copy(dir: &Path) -> std::io::Result<PathBuf> {
                     e.path(),
                     scratch.join(crate::environments::DIR).join(e.file_name()),
                 )?;
+            }
+        }
+    }
+    // The modules layout's `modules/<name>/*.tf`, replaced whole.
+    let modules = scratch.join(crate::modules::DIR);
+    if modules.exists() {
+        std::fs::remove_dir_all(&modules)?;
+    }
+    if let Ok(rd) = std::fs::read_dir(dir.join(crate::modules::DIR)) {
+        for m in rd.flatten().filter(|m| m.path().is_dir()) {
+            let to = modules.join(m.file_name());
+            std::fs::create_dir_all(&to)?;
+            for e in std::fs::read_dir(m.path())?.flatten() {
+                if e.path().is_file() && e.file_name().to_string_lossy().ends_with(".tf") {
+                    std::fs::copy(e.path(), to.join(e.file_name()))?;
+                }
             }
         }
     }

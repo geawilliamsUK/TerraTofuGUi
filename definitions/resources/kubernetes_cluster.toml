@@ -407,8 +407,8 @@ role_arn        = { self_block = "autoscaler_role", attr = "arn" }
 max_nodes = { func = "sum", args = [ { field = "max_nodes" }, { relation = "attachment", incoming = true, target_type = "kubernetes_node_pool", field = "max_nodes" } ] }
 
 [providers.aws.outputs]
-endpoint = { attr = "endpoint", description = "Kubernetes API endpoint" }
-name     = { attr = "name", description = "Cluster name (kubectl / aws eks update-kubeconfig)" }
+endpoint = { attr = "endpoint", description = "Kubernetes API endpoint", primary = true }
+name     = { attr = "name", description = "Cluster name (kubectl / aws eks update-kubeconfig)", primary = true }
 
 [[providers.aws.manual_steps]]
 title = "Only the first Log Group becomes the control-plane group"
@@ -563,7 +563,7 @@ input = { func = "flatten", args = [ { relation = "network_membership", attr = "
 max_nodes = { func = "sum", args = [ { field = "max_nodes" }, { relation = "attachment", incoming = true, target_type = "kubernetes_node_pool", field = "max_nodes" } ] }
 
 [providers.azure.outputs]
-fqdn        = { attr = "fqdn", description = "Kubernetes API host name" }
+fqdn        = { attr = "fqdn", description = "Kubernetes API host name", primary = true }
 oidc_issuer = { attr = "oidc_issuer_url", description = "OIDC issuer URL used by workload identity" }
 kube_config = { attr = "kube_config_raw", description = "Raw kubeconfig for the cluster", sensitive = true }
 
@@ -705,8 +705,8 @@ input = { template = "{name}-nodes", transform = "kebab" }
 max_nodes = { func = "sum", args = [ { field = "max_nodes" }, { relation = "attachment", incoming = true, target_type = "kubernetes_node_pool", field = "max_nodes" } ] }
 
 [providers.gcp.outputs]
-endpoint = { attr = "endpoint", description = "Cluster API endpoint" }
-name     = { attr = "name", description = "Cluster name (gcloud container clusters get-credentials)" }
+endpoint = { attr = "endpoint", description = "Cluster API endpoint", primary = true }
+name     = { attr = "name", description = "Cluster name (gcloud container clusters get-credentials)", primary = true }
 
 [[providers.gcp.manual_steps]]
 title = "Add-ons on GKE"

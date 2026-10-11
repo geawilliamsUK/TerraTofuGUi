@@ -176,7 +176,7 @@ Resource  = { self_block = "main", attr = "arn" }
 ARN = { self_block = "main", attr = "arn" }
 
 [providers.aws.outputs]
-arn = { attr = "arn", description = "Topic ARN (publish here)" }
+arn = { attr = "arn", description = "Topic ARN (publish here)", primary = true }
 
 # ---------------------------------------------------------------- Azure
 [providers.azure]
@@ -271,7 +271,7 @@ NAME      = { self_block = "main", attr = "name" }
 NAMESPACE = { if = { ancestor = "servicebus_namespace" }, then = { ancestor = "servicebus_namespace", attr = "name" }, else = { self_block = "ns", attr = "name" } }
 
 [providers.azure.outputs]
-id = { attr = "id", description = "Topic id" }
+id = { attr = "id", description = "Topic id", primary = true }
 
 [[providers.azure.manual_steps]]
 title = "Queue subscribers: read the subscription, or forward by hand"
@@ -355,7 +355,7 @@ message = "\"{name}\" subscribes {item.endpoint} over {item.protocol}, which Pub
 TOPIC = { self_block = "main", attr = "id" }
 
 [providers.gcp.outputs]
-id = { attr = "id", description = "Topic id (publish here)" }
+id = { attr = "id", description = "Topic id (publish here)", primary = true }
 
 [[providers.gcp.manual_steps]]
 title = "Let Pub/Sub use the encryption key"

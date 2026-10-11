@@ -209,7 +209,7 @@ impl TtgApp {
         };
         let mut app = TtgApp {
             catalog,
-            project: Project::new("untitled"),
+            project: Project::new_document("untitled"),
             path: None,
             dirty: false,
             history: History::default(),
@@ -742,6 +742,7 @@ impl TtgApp {
                         owner: String::new(),
                         overrides: Default::default(),
                         adopt: Default::default(),
+                        outputs: None,
                     },
                 );
             }
@@ -765,6 +766,7 @@ impl TtgApp {
                         owner: String::new(),
                         overrides: Default::default(),
                         adopt: Default::default(),
+                        outputs: None,
                     },
                 );
             }
@@ -1004,7 +1006,7 @@ impl TtgApp {
     }
 
     pub fn new_project(&mut self) {
-        self.project = Project::new("untitled");
+        self.project = Project::new_document("untitled");
         self.ensure_provider_settings();
         self.path = None;
         self.dirty = false;

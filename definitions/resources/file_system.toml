@@ -108,7 +108,7 @@ ID = { self_block = "main", attr = "id" }
 
 [providers.aws.outputs]
 id            = { attr = "id", description = "File system id" }
-dns_name      = { attr = "dns_name", description = "Mount address (<id>.efs.<region>.amazonaws.com)" }
+dns_name      = { attr = "dns_name", description = "Mount address (<id>.efs.<region>.amazonaws.com)", primary = true }
 mount_targets = { block = "mount", attr = "dns_name", description = "Mount address in each subnet" }
 
 # ---------------------------------------------------------------- Azure
@@ -162,7 +162,7 @@ SHARE          = { self_block = "main", attr = "name" }
 
 [providers.azure.outputs]
 id  = { attr = "id", description = "File share id" }
-url = { attr = "url", description = "Share URL" }
+url = { attr = "url", description = "Share URL", primary = true }
 
 [[providers.azure.manual_steps]]
 title = "Reach the NFS share privately"
@@ -214,7 +214,7 @@ VOLUME_HANDLE = { func = "format", args = [ { value = "modeInstance/%s/%s/%s" },
 IP            = { self_block = "main", attr = "networks.0.ip_addresses.0" }
 
 [providers.gcp.outputs]
-id = { attr = "id", description = "Filestore instance id" }
+id = { attr = "id", description = "Filestore instance id", primary = true }
 
 [[providers.gcp.manual_steps]]
 title = "Read the mount address from the instance"

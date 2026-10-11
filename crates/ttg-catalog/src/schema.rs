@@ -611,6 +611,11 @@ pub struct OutputRef {
     /// configuration, such as the secret RDS creates for a managed master password.
     #[serde(default)]
     pub when: Option<Condition>,
+    /// One of the outputs worth having by default: an endpoint, a URL, a DNS name, an
+    /// identifier other systems are given. With `settings.outputs = "marked"` an entity
+    /// that selects no outputs of its own gets these.
+    #[serde(default)]
+    pub primary: bool,
 }
 
 #[derive(Debug, Clone, Deserialize)]

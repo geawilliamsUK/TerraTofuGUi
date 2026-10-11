@@ -121,7 +121,7 @@ iam_role_arn         = { self_block = "flow_role", attr = "arn" }
 tags                 = { object = { Name = { template = "{name} flow logs" } } }
 
 [providers.aws.outputs]
-id = { attr = "id", description = "VPC id" }
+id = { attr = "id", description = "VPC id", primary = true }
 
 # ---------------------------------------------------------------- Azure
 [providers.azure]
@@ -139,7 +139,7 @@ resource_group_name = { ancestor = "resource_group", attr = "name" }
 address_space       = { field = "cidr_block", wrap = "list" }
 
 [providers.azure.outputs]
-id = { attr = "id", description = "Virtual network id" }
+id = { attr = "id", description = "Virtual network id", primary = true }
 
 [[providers.azure.manual_steps]]
 title = "Turn on VNet flow logs through a Network Watcher"
@@ -168,5 +168,5 @@ auto_create_subnetworks = { value = false }
 routing_mode            = { value = "REGIONAL" }
 
 [providers.gcp.outputs]
-id        = { attr = "id", description = "Network id" }
+id        = { attr = "id", description = "Network id", primary = true }
 self_link = { attr = "self_link", description = "Network self link" }

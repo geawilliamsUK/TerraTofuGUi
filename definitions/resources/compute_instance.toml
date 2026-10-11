@@ -98,7 +98,7 @@ tags                   = { object = { Name = { field = "name" } } }
 
 [providers.aws.outputs]
 id         = { attr = "id", description = "Instance id" }
-private_ip = { attr = "private_ip", description = "Private IPv4 address" }
+private_ip = { attr = "private_ip", description = "Private IPv4 address", primary = true }
 
 # ---------------------------------------------------------------- Azure
 [providers.azure]
@@ -201,7 +201,7 @@ network_security_group_id = { relation = "attribute_reference", target_type = "s
 
 [providers.azure.outputs]
 id         = { attr = "id", description = "Virtual machine id" }
-private_ip = { attr = "private_ip_address", description = "Private IPv4 address" }
+private_ip = { attr = "private_ip_address", description = "Private IPv4 address", primary = true }
 
 # ---------------------------------------------------------------- GCP
 [providers.gcp]
@@ -261,4 +261,4 @@ scopes = { value = ["cloud-platform"] }
 
 [providers.gcp.outputs]
 id         = { attr = "id", description = "Instance id" }
-private_ip = { attr = "network_interface.0.network_ip", description = "Internal IPv4 address" }
+private_ip = { attr = "network_interface.0.network_ip", description = "Internal IPv4 address", primary = true }

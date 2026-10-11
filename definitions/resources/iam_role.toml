@@ -103,7 +103,7 @@ role       = { self_block = "main", attr = "name" }
 policy_arn = { value = "arn:aws:iam::aws:policy/service-role/AmazonECSTaskExecutionRolePolicy" }
 
 [providers.aws.outputs]
-arn = { attr = "arn", description = "Role ARN" }
+arn = { attr = "arn", description = "Role ARN", primary = true }
 
 # ---------------------------------------------------------------- Azure
 [providers.azure]
@@ -135,7 +135,7 @@ CLIENT_ID = { self_block = "main", attr = "client_id" }
 [providers.azure.outputs]
 id           = { attr = "id", description = "Managed identity id" }
 principal_id = { attr = "principal_id", description = "Service principal object id" }
-client_id    = { attr = "client_id", description = "Application (client) id — the value a Kubernetes ServiceAccount is annotated with" }
+client_id    = { attr = "client_id", description = "Application (client) id — the value a Kubernetes ServiceAccount is annotated with", primary = true }
 
 [[providers.azure.manual_steps]]
 title = "Check the role assignment scope"
@@ -183,5 +183,5 @@ member  = { self_block = "main", attr = "member" }
 EMAIL = { self_block = "main", attr = "email" }
 
 [providers.gcp.outputs]
-email  = { attr = "email", description = "Service account email" }
+email  = { attr = "email", description = "Service account email", primary = true }
 member = { attr = "member", description = "IAM member string (serviceAccount:...)" }

@@ -170,6 +170,28 @@
           "additionalProperties": {
             "type": "boolean"
           }
+        },
+        "outputs": {
+          "description": "Which outputs the export writes: `marked` (what each entity selects, else its\nmapping's primary outputs) or `all`. Absent — every file written before the\nsetting existed — means `all`, so those exports do not change; a new project\nstarts with `marked` (`Project::new_document`).",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/OutputSelection"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "layout": {
+          "description": "`flat` (one root) or `modules` (a thin root calling `modules/<name>/`).",
+          "$ref": "#/$defs/Layout"
+        },
+        "module_view": {
+          "description": "With `layout = modules`: the saved view whose groups become modules (by name),\nbefore the top-level containers. Absent: containers only.",
+          "type": [
+            "string",
+            "null"
+          ]
         }
       }
     },
@@ -318,6 +340,36 @@
         }
       }
     },
+    "OutputSelection": {
+      "description": "Which of the mappings' outputs an export writes into `outputs.tf`.",
+      "oneOf": [
+        {
+          "description": "The outputs each entity selects (`Node::outputs`); an entity that selects none\ngets the ones its mapping marks `primary`.",
+          "type": "string",
+          "const": "marked"
+        },
+        {
+          "description": "Every output every mapping declares: how exports were before entities could\nselect them, and what a project file without the setting gets.",
+          "type": "string",
+          "const": "all"
+        }
+      ]
+    },
+    "Layout": {
+      "description": "How an export lays its configuration out.",
+      "oneOf": [
+        {
+          "description": "One root module per provider, its resources split into files by category.",
+          "type": "string",
+          "const": "flat"
+        },
+        {
+          "description": "A thin root calling one module per top-level container (and per group of the\nview `Settings::module_view` names) under `modules/<name>/`.",
+          "type": "string",
+          "const": "modules"
+        }
+      ]
+    },
     "Container": {
       "description": "A resource that can hold other resources (VPC, Resource Group, Project).",
       "type": "object",
@@ -425,6 +477,16 @@
             "additionalProperties": {
               "type": "string"
             }
+          }
+        },
+        "outputs": {
+          "description": "The outputs of its mapping the export writes when `settings.outputs` is\n`marked`, by output name (`endpoint`, `arn`); absent = the ones the mapping marks\n`primary`, `[]` = none.",
+          "type": [
+            "array",
+            "null"
+          ],
+          "items": {
+            "type": "string"
           }
         }
       },
@@ -631,6 +693,16 @@
             "additionalProperties": {
               "type": "string"
             }
+          }
+        },
+        "outputs": {
+          "description": "The outputs of its mapping the export writes when `settings.outputs` is\n`marked`, by output name (`endpoint`, `arn`); absent = the ones the mapping marks\n`primary`, `[]` = none.",
+          "type": [
+            "array",
+            "null"
+          ],
+          "items": {
+            "type": "string"
           }
         }
       },

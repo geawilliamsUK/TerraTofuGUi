@@ -46,7 +46,7 @@ name = { field = "partition_key" }
 type = { value = "S" }
 
 [providers.aws.outputs]
-arn = { attr = "arn", description = "Table ARN" }
+arn = { attr = "arn", description = "Table ARN", primary = true }
 
 # ---------------------------------------------------------------- Azure
 [providers.azure]
@@ -106,7 +106,7 @@ database_name       = { self_block = "db", attr = "name" }
 partition_key_paths = { list = [ { template = "/{partition_key}" } ] }
 
 [providers.azure.outputs]
-endpoint = { block = "acct", attr = "endpoint", description = "Cosmos DB endpoint" }
+endpoint = { block = "acct", attr = "endpoint", description = "Cosmos DB endpoint", primary = true }
 
 # ---------------------------------------------------------------- GCP
 [providers.gcp]
@@ -124,7 +124,7 @@ type            = { value = "FIRESTORE_NATIVE" }
 deletion_policy = { value = "DELETE" }
 
 [providers.gcp.outputs]
-name = { attr = "name", description = "Database id" }
+name = { attr = "name", description = "Database id", primary = true }
 
 [[providers.gcp.manual_steps]]
 title = "Partition key is a convention in Firestore"

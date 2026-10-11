@@ -364,7 +364,7 @@ then = { object = { Sid = { value = "DatabaseConnect" }, Effect = { value = "All
 
 [providers.aws.outputs]
 task_definition_arn = { attr = "arn", description = "Task definition ARN (current revision)" }
-run                 = { block = "run", attr = "output", description = "What aws ecs run-task needs: cluster, task definition, subnets, security groups" }
+run                 = { block = "run", attr = "output", description = "What aws ecs run-task needs: cluster, task definition, subnets, security groups", primary = true }
 
 [[providers.aws.manual_steps]]
 title = "Start the job with aws ecs run-task"
@@ -666,7 +666,7 @@ subnet_id                 = { target = "id" }
 network_security_group_id = { relation = "attribute_reference", target_type = "security_group", attr = "id" }
 
 [providers.azure.outputs]
-name = { attr = "name", description = "Job name (az containerapp job start)" }
+name = { attr = "name", description = "Job name (az containerapp job start)", primary = true }
 
 [[providers.azure.manual_steps]]
 title = "Key Vault secrets hold one value each"
@@ -914,7 +914,7 @@ role   = { value = "roles/storage.objectViewer" }
 member = { relation = "iam_binding", attr = "member" }
 
 [providers.gcp.outputs]
-name = { attr = "name", description = "Job name (gcloud run jobs execute)" }
+name = { attr = "name", description = "Job name (gcloud run jobs execute)", primary = true }
 
 [[providers.gcp.manual_steps]]
 title = "Secret Manager secrets hold one value each"

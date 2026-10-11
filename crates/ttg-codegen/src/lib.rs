@@ -25,6 +25,7 @@ pub mod files;
 pub mod import_dir;
 pub mod k8s;
 pub mod layers;
+pub mod modules;
 pub mod owned;
 pub mod patterns;
 pub mod plan;

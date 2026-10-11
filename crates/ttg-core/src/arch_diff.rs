@@ -843,6 +843,7 @@ mod tests {
             owner: String::new(),
             overrides: Default::default(),
             adopt: Default::default(),
+            outputs: None,
         }
     }
 
@@ -864,6 +865,7 @@ mod tests {
             owner: String::new(),
             overrides: Default::default(),
             adopt: Default::default(),
+            outputs: None,
         }
     }
 

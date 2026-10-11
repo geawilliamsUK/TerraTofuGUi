@@ -650,6 +650,7 @@ mod tests {
             owner: String::new(),
             overrides: Default::default(),
             adopt: Default::default(),
+            outputs: None,
         }
     }
     fn sz(_: &Project, _: &str) -> Size {
@@ -678,6 +679,7 @@ mod tests {
                 owner: String::new(),
                 overrides: Default::default(),
                 adopt: Default::default(),
+                outputs: None,
             },
         );
         for (id, par) in [("a", None), ("b", Some("c")), ("d", Some("c"))] {

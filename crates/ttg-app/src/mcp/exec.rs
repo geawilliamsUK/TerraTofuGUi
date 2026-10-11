@@ -102,6 +102,7 @@ impl TtgApp {
             "classification": e.classification,
             "description": e.description,
             "owner": e.owner,
+            "outputs": e.outputs,
         })
     }
 
@@ -467,6 +468,9 @@ impl TtgApp {
                 self.check_providers(providers.as_deref())?;
                 // Checked before anything is written, like every other field.
                 let class = self.parse_classification(meta.classification.as_deref())?;
+                if let Some(Some(list)) = &meta.outputs {
+                    self.check_outputs(&entity, list)?;
+                }
                 let r = self.agent_entity_update(&entity, name, config, provider_config, manual)?;
                 let r = self.apply_entity_meta(&entity, class, &meta, r)?;
                 if let Some(extra) = extra {
@@ -1325,6 +1329,9 @@ impl TtgApp {
                 provider_versions,
                 posture,
                 name,
+                outputs,
+                layout,
+                module_view,
                 verbose,
                 disposable,
                 disposable_environments,
@@ -1332,6 +1339,30 @@ impl TtgApp {
                 let posture = match posture {
                     None => None,
                     Some(v) => Some(parse_posture_settings(&v)?),
+                };
+                let outputs = match outputs.as_deref() {
+                    None => None,
+                    Some(o) => Some(
+                        ttg_core::OutputSelection::from_key(o)
+                            .ok_or_else(|| format!("outputs must be \"marked\" or \"all\", not \"{o}\""))?,
+                    ),
+                };
+                let layout = match layout.as_deref() {
+                    None => None,
+                    Some(l) => Some(
+                        ttg_core::Layout::from_key(l)
+                            .ok_or_else(|| format!("layout must be \"flat\" or \"modules\", not \"{l}\""))?,
+                    ),
+                };
+                let module_view = match module_view {
+                    None => None,
+                    Some(J::Null) => Some(None),
+                    Some(J::String(s)) if s.trim().is_empty() => Some(None),
+                    Some(J::String(s)) => {
+                        let v = self.resolve_view(&s)?;
+                        Some(Some(self.project.views[v].name.clone()))
+                    }
+                    Some(_) => return Err("module_view must be the name of a saved view, or null".into()),
                 };
                 if let Some(n) = &name {
                     if n.trim().is_empty() {
@@ -1461,6 +1492,15 @@ impl TtgApp {
                 if let Some(n) = name {
                     self.project.name = n.trim().to_string();
                 }
+                if let Some(o) = outputs {
+                    self.project.settings.outputs = Some(o);
+                }
+                if let Some(l) = layout {
+                    self.project.settings.layout = l;
+                }
+                if let Some(v) = module_view {
+                    self.project.settings.module_view = v;
+                }
                 if let Some(v) = verbose {
                     self.mcp.terse_replies = !v;
                 }
@@ -1493,6 +1533,9 @@ impl TtgApp {
                     "state_encryption_key": s.state_encryption_key,
                     "provider_versions": s.provider_versions,
                     "posture": { "disabled": s.posture.disabled },
+                    "outputs": s.output_selection(),
+                    "layout": s.layout,
+                    "module_view": s.module_view,
                 }))
             }
             AgentCommand::ProjectSave { path } => {
@@ -2161,6 +2204,8 @@ impl TtgApp {
                 "fields": m.fields.iter().map(field).collect::<Vec<_>>(),
                 "resources": m.blocks.iter().map(|b| b.resource.clone()).collect::<Vec<_>>(),
                 "manual_steps": m.manual_steps.iter().map(|s| s.title.clone()).collect::<Vec<_>>(),
+                // The names entity_update { outputs } takes; the primary ones are written by default.
+                "outputs": m.outputs.iter().map(|(n, o)| json!({"name": n, "description": o.description, "primary": o.primary})).collect::<Vec<_>>(),
             }))).collect::<Map<_, _>>(),
         }))
     }
@@ -2499,7 +2544,44 @@ impl TtgApp {
             })
     }
 
-    /// Write classification, description and owner. Runs right after the rest of
+    /// Refuse an output name no mapping of the entity's type declares, listing the ones
+    /// it has.
+    fn check_outputs(&self, entity: &str, list: &[String]) -> Result<(), String> {
+        let id = self.resolve(entity)?;
+        let ty = self
+            .project
+            .entity(&id)
+            .ok_or("no such entity")?
+            .resource_type
+            .to_string();
+        let known = crate::inspector::output_names(&self.catalog, &ty);
+        let unknown: Vec<&String> = list
+            .iter()
+            .filter(|n| !known.iter().any(|(k, _)| k == *n))
+            .collect();
+        if unknown.is_empty() {
+            return Ok(());
+        }
+        Err(format!(
+            "{ty} has no output {} (its outputs: {})",
+            unknown
+                .iter()
+                .map(|n| format!("\"{n}\""))
+                .collect::<Vec<_>>()
+                .join(", "),
+            if known.is_empty() {
+                "none".to_string()
+            } else {
+                known
+                    .iter()
+                    .map(|(k, _)| k.as_str())
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            }
+        ))
+    }
+
+    /// Write classification, description, owner and outputs. Runs right after the rest of
     /// `entity_update` has committed its undo step and before anything else happens,
     /// so it belongs to that same step: undo restores the snapshot taken before the
     /// update, metadata included. The reply's entity is refreshed to show it.
@@ -2514,12 +2596,25 @@ impl TtgApp {
             return Ok(reply);
         }
         let id = self.resolve(entity)?;
-        let (c, d, o) = if let Some(n) = self.project.nodes.get_mut(&id) {
-            (&mut n.classification, &mut n.description, &mut n.owner)
+        let (c, d, o, outs) = if let Some(n) = self.project.nodes.get_mut(&id) {
+            (
+                &mut n.classification,
+                &mut n.description,
+                &mut n.owner,
+                &mut n.outputs,
+            )
         } else {
             let c = self.project.containers.get_mut(&id).ok_or("no such entity")?;
-            (&mut c.classification, &mut c.description, &mut c.owner)
+            (
+                &mut c.classification,
+                &mut c.description,
+                &mut c.owner,
+                &mut c.outputs,
+            )
         };
+        if let Some(v) = &meta.outputs {
+            *outs = v.clone();
+        }
         if let Some(v) = class {
             *c = v;
         }

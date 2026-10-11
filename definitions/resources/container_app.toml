@@ -466,7 +466,7 @@ if = { relation = "attribute_reference", target_type = "relational_database", ta
 then = { object = { Sid = { value = "DatabaseConnect" }, Effect = { value = "Allow" }, Action = { value = ["rds-db:connect"] }, Resource = { func = "formatlist", args = [ { value = "arn:aws:rds-db:%s:%s:dbuser:%s/%s" }, { var = "region" }, { self_data = "account", attr = "account_id" }, { relation = "attribute_reference", target_type = "relational_database", attr = "resource_id", wrap = "list" }, { field = "db_user", fallback = { field = "name", transform = "kebab" } } ] } } }
 
 [providers.aws.outputs]
-service_name        = { attr = "name", description = "ECS service name" }
+service_name        = { attr = "name", description = "ECS service name", primary = true }
 cluster_arn         = { block = "cluster", attr = "arn", description = "ECS cluster ARN" }
 task_definition_arn = { block = "task", attr = "arn", description = "Task definition ARN (current revision)" }
 
@@ -825,7 +825,7 @@ subnet_id                 = { target = "id" }
 network_security_group_id = { relation = "attribute_reference", target_type = "security_group", attr = "id" }
 
 [providers.azure.outputs]
-fqdn = { attr = "latest_revision_fqdn", description = "Latest revision FQDN" }
+fqdn = { attr = "latest_revision_fqdn", description = "Latest revision FQDN", primary = true }
 
 [[providers.azure.manual_steps]]
 title = "Key Vault secrets hold one value each"
@@ -1132,7 +1132,7 @@ role   = { value = "roles/storage.objectViewer" }
 member = { relation = "iam_binding", attr = "member" }
 
 [providers.gcp.outputs]
-uri = { attr = "uri", description = "Service URL" }
+uri = { attr = "uri", description = "Service URL", primary = true }
 
 [[providers.gcp.manual_steps]]
 title = "Secret Manager secrets hold one value each"

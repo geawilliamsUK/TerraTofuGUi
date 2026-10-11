@@ -529,6 +529,8 @@ fn entity_inspector(app: &mut TtgApp, ui: &mut Ui, id: &Id) {
             ui.label(RichText::new(msg).color(Color32::from_rgb(200, 90, 30)));
         }
 
+        outputs_section(app, ui, id, &type_id);
+
         // ---- relations
         ui.add_space(8.0);
         ui.label(RichText::new("Links").strong());
@@ -613,6 +615,99 @@ fn entity_inspector(app: &mut TtgApp, ui: &mut Ui, id: &Id) {
             }
         }
     });
+}
+
+/// One output a type's mappings declare, across providers.
+pub(crate) struct OutputChoice {
+    pub description: String,
+    /// Some provider's mapping marks it primary: written by default.
+    pub primary: bool,
+    pub providers: Vec<String>,
+}
+
+/// Every output name the type's mappings declare, in the order the providers list them.
+pub(crate) fn output_names(cat: &ttg_catalog::Catalog, type_id: &str) -> Vec<(String, OutputChoice)> {
+    let mut out: Vec<(String, OutputChoice)> = Vec::new();
+    let Some(def) = cat.resource(type_id) else {
+        return out;
+    };
+    for (pid, m) in &def.providers {
+        for (name, o) in &m.outputs {
+            match out.iter_mut().find(|(n, _)| n == name) {
+                Some((_, c)) => {
+                    c.primary |= o.primary;
+                    c.providers.push(pid.clone());
+                }
+                None => out.push((
+                    name.clone(),
+                    OutputChoice {
+                        description: o.description.clone(),
+                        primary: o.primary,
+                        providers: vec![pid.clone()],
+                    },
+                )),
+            }
+        }
+    }
+    out
+}
+
+/// The outputs the export writes for this entity: a checkbox per output its mappings
+/// declare, ticked for the primary ones until the entity chooses its own.
+fn outputs_section(app: &mut TtgApp, ui: &mut Ui, id: &str, type_id: &str) {
+    let choices = output_names(&app.catalog, type_id);
+    if choices.is_empty() {
+        return;
+    }
+    let current: Option<Vec<String>> = app.project.entity(id).and_then(|e| e.outputs.map(|o| o.to_vec()));
+    let all = app.project.settings.output_selection() == ttg_core::OutputSelection::All;
+    ui.add_space(8.0);
+    egui::CollapsingHeader::new(RichText::new("Outputs").strong())
+        .id_salt(("outputs", id))
+        .default_open(false)
+        .show(ui, |ui| {
+            if all {
+                ui.label(
+                    RichText::new("Settings ▸ Output writes every output; these choices apply once it is set to marked.")
+                        .small()
+                        .color(Color32::from_gray(110)),
+                );
+            }
+            let mut pick: Option<Option<Vec<String>>> = None;
+            for (name, c) in &choices {
+                let mut on = match &current {
+                    Some(list) => list.contains(name),
+                    None => c.primary,
+                };
+                let label = if c.primary { format!("{name} (primary)") } else { name.clone() };
+                let tip = format!("{} — {}", c.description, c.providers.join(", "));
+                if ui.checkbox(&mut on, label).on_hover_text(tip).changed() {
+                    let mut list: Vec<String> = match &current {
+                        Some(l) => l.clone(),
+                        None => choices.iter().filter(|(_, c)| c.primary).map(|(n, _)| n.clone()).collect(),
+                    };
+                    list.retain(|n| n != name);
+                    if on {
+                        list.push(name.clone());
+                    }
+                    // Keep the declaration order, so the file reads the same way round.
+                    list.sort_by_key(|n| choices.iter().position(|(x, _)| x == n));
+                    pick = Some(Some(list));
+                }
+            }
+            if current.is_some() && ui.small_button("Back to the primary outputs").clicked() {
+                pick = Some(None);
+            }
+            if let Some(v) = pick {
+                let before = app.snapshot();
+                if let Some(n) = app.project.nodes.get_mut(id) {
+                    n.outputs = v;
+                } else if let Some(c) = app.project.containers.get_mut(id) {
+                    c.outputs = v;
+                }
+                app.finish(before);
+            }
+        });
 }
 
 /// The entity's classification, owner and description: what it is for, emitted as
@@ -1599,6 +1694,69 @@ fn collect_tags(rows: &[(String, String)]) -> std::collections::BTreeMap<String,
         .collect()
 }
 
+/// Which outputs the export writes, and whether it is one root or a root calling modules.
+fn layout_ui(app: &mut TtgApp, ui: &mut Ui) {
+    use ttg_core::{Layout, OutputSelection};
+    let cur = app.project.settings.output_selection();
+    let mut o = cur;
+    ui.horizontal(|ui| {
+        ui.label("Outputs");
+        ui.radio_value(&mut o, OutputSelection::Marked, "marked")
+            .on_hover_text("Each entity's chosen outputs (inspector ▸ Outputs), else the ones its mapping marks primary: endpoints, URLs, DNS names, identifiers other systems need.");
+        ui.radio_value(&mut o, OutputSelection::All, "all")
+            .on_hover_text("Every output of every mapping, as projects saved before this setting existed export.");
+    });
+    if o != cur {
+        let before = app.snapshot();
+        app.project.settings.outputs = Some(o);
+        app.finish(before);
+    }
+    let cur = app.project.settings.layout;
+    let mut l = cur;
+    ui.horizontal(|ui| {
+        ui.label("Layout");
+        ui.radio_value(&mut l, Layout::Flat, "one root")
+            .on_hover_text("One configuration, its resources split into files by category.");
+        ui.radio_value(&mut l, Layout::Modules, "modules")
+            .on_hover_text("A thin root calling modules/<name>/: one per top-level container (a network, a resource group, a container environment), or per group of a saved view. moved.tf carries a state applied with one root along.");
+    });
+    if l != cur {
+        let before = app.snapshot();
+        app.project.settings.layout = l;
+        app.finish(before);
+    }
+    if l == Layout::Modules {
+        let cur = app.project.settings.module_view.clone();
+        let names: Vec<String> = app.project.views.iter().map(|v| v.name.clone()).collect();
+        ui.horizontal(|ui| {
+            ui.label("Modules from").on_hover_text(
+                "The groups of a saved view become modules (before the containers); what no group holds goes by its top-level container.",
+            );
+            let mut pick: Option<Option<String>> = None;
+            egui::ComboBox::from_id_salt("module_view")
+                .selected_text(cur.clone().unwrap_or("containers only".into()))
+                .show_ui(ui, |ui| {
+                    if ui.selectable_label(cur.is_none(), "containers only").clicked() {
+                        pick = Some(None);
+                    }
+                    for n in &names {
+                        if ui
+                            .selectable_label(cur.as_deref() == Some(n.as_str()), format!("groups of \"{n}\""))
+                            .clicked()
+                        {
+                            pick = Some(Some(n.clone()));
+                        }
+                    }
+                });
+            if let Some(v) = pick.filter(|v| *v != cur) {
+                let before = app.snapshot();
+                app.project.settings.module_view = v;
+                app.finish(before);
+            }
+        });
+    }
+}
+
 pub fn settings_ui(app: &mut TtgApp, ui: &mut Ui) {
     ui.label(RichText::new("Output").strong());
     ui.horizontal(|ui| {
@@ -1638,6 +1796,7 @@ pub fn settings_ui(app: &mut TtgApp, ui: &mut Ui) {
         app.project.settings.disposable = disposable;
         app.finish(before);
     }
+    layout_ui(app, ui);
     ui.add_space(8.0);
     backend_ui(app, ui);
     ui.add_space(8.0);

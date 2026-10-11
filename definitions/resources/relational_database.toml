@@ -353,9 +353,9 @@ NAME = { field = "database_name" }
 MASTER_SECRET_ARN = { if = { provider_field = "master_password", equals = "managed" }, then = { self_block = "main", attr = "master_user_secret.0.secret_arn" } }
 
 [providers.aws.outputs]
-endpoint = { attr = "endpoint", description = "Connection endpoint (host:port)" }
+endpoint = { attr = "endpoint", description = "Connection endpoint (host:port)", primary = true }
 address  = { attr = "address", description = "Host name" }
-master_user_secret_arn = { attr = "master_user_secret.0.secret_arn", description = "ARN of the Secrets Manager secret RDS keeps the master password in", when = { provider_field = "master_password", equals = "managed" } }
+master_user_secret_arn = { attr = "master_user_secret.0.secret_arn", description = "ARN of the Secrets Manager secret RDS keeps the master password in", when = { provider_field = "master_password", equals = "managed" }, primary = true }
 
 # What the server can reach (MAPPING_FORMAT.md §2.9): the connections alarms are checked
 # against. RDS sets `max_connections` from DBInstanceClassMemory, the memory the class
@@ -641,8 +641,8 @@ PORT = { map = "engine", table = { postgres = 5432, mysql = 3306 } }
 NAME = { field = "database_name" }
 
 [providers.azure.outputs]
-postgres_fqdn = { block = "pg", attr = "fqdn", description = "PostgreSQL server host name" }
-mysql_fqdn    = { block = "my", attr = "fqdn", description = "MySQL server host name" }
+postgres_fqdn = { block = "pg", attr = "fqdn", description = "PostgreSQL server host name", primary = true }
+mysql_fqdn    = { block = "my", attr = "fqdn", description = "MySQL server host name", primary = true }
 
 # A flexible server's default `max_connections` by SKU (Azure keeps 15 of PostgreSQL's
 # for itself). A `max_connections` parameter of the server's own leaves it unknown.
@@ -859,9 +859,9 @@ PORT = { map = "engine", table = { postgres = 5432, mysql = 3306 } }
 NAME = { field = "database_name" }
 
 [providers.gcp.outputs]
-private_ip      = { attr = "private_ip_address", description = "Private IPv4 address (VNet-integrated instances)" }
+private_ip      = { attr = "private_ip_address", description = "Private IPv4 address (VNet-integrated instances)", primary = true }
 public_ip       = { attr = "public_ip_address", description = "Public IPv4 address (public instances)" }
-connection_name = { attr = "connection_name", description = "Cloud SQL connection name (for the Auth Proxy)" }
+connection_name = { attr = "connection_name", description = "Cloud SQL connection name (for the Auth Proxy)", primary = true }
 
 # Cloud SQL's default `max_connections` by tier. PostgreSQL follows the tier's memory
 # (0.6 GB 25, 1.7 GB 50, 3.75-6 GB 100, 6-7.5 GB 200, 7.5-15 GB 400, 15-30 GB 500,

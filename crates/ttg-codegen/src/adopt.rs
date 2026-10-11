@@ -9,7 +9,8 @@
 //!
 //! A key names a block the way the rest of the project does — `main`, a secondary block
 //! key, `<block>/<row key>` for one instance of a repeated block — or is the address
-//! itself (`aws_vpc.core`). Repeated blocks are written as separate resources (one per
+//! itself (`aws_vpc.core`, or in the modules layout `module.network.aws_vpc.core`, the
+//! `import` block's `to` then being the module's address). Repeated blocks are written as separate resources (one per
 //! row, named by key), so every instance has an address of its own and no `for_each`
 //! import is ever needed.
 
@@ -62,7 +63,12 @@ pub enum KeyTarget {
 
 /// Resolve one adopt key of entity `id` against `plan`.
 pub fn resolve_key(plan: &Plan, id: &str, key: &str) -> KeyTarget {
-    let key = key.trim();
+    let mut key = key.trim();
+    // The modules layout's address (`module.network.aws_vpc.core`, what the inspector and
+    // `entity_preview` list there) names the same block; the import follows the module.
+    while let Some(rest) = key.strip_prefix("module.") {
+        key = rest.split_once('.').map(|(_, r)| r).unwrap_or(rest);
+    }
     // A full address of one of the entity's blocks.
     for ((eid, _), pl) in &plan.blocks {
         if eid != id {
