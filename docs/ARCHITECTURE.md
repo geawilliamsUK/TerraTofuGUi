@@ -131,7 +131,8 @@ All types live in `ttg-core::ir`. Field names below are the serialized names.
   `containers`, plus `providers` = provider layers, `origin` = `all` | `curated` |
   `native`, `types` = abstract type ids, `name_glob` = case-insensitive `*` / `?` glob on
   the display name, `classifications` = only entities classified as one of these, and
-  `hide_edges` to draw no structural links at all);
+  `hide_edges` to draw no structural links at all, `hide_monitoring` to draw none from or
+  to alarms, log groups, audit trails and budgets);
 - an optional `layout` (`positions` / `sizes` keyed by entity id that override the shared
   ones while the view is active);
 - a `description` and a `legend` flag;
@@ -156,6 +157,21 @@ earliest steps drops the flows that close a cycle), the view's grouping boxes as
 swimlanes stacked in the order their members first take part, four barycentre sweeps
 against crossings, and each item aiming for the height of what flows into it; positions
 land in the view's own layout and the boxes are refitted around their members.
+`ttg_core::layout::tidy_tiers` lays a project out in tier bands (edge, public, app, data,
+regional; left to right or top to bottom) crossed by one row per availability zone —
+items in no zone or several share the first row — recursively inside every container and
+every subnet holding resources, each fitted to what it holds; a cell stacks at most six
+items before it wraps. Where each entity goes is `ttg_codegen::canvas`'s business: the
+type's tier (the definition's `tier`, else its category's), a subnet's from what is in
+it or linked to it, a security group's from what carries it, a route table's from its
+subnets, a container's from what it holds, and the row from the zones of the subnets
+it is in. The same module derives what else the canvas shows without storing it:
+security-group rule rows as edges (`rule_edges`: group to group in the direction of the
+traffic, or an `Outside` peer — the internet, a CIDR, an AWS-managed prefix list),
+monitoring links (`is_monitoring_link`, any link from or to the `monitoring` category,
+which the filter's `hide_monitoring` drops), zone badges, the region the provider
+variables name and the alias regions the export's plan sends blocks to
+(`alias_regions`), and the "Network" view preset.
 `ttg_codegen::views` holds the filter evaluation (`visible_set`, used by the canvas, the
 view bar, `view_get` and the CLI alike) and the Markdown / Mermaid flowchart / Mermaid
 `sequenceDiagram` renderers behind `ttg view export` and the `view_export` tool.
@@ -325,6 +341,28 @@ and it is left out of the dependency graph, so two services calling each other i
 Containment creates an *implicit* `network_membership` edge from child to container when the
 definition marks the relation `via_parent = true`. Explicit edges are still allowed for the cases
 where drawing a node inside a container is not what the user wants.
+
+**Subnets hold nodes.** A Subnet stays a node, but its definition says `may_contain = true`
+(MAPPING_FORMAT.md §1): a node whose type lists `subnet` in `allowed_parents` and has a
+`via_parent` `network_membership` relation to it may have the subnet as its `parent` —
+VPC › subnet › service. Only nodes go inside a node, one level deep (`Project::set_parent`
+and `validate::structural` hold the structure, the catalog the types). `Project::ancestors`
+passes through the subnet to the containers above it, so `ancestor` sources and required
+ancestors see the network and resource group as before; `parent_chain` lists the subnet
+too, and `diagnostics::relation_targets` finds it there, so the subnet a resource is drawn
+inside is its membership target exactly as a link would make it — for a `many` relation in
+addition to its links, the enclosing subnet first. Being a node rather than a container is
+what keeps every existing project exporting byte for byte as before: making Subnet a
+container would have moved every subnet from `nodes` to `containers`, and the export's
+block order follows the dependency graph, which is built containers first. A test moves
+every subnet-linked resource of nine examples into its subnet and checks that the export
+declares the same blocks with the same arguments (their order in a file may differ: a link
+and a containment enter the dependency walk at different points), that diagnostics are
+identical and reachability unchanged, on all three providers. The canvas draws a subnet
+holding resources as a box (`Project::is_box`) with them inside, fits it when something
+moves in or out (`layout::fit_host`) and turns it back into a plain node when it is empty;
+an environment's overrides apply to it as to any node, and a subnet absent from an
+environment leaves what it held one level up.
 
 ### 4.5 Validation (`ttg-core::validate`)
 
@@ -968,6 +1006,8 @@ badges on the entities until the next edit.
 | `views.rs` | the view bar (tabs, description, legend toggle, annotation buttons), the filter menu, and the per-frame visible set (`ttg_codegen::views::visible_set` plus the "a fitted container with no visible members is not drawn" rule) |
 | `annotations.rs` | drawing and editing a view's groups, flows, notes and logical nodes; the legend panel (and the strip of the canvas "zoom to fit" leaves it); geometry delegated to `ttg_core::view`. Flows fan out along a shared side, follow `canvas::routed_path` when *Route around nodes* is on, and place their labels clear of nodes, badges and each other — along the arrow first, then stepped off it on a leader line |
 | `view_tools.rs` | the View menu's view tools (flows from links, tidy by flows, arrange notes, "Where personal data goes") as single undo steps, and presentation mode: the step state, its keys and the caption |
+| `rule_edges.rs` | security-group rules on the canvas: dashed labelled arrows between the groups or the resources carrying them, `in:` / `out:` badges for address rules, selecting one marks its row in the inspector |
+| `region.rs` | the region frame around the drawing ("AWS · eu-west-2", plus the alias regions in use); never an entity, never exported |
 | `camera.rs` | world/screen transform, zoom-about-pointer, zoom-to-fit |
 | `history.rs` | snapshot-based undo/redo (the project is small; a clone per committed action is simpler and safer than command objects) |
 

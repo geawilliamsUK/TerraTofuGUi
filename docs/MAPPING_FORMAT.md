@@ -27,11 +27,35 @@ allowed_parents = ["virtual_network"] # container types this may be drawn inside
 icon = "SUB"                          # short glyph shown on the canvas
 env_prefix = "QUEUE"                  # v2, optional: first word of a Kubernetes workload's
                                       # environment variables for this type (§2.7)
+may_contain = true                    # v2, nodes only: other nodes may be drawn inside it
+tier = "public"                       # v2, optional: band of the tier layout
 ```
 
 Categories in use: `compute`, `storage`, `network`, `database`, `iam`, `serverless`,
 `container`, `dns`, `load_balancer`, `secrets`, `monitoring`, `organization`
 (grouping containers such as Resource Group / Project).
+
+**Nodes that hold nodes (v2).** `may_contain = true` lets a *node* type hold others on
+the canvas without becoming a container: a Subnet holds the instance, load balancer or
+database that runs in it, and its own export does not change at all. A type that may be
+drawn inside it lists it in `allowed_parents` **and** has a `via_parent = true` relation
+targeting it (`network_membership` → `subnet`), so being inside means exactly what a link
+would: the resolver (`diagnostics::relation_targets`) finds the enclosing subnet when no
+link exists, and for a `many` relation adds it to the linked ones (inside one subnet,
+linked to another: in both, the enclosing one first). Only nodes go inside a node, one
+level deep, and the loader refuses `may_contain` on a container, an `allowed_parents`
+entry that is a node without `may_contain`, a node parent without a `via_parent` relation
+to it, and a `via_parent` relation whose targets are neither containers nor
+`may_contain` nodes.
+
+**Tiers (v2).** `tier` places the type in the tier layout (`layout_tidy { by: "tiers" }`,
+Edit ▸ Arrange ▸ *Tidy by tiers*): `edge`, `public`, `app`, `data` or `regional`. Without
+it the category decides: `dns` → edge; `network`, `load_balancer` → public; `database`,
+`storage` → data; `iam`, `secrets`, `monitoring`, `organization` → regional; anything
+else → app. Native types are placed by words in their Terraform type (`aws_lb` public,
+`aws_db_instance` data, `aws_ecs_service` app, `aws_iam_role` regional). Subnets,
+security groups, route tables and containers are placed by what they hold or serve, not
+by their type (`ttg_codegen::canvas::tiers`). The tier changes only the layout.
 
 ### 1.1 Abstract fields
 

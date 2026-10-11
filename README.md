@@ -178,14 +178,42 @@ OpenTofu installed, so a definition change that produces invalid HCL fails the b
   other end sits, so a node inside a subnet linking to its VNet stays a short line.
 - A link that containment already implies (a subnet drawn inside its network) is not
   drawn and is reported as an info diagnostic; the canvas refuses to create new ones.
+- **Subnets hold what runs in them.** Drag an instance, load balancer, database,
+  container app or job, function, cache, file system, cluster, node pool, NAT gateway
+  or private endpoint onto a subnet and it goes inside; the subnet becomes a box around
+  it (VPC › subnet › service) and goes back to a plain node when it is empty. Being
+  inside *is* the subnet link: the export, the diagnostics and reachability treat it
+  exactly like one. Something spanning subnets keeps its links (drawn inside one and
+  linked to another, it is in both) and carries a zone badge such as `AZ a b`; a
+  subnet's own zone is in its subtitle.
+- **Security-group rules are edges**: a rule whose source is another group is a dashed
+  orange arrow from that group to this one, labelled `tcp 5432`; a rule from addresses
+  (the internet, a CIDR, CloudFront's prefix list) is an `in:` badge under the group,
+  and its egress rows muted `out:` badges. Click one to select the group with the rule's
+  row marked in the inspector. *View ▸ Security group rules* draws them between the
+  groups, between the resources carrying them, or not at all; they follow *Hide
+  structural links* and are left out while the filter shows only some link kinds.
+- **Region frame** (View menu): a light frame around the drawing, "AWS · eu-west-2",
+  with any other region the export reaches through an aliased provider named after it
+  ("+ us-east-1 for 2 resources") and those resources badged `us-east-1`. Never an
+  entity, never exported.
+- **View ▸ Hide monitoring links** (also in the filter menu, saved with a view) drops
+  every link from or to an alarm, log group, audit trail or budget, so the fan-out of
+  "watches" and "notifies" lines disappears and the resources stay.
 - Drag the bottom-right corner of a node or container to resize it; the inspector has
   exact width/height fields and a reset for nodes.
 - **Edit ▸ Arrange**: *Tidy layout* (Ctrl+L, also on the canvas and container context
   menus) lays the diagram out in columns, sources on the left and what they depend on
   to the right, recursively inside every container, and fits containers to their
-  contents. Align left/centre/right/top/middle/bottom needs two or more selected
-  items; distribute horizontally/vertically needs three. All undoable. The same layout
-  is available headless with `ttg tidy <project> [--out <file>]`.
+  contents. *Tidy by tiers* lays it out in bands instead — edge (DNS, CDN, WAF,
+  certificates), public (load balancers, gateways, public subnets), application, data
+  (databases, caches, buckets, queues), regional services (identity, secrets, logs,
+  alarms, topics, budgets) — with one row per availability zone so subnet *a* of every
+  tier lines up, inside every network and subnet too; a subnet's tier comes from what
+  is in it, a security group's from what carries it (or *top to bottom*). Align
+  left/centre/right/top/middle/bottom needs two or more selected items;
+  distribute horizontally/vertically needs three. All undoable. The same layouts are
+  available headless with `ttg tidy <project> [--by tiers] [--rows] [--out <file>]`.
 - In the inspector, an abstract field that the selected provider's mapping does not use
   is greyed out; its tooltip says which providers do use it.
 - **Views** (bar above the canvas) turn the wired diagram into architecture maps that
@@ -353,7 +381,7 @@ OpenTofu installed, so a definition change that produces invalid HCL fails the b
 
 ![Concrete display of the fan-out example with the "Messaging" view active](docs/screenshot-concrete.png)
 
-![The job pipeline after Edit ▸ Arrange ▸ Tidy layout](docs/screenshot-tidy.png)
+![The three-tier example after Edit ▸ Arrange ▸ Tidy by tiers: public, application and data bands with one row per availability zone, the app server and NAT gateway drawn inside their subnet, security-group rule badges and the region frame](docs/screenshot-tidy.png)
 
 ![Provider layers: the fan-out example shown as AWS, with the Azure-only Service Bus Namespace dimmed and its contents exported as plain SQS/SNS resources](docs/screenshot-layers.png)
 
@@ -457,8 +485,11 @@ disturbing the drawing on it, `view_update { filter }` does the same by name, an
 height }` let it look at what it drew — the window is resized for the capture and put
 back, so a big view is readable however small the window was. `view_generate { kind:
 "data_flow" }` derives a view's flows from the links and `{ kind: "personal_data" }`
-builds "Where personal data goes"; `layout_tidy { view, by: "flows" }` lays a view out by
-its flows and `view_arrange_notes` puts its notes back beside their anchors;
+builds "Where personal data goes", `{ kind: "network" }` a "Network" view laid out by
+tiers; `layout_tidy { view, by: "flows" }` lays a view out by its flows, `layout_tidy {
+by: "tiers", direction, tiers }` by tiers (with per-entity overrides), and
+`view_arrange_notes` puts its notes back beside their anchors; `entity_set_parent` puts
+a resource inside a subnet;
 `view_export { format: "sequence" }` gives the steps as a sequence diagram; and
 `entity_update` (one entity or a `select`) takes `classification`, `description` and
 `owner`.

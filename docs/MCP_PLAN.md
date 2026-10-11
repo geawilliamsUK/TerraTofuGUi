@@ -120,7 +120,9 @@ two lists are kept apart so an agent cannot mistake "blocks the export I am maki
 Write (each undoable): `entity_add`, `entity_update` (values validated against the
 definition, unknown fields rejected with the list of valid ones), `entity_move`,
 `entity_resize`, `entity_set_parent` (allowed-parent check, moves the entity inside the
-container visually), `entity_delete`, `link_add` (relation must be allowed by the
+container visually; a subnet takes the resources whose type has a `via_parent` membership
+relation to it, becomes a box around them, and the reply lists what being inside
+`implies`), `entity_delete`, `link_add` (relation must be allowed by the
 definition; redundant containment links refused with the same message as the UI),
 `link_remove`, `selection_set`, `view_set`, `view_save`, `view_delete`, `view_activate`,
 `view_group_add`, `view_flow_add`, `view_annotation_remove` (architecture-map
@@ -189,9 +191,15 @@ removing the resource-to-resource flows; the reply lists what was added, and a
 generation that changes nothing records no undo step. `personal_data` builds or
 refreshes "Where personal data goes" and switches to it. `view_arrange_notes { view? }`
 puts anchored notes back beside their anchors (`ttg_core::view::arrange_notes`, the same
-placement `view_note_add` uses). `layout_tidy` takes `view` and `by: links | flows`:
-`flows` is `ttg_core::flow_layout`, written into the view's own layout only, and either
-way a tidied view gets its notes rearranged in the same undo step. `view_fit` reports
+placement `view_note_add` uses). `layout_tidy` takes `view` and `by: links | flows |
+tiers`: `flows` is `ttg_core::flow_layout`, written into the view's own layout only;
+`tiers` is `ttg_codegen::canvas::tidy_by_tiers` (bands edge / public / app / data /
+regional, one row per availability zone), with `direction: columns | rows` and `tiers: {
+entity: tier }` overriding the derived band, and its reply lists the entities per band;
+either way a tidied view gets its notes rearranged in the same undo step.
+`view_generate { kind: "network" }` builds or refreshes the "Network" view (network,
+load balancer, compute, container and database categories, `hide_monitoring` on) and
+lays it out by tiers in its own layout. The view filter takes `hide_monitoring`. `view_fit` reports
 `legend_reserved_px`: with the legend on, the fit leaves its strip on the right free, so
 a fitted screenshot never has content under it. `view_export` takes `format: sequence`
 (a Mermaid `sequenceDiagram` of the numbered flows). `entity_update` takes
@@ -502,8 +510,13 @@ dropped-caller rule (fresh and deferred), the heartbeat, the screenshot size cla
 selectors and the quiet flag. `headless_cost_estimate` covers the three groupings on
 job-pipeline (whose one view has four groups), a one-call assumption moving the total
 and reported as `call`, the environment note and an explicit region, each refusal, and
-that the revision does not move. All run in CI on the same job as the rest of
-the workspace.
+that the revision does not move. `headless_subnets_hold_resources_and_tiers_lay_out`
+puts the three-tier app server inside its subnet (`implies` network membership, the link
+removed without a diagnostic, the instance still in that subnet in the export, the
+subnet a box around it), refuses a bucket and a subnet there, lays the project out by
+tiers both ways (load balancer before database, an override moving the bucket to the
+edge band, the same call twice giving the same layout, four bad calls refused) and
+builds the "Network" view. All run in CI on the same job as the rest of the workspace.
 
 ## 5. Remote access and sign-in (round 4, TF-001)
 

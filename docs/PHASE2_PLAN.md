@@ -1144,6 +1144,55 @@ secret (or flagging it external) gives one error per `$raw` that names it.
 spliced into a `$raw`, and a log group referenced only from a `$raw`, so the validate
 suite exercises them on every provider.
 
+## Round 4: canvas (zipOS feedback TF-002, TF-003 (2), TF-023)
+
+The zipOS build could not draw VPC › subnet › ECS service (a subnet was a node whose only
+parent is a network), saw its per-AZ placement only in the inspector, had no region on
+the canvas, saw security-group rules only as port tags, and at 48 nodes found the tidy
+layout unreadable: a few tall dependency columns with seven alarms' lines fanned across
+the whole canvas.
+
+- **Subnets hold resources** (TF-002) — `subnet.toml` says `may_contain = true`; the
+  thirteen types with a `network_membership` relation to subnets list `subnet` in
+  `allowed_parents` and mark that relation `via_parent`. Being drawn inside a subnet is
+  then that link for the export, the diagnostics and reachability (one resolver,
+  `diagnostics::relation_targets`; for a `many` relation it adds to the links). The
+  subnet stays a node — the alternative, making it a container, would have moved every
+  subnet in every project file from `nodes` to `containers` and, because the export walks
+  the dependency graph containers first, reordered the blocks of existing exports; as a
+  node, every example and the zipOS graph export byte for byte as before (checked
+  against the base build on all three providers). `Project::ancestors` passes through a
+  subnet, so Azure's resource-group ancestry and required ancestors are untouched; only
+  nodes go inside a node, one level deep. The canvas draws a subnet holding something as
+  a box, fits it as things move in and out and makes it a node again when empty;
+  `entity_set_parent` takes a subnet and says what being inside `implies`. Spanning
+  resources keep their links and carry an `AZ a b` badge; a subnet's zone is in its
+  subtitle. Environment overrides on a subnet apply as on any node.
+- **Region frame** (TF-002) — a read-only frame around the drawing, "AWS · eu-west-2",
+  naming the other regions the export reaches through an aliased provider ("+ us-east-1
+  for 2 resources", from the export's plan), whose resources are badged with it. View
+  menu toggle, remembered; never an entity, never exported.
+- **Security-group rules as edges** (TF-003 (2)) — `canvas::rule_edges` turns each rule
+  row into a dashed orange arrow from the source group to the group (egress: the other
+  way), labelled `tcp 5432`, or an `in:` / `out:` badge for the internet, a CIDR or an
+  AWS-managed prefix list (CloudFront). Between the groups or between the resources
+  carrying them (View menu); selecting one selects the group and marks the row in the
+  inspector. They follow *Hide structural links* and a relation filter.
+- **Tier layout and monitoring links** (TF-023) — `layout_tidy { by: "tiers" }`, `ttg
+  tidy --by tiers` and Edit ▸ Arrange ▸ *Tidy by tiers*: bands edge / public / app /
+  data / regional (left to right or top to bottom), one row per availability zone so the
+  `a` subnets of every tier line up, recursively inside networks and subnets. A type's
+  band is its definition's `tier` (new, v2), else its category's; subnets, security
+  groups, route tables and containers take theirs from what they hold or serve; the agent
+  can override per entity. The filter's `hide_monitoring` (View ▸ *Hide monitoring
+  links*) drops every link from or to an alarm, log group, audit trail or budget.
+  `view_generate { kind: "network" }` (and the View menu) builds a "Network" view laid
+  out by tiers with monitoring links hidden.
+
+Also: `--screenshot` no longer saves the app's settings (edge style, display mode, MCP
+autostart, recent files), and a link to a box too thin for its margins at a small zoom
+no longer panics.
+
 ## Round 3: environments and plan (gap report R3.11, R3.13; zipOS TF-012)
 
 A pilot and a production CallScope differed in about ten values and were two diagrams;
