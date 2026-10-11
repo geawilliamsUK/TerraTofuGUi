@@ -176,3 +176,17 @@ binary, so part of it was already fixed on `master` by round 3 before it was wri
 | **WP27 Canvas** | subnets as optional containers, a region frame, security group rules drawn as edges, a tier-aware layout and a toggle for monitoring links | TF-002, TF-003 (2), TF-023 |
 | **WP20 Diff, patterns, adoption and import** (round 3) | `project_diff`, checkpoints, patterns, `import {}` blocks, and import of a TerraTofu-generated directory back into the graph | R3.28–R3.30, TF-017 |
 | **WP21 Outputs and modules** (round 3) | outputs only for what is marked; modules behind a thin root with `envs/` | R3.31, R3.32, TF-013 (modules) |
+
+### zipOS feedback, second pass (2026-10-11)
+
+The zipOS log gained TF-024 to TF-031 and a second sighting of TF-020, from the first real
+staging deploy. They were found on the 2026-09-17 release binary again, so three are already
+fixed on `master`: TF-024 (native data sources, and an error for a `$raw` naming an undeclared
+`data.` / `var.` / `local.`), TF-020's queued-writes case (approval tickets; other writes keep
+running while a prompt is open) and TF-028 (the shared container environment, and a warning
+when an override leaves a generated cluster unreferenced). The release binaries are rebuilt
+from `master` so the next test runs the current code.
+
+| Package | Scope | Items |
+|---|---|---|
+| **WP28 Deploy-cycle fixes** | a mapping's variables stay declared while an override's `$raw` still uses them; the database connection URI url-encodes its credentials and carries `sslmode` when the server forces TLS; a "disposable" environment setting (timestamped final snapshot or none, zero recovery window, `force_destroy` on buckets) plus a diagnostic for versioned buckets that cannot be destroyed; a connections alarm as a percentage of the class's `max_connections`, and a diagnostic when a threshold exceeds what the target can reach; anchored notes honour their position and size, `view_note_update`, anchor lines from the nearest edge, note colours; "public IP for outbound" separate from public ingress, and no front-it-with-a-load-balancer step when one is linked | TF-025, TF-026, TF-027, TF-029, TF-030, TF-031 |
