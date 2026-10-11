@@ -93,6 +93,11 @@ pub struct Path {
 pub struct Reach {
     pub provider: String,
     pub posture: BTreeMap<Id, Posture>,
+    /// What each entity names through its extra arguments (`$ref` targets and the
+    /// addresses inside `$raw`), as `crate::refs` finds them. A reference grants what a
+    /// link would: the source is configured with the target's address, or a policy names
+    /// it (see [`grants`]).
+    pub references: BTreeMap<Id, std::collections::BTreeSet<Id>>,
 }
 
 const MANAGED: &[&str] = &[
@@ -1119,7 +1124,44 @@ pub fn analyse(full: &Project, cat: &Catalog, provider: &str) -> Reach {
     Reach {
         provider: provider.to_string(),
         posture,
+        references: references_by_source(full, cat, provider),
     }
+}
+
+fn references_by_source(
+    full: &Project,
+    cat: &Catalog,
+    provider: &str,
+) -> BTreeMap<Id, std::collections::BTreeSet<Id>> {
+    let mut out: BTreeMap<Id, std::collections::BTreeSet<Id>> = BTreeMap::new();
+    for r in crate::refs::derived_references(full, cat, provider) {
+        out.entry(r.source).or_default().insert(r.target);
+    }
+    out
+}
+
+/// Does `src` hold what a link to `tgt` would give it — an address and a permission?
+/// A link does; so does an extra argument naming `tgt` (a secret's ARN in a container
+/// definition); and so does a policy, drawn as its own resource, that names both `tgt` and
+/// a role `src` runs as (an inline policy on the task role granting the bucket).
+fn grants(p: &Project, reach: &Reach, src: &EntityRef, tgt: &str) -> bool {
+    let names = |id: &str, t: &str| {
+        p.edges_from(id)
+            .any(|e| e.target == t && e.relation != Relation::DependsOn)
+            || reach.references.get(id).is_some_and(|r| r.contains(t))
+    };
+    if names(src.id, tgt) {
+        return true;
+    }
+    let roles: Vec<&Id> = p
+        .edges_from(src.id)
+        .filter(|e| e.relation == Relation::IamBinding)
+        .map(|e| &e.target)
+        .collect();
+    !roles.is_empty()
+        && reach.references.iter().any(|(holder, named)| {
+            named.contains(tgt) && roles.iter().any(|r| *r != holder && names(holder, r))
+        })
 }
 
 fn exposure(
@@ -1306,9 +1348,7 @@ fn direct_path(
     let pol = policy(&reach.provider);
     let provider = reach.provider.as_str();
     let tid = tgt.id.to_string();
-    let linked = p
-        .edges_from(src.id)
-        .any(|e| e.target == tid && e.relation != Relation::DependsOn);
+    let linked = grants(p, reach, src, &tid);
     let path = |status: Status, hops: Vec<Id>, reason: String, notes: Vec<String>| Path {
         target: tid.clone(),
         status,

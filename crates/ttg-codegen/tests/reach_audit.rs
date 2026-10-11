@@ -689,3 +689,44 @@ fn audit_and_posture_run_per_environment() {
         .iter()
         .any(|(r, _, _, _)| r == "database_backups"));
 }
+
+/// A permission granted outside the links counts as the link: a policy drawn as its own
+/// resource that names both a role the workload runs as and the secret gives the workload
+/// what its 'Reads secrets' link would.
+#[test]
+fn a_policy_on_the_role_grants_what_a_link_would() {
+    let cat = Catalog::builtin();
+    let p = example("kubernetes.ttg.json");
+    let linked = to(&p, &cat, "aws", "sec-api-key", "wl-api").expect("a path to the secret");
+
+    let mut v = serde_json::to_value(&p).unwrap();
+    v["edges"]
+        .as_array_mut()
+        .unwrap()
+        .retain(|e| !(e["source"] == "wl-api" && e["target"] == "sec-api-key"));
+    let unlinked: Project = serde_json::from_value(v.clone()).unwrap();
+    let blocked = to(&unlinked, &cat, "aws", "sec-api-key", "wl-api").expect("a path to the secret");
+    assert_eq!(blocked.status, Status::Blocked, "{}", blocked.reason);
+    assert!(blocked.reason.contains("no link"), "{}", blocked.reason);
+
+    let mut policy = v["nodes"]["sec-api-key"].clone();
+    policy["id"] = "pol-api".into();
+    policy["name"] = "api secret policy".into();
+    policy["resource_type"] = "native:aws:aws_iam_role_policy".into();
+    policy["config"] = serde_json::json!({});
+    policy["parent"] = serde_json::Value::Null;
+    policy["extra"] = serde_json::json!({ "aws": { "main": {
+        "name": "api-secret",
+        "role": { "$ref": { "entity": "role-api", "attr": "id" } },
+        "policy": {
+            "$raw": "jsonencode({ Version = \"2012-10-17\", Statement = [{ Effect = \"Allow\", Action = \"secretsmanager:GetSecretValue\", Resource = @secret@ }] })",
+            "refs": { "secret": { "$ref": { "entity": "sec-api-key", "attr": "arn" } } }
+        }
+    } } });
+    v["nodes"]["pol-api"] = policy;
+    let granted: Project = serde_json::from_value(v).unwrap();
+    let mut cat = cat;
+    cat.ensure_native_types(&granted);
+    let path = to(&granted, &cat, "aws", "sec-api-key", "wl-api").expect("a path to the secret");
+    assert_eq!(path.status, linked.status, "{}", path.reason);
+}
