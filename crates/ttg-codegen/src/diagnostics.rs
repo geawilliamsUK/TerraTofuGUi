@@ -252,28 +252,25 @@ pub fn run(full: &Project, cat: &Catalog, provider: &str) -> Vec<Diagnostic> {
         }
 
         // Parent allowed?
-        if let Some(parent) = e.parent {
-            if let Some(pc) = p.containers.get(parent) {
-                if !def
-                    .resource
-                    .allowed_parents
-                    .iter()
-                    .any(|a| a == &pc.container_type)
-                {
-                    push(
-                        &mut out,
-                        Some(e.id),
-                        Severity::Error,
-                        Code::BadParent,
-                        format!(
-                            "{} cannot be placed inside a {}",
-                            def.resource.display_name,
-                            cat.resource(&pc.container_type)
-                                .map(|d| d.resource.display_name.clone())
-                                .unwrap_or(pc.container_type.clone())
-                        ),
-                    );
-                }
+        if let Some(pt) = e
+            .parent
+            .and_then(|parent| p.entity(parent))
+            .map(|x| x.resource_type)
+        {
+            if !cat.allows_parent(e.resource_type, pt) {
+                push(
+                    &mut out,
+                    Some(e.id),
+                    Severity::Error,
+                    Code::BadParent,
+                    format!(
+                        "{} cannot be placed inside a {}",
+                        def.resource.display_name,
+                        cat.resource(pt)
+                            .map(|d| d.resource.display_name.clone())
+                            .unwrap_or(pt.to_string())
+                    ),
+                );
             }
         }
 
@@ -1292,24 +1289,42 @@ fn targets_where(
         .map(|x| x.target.clone())
         .filter(|t| accepted(t))
         .collect();
+    let Some(def) = cat.resource(e.resource_type) else {
+        return out;
+    };
+    let via: Vec<&ttg_catalog::RelationDef> = def
+        .relations
+        .iter()
+        .filter(|r| r.kind == kind.key() && r.via_parent)
+        .collect();
+    if via.is_empty() {
+        return out;
+    }
+    let containers: Vec<&str> = via
+        .iter()
+        .flat_map(|r| r.targets.iter().map(String::as_str))
+        .filter(|t| keep(t))
+        .collect();
+    // The nearest enclosing entity of a target type: a container, or the subnet a
+    // resource is drawn inside.
+    let Some(c) = p
+        .parent_chain(e.id)
+        .into_iter()
+        .find(|c| p.entity(c).is_some_and(|x| containers.contains(&x.resource_type)))
+    else {
+        return out;
+    };
+    // Containment stands in for a link when there is none. For a relation that takes
+    // many targets it is one of them: a database drawn inside one subnet and linked to
+    // another spans both, its home subnet first.
+    let many = |ty: &str| {
+        via.iter()
+            .any(|r| r.cardinality == ttg_catalog::Cardinality::Many && r.targets.iter().any(|t| t == ty))
+    };
     if out.is_empty() {
-        let Some(def) = cat.resource(e.resource_type) else {
-            return out;
-        };
-        let containers: Vec<&str> = def
-            .relations
-            .iter()
-            .filter(|r| r.kind == kind.key() && r.via_parent)
-            .flat_map(|r| r.targets.iter().map(String::as_str))
-            .filter(|t| keep(t))
-            .collect();
-        if let Some(c) = p
-            .ancestors(e.id)
-            .into_iter()
-            .find(|c| containers.contains(&c.container_type.as_str()))
-        {
-            out.push(c.id.clone());
-        }
+        out.push(c.to_string());
+    } else if !out.iter().any(|x| x == c) && p.entity(c).is_some_and(|x| many(x.resource_type)) {
+        out.insert(0, c.to_string());
     }
     out
 }

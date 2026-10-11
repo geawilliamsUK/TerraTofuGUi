@@ -21,7 +21,7 @@ category = "container"
 display_name = "Container Job"
 description = "A container run to completion on demand (ECS task / Container Apps job / Cloud Run job): migrations, batches. Draw it inside a Container Environment and link its roles, image registry and secrets."
 kind = "node"
-allowed_parents = ["resource_group", "virtual_network", "container_environment"]
+allowed_parents = ["resource_group", "virtual_network", "container_environment", "subnet"]
 icon = "JOB"
 
 [[fields]]
@@ -156,6 +156,7 @@ kind = "network_membership"
 label = "Subnets"
 targets = ["subnet"]
 cardinality = "many"
+via_parent = true
 
 [[relations]]
 kind = "attribute_reference"

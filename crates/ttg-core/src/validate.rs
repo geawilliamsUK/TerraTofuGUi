@@ -84,11 +84,23 @@ pub fn structural(p: &Project) -> Report {
         }
     }
 
-    // parents exist and are containers; no containment cycles
+    // parents exist and are containers, or (one level deep) a node holding nodes, such
+    // as a subnet; no containment cycles
     for e in p.entities() {
         if let Some(parent) = e.parent {
-            if !p.containers.contains_key(parent) {
-                r.err(Some(e.id), format!("parent '{parent}' is not a container"));
+            let node_host = !e.is_container
+                && p.nodes
+                    .get(parent)
+                    .is_some_and(|n| n.parent.as_deref().is_none_or(|pp| !p.nodes.contains_key(pp)));
+            if !p.containers.contains_key(parent) && !node_host {
+                r.err(
+                    Some(e.id),
+                    if p.nodes.contains_key(parent) {
+                        format!("parent '{parent}' is a resource that cannot hold this one")
+                    } else {
+                        format!("parent '{parent}' is not a container")
+                    },
+                );
             } else if parent == e.id {
                 r.err(Some(e.id), "entity is its own parent");
             }

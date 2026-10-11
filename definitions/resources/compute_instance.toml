@@ -17,7 +17,7 @@ category = "compute"
 display_name = "Compute Instance"
 description = "A virtual machine attached to a subnet."
 kind = "node"
-allowed_parents = ["virtual_network", "resource_group"]
+allowed_parents = ["virtual_network", "resource_group", "subnet"]
 icon = "VM"
 
 [[fields]]
@@ -34,6 +34,7 @@ kind = "network_membership"
 label = "Attached to subnet"
 targets = ["subnet"]
 cardinality = "one"
+via_parent = true
 
 [[relations]]
 kind = "iam_binding"

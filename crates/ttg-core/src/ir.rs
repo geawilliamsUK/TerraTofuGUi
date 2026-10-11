@@ -522,6 +522,11 @@ pub struct ViewFilter {
     /// Only entities classified as one of these (empty = all, classified or not).
     #[serde(default, skip_serializing_if = "BTreeSet::is_empty")]
     pub classifications: BTreeSet<Classification>,
+    /// Draw no links from or to monitoring resources (alarms, log groups, audit trails,
+    /// budgets: the catalog's `monitoring` category), so the fan-out of "watches" and
+    /// "logs to" lines disappears while the resources stay.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub hide_monitoring: bool,
 }
 
 fn default_depth() -> u32 {
@@ -553,6 +558,7 @@ impl Default for ViewFilter {
             name_glob: String::new(),
             hide_edges: false,
             classifications: BTreeSet::new(),
+            hide_monitoring: false,
         }
     }
 }
@@ -572,6 +578,7 @@ impl ViewFilter {
             && self.name_glob.is_empty()
             && !self.hide_edges
             && self.classifications.is_empty()
+            && !self.hide_monitoring
     }
 }
 
@@ -979,23 +986,39 @@ impl Project {
         d
     }
 
-    /// Chain of ancestors, nearest first.
+    /// Chain of ancestor containers, nearest first. A node that holds others (a subnet)
+    /// is passed through, not listed: what is inside a subnet is still inside its
+    /// network and resource group.
     pub fn ancestors(&self, id: &str) -> Vec<&Container> {
-        let mut out = Vec::new();
+        self.parent_chain(id)
+            .into_iter()
+            .filter_map(|p| self.containers.get(p))
+            .collect()
+    }
+
+    /// Every enclosing entity, nearest first: containers and a node holding this one.
+    pub fn parent_chain(&self, id: &str) -> Vec<&str> {
+        let mut out: Vec<&str> = Vec::new();
         let mut cur = self.parent_of(id);
         while let Some(p) = cur {
-            if out.len() > 64 {
+            if out.len() > 64 || !self.contains(p) {
                 break;
             }
-            match self.containers.get(p) {
-                Some(c) => {
-                    out.push(c);
-                    cur = c.parent.as_deref();
-                }
-                None => break,
-            }
+            out.push(p);
+            cur = self.parent_of(p);
         }
         out
+    }
+
+    /// Is this a node holding other nodes (a subnet with resources drawn inside it)?
+    /// The canvas and the layout treat such a node as a box, like a container.
+    pub fn hosts_nodes(&self, id: &str) -> bool {
+        self.nodes.contains_key(id) && self.nodes.values().any(|n| n.parent.as_deref() == Some(id))
+    }
+
+    /// Drawn as a box: a container, or a node holding others.
+    pub fn is_box(&self, id: &str) -> bool {
+        self.containers.contains_key(id) || self.hosts_nodes(id)
     }
 
     /// Nearest ancestor container of the given abstract type.
@@ -1023,24 +1046,26 @@ impl Project {
         out
     }
 
-    /// All descendants (transitive), containers and nodes.
+    /// All descendants (transitive), containers and nodes, including what a node such as
+    /// a subnet holds.
     pub fn descendants_of(&self, container_id: &str) -> Vec<Id> {
         let mut out = Vec::new();
         let mut stack = vec![container_id.to_string()];
         while let Some(cur) = stack.pop() {
+            if out.len() > self.nodes.len() + self.containers.len() {
+                break;
+            }
             for c in self.children_of(&cur) {
-                if self.containers.contains_key(&c) {
-                    stack.push(c.clone());
-                }
+                stack.push(c.clone());
                 out.push(c);
             }
         }
         out
     }
 
-    /// True if `ancestor` is a (transitive) ancestor of `id`.
+    /// True if `ancestor` is a (transitive) ancestor of `id`, a holding node included.
     pub fn is_ancestor(&self, ancestor: &str, id: &str) -> bool {
-        self.ancestors(id).iter().any(|c| c.id == ancestor)
+        self.parent_chain(id).contains(&ancestor)
     }
 
     /// Outgoing edges (this entity as source).
@@ -1158,11 +1183,12 @@ impl Project {
         out
     }
 
-    /// Remove an entity and everything that references it. Removing a container
-    /// re-parents its children to the container's own parent (it does not delete them).
+    /// Remove an entity and everything that references it. Removing a container (or a
+    /// subnet holding resources) re-parents its children to its own parent (it does not
+    /// delete them).
     pub fn remove_entity(&mut self, id: &str) {
         let new_parent = self.parent_of(id).map(|s| s.to_string());
-        if self.containers.remove(id).is_some() {
+        if self.containers.remove(id).is_some() || self.nodes.remove(id).is_some() {
             for n in self.nodes.values_mut() {
                 if n.parent.as_deref() == Some(id) {
                     n.parent = new_parent.clone();
@@ -1174,7 +1200,6 @@ impl Project {
                 }
             }
         }
-        self.nodes.remove(id);
         self.edges.retain(|e| e.source != id && e.target != id);
         for v in &mut self.views {
             v.filter.hidden.remove(id);
@@ -1197,10 +1222,19 @@ impl Project {
     }
 
     /// Set the parent of an entity. Rejects (returns false) if it would create a
-    /// containment cycle or the parent is not a container.
+    /// containment cycle or the parent cannot hold it: a container holds anything, a node
+    /// (a subnet) holds nodes only, one level deep — not while it is inside a node itself
+    /// or holds nodes of its own. Whether the parent's *type* may hold the child's is the
+    /// catalog's business (`allowed_parents`).
     pub fn set_parent(&mut self, id: &str, parent: Option<&str>) -> bool {
         if let Some(p) = parent {
-            if p == id || !self.containers.contains_key(p) || self.is_ancestor(id, p) {
+            let node_host = self.nodes.contains_key(id)
+                && !self.hosts_nodes(id)
+                && self
+                    .nodes
+                    .get(p)
+                    .is_some_and(|n| n.parent.as_deref().is_none_or(|pp| !self.nodes.contains_key(pp)));
+            if p == id || !(self.containers.contains_key(p) || node_host) || self.is_ancestor(id, p) {
                 return false;
             }
         }
@@ -1328,6 +1362,7 @@ mod tests {
         v.filter.types = ["subnet".to_string()].into_iter().collect();
         v.filter.name_glob = "job*".into();
         v.filter.hide_edges = true;
+        v.filter.hide_monitoring = true;
         v.filter.classifications = [Classification::Personal].into_iter().collect();
         v.groups.push(Group {
             id: "g1".into(),

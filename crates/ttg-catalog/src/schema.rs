@@ -35,9 +35,20 @@ pub struct ResourceMeta {
     pub description: String,
     #[serde(default)]
     pub kind: ResourceKind,
-    /// Abstract container types this resource may be placed inside.
+    /// Abstract container types this resource may be placed inside, and node types that
+    /// `may_contain` (a subnet) (v2).
     #[serde(default)]
     pub allowed_parents: Vec<String>,
+    /// A node that may hold other nodes on the canvas, as a subnet holds what runs in it
+    /// (v2). It stays a node: nothing about its own export changes. A type lists it in
+    /// `allowed_parents` and has a `via_parent` relation to it, which being drawn inside
+    /// then satisfies exactly as a link would.
+    #[serde(default)]
+    pub may_contain: bool,
+    /// Band of the tier layout (v2): `edge`, `public`, `app`, `data` or `regional`.
+    /// Absent = derived from the category (see [`Tier::of_category`]).
+    #[serde(default)]
+    pub tier: Option<Tier>,
     /// Short glyph shown on the canvas node.
     #[serde(default)]
     pub icon: String,
@@ -66,6 +77,125 @@ impl ResourceMeta {
         self.env_prefix
             .clone()
             .unwrap_or_else(|| self.type_id.to_uppercase())
+    }
+    /// The tier layout band: the definition's `tier`, else its category's.
+    pub fn tier(&self) -> Tier {
+        self.tier.unwrap_or_else(|| Tier::of_category(&self.category))
+    }
+}
+
+/// The bands of the tier layout, in reading order: what users reach first (DNS, CDN,
+/// WAF, certificates), the public edge of the network (load balancers, NAT and
+/// internet gateways, public subnets), what runs the application, where data rests, and
+/// the regional services everything else uses (identity, secrets, keys, logs, alarms,
+/// topics, budgets).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Tier {
+    Edge,
+    Public,
+    App,
+    Data,
+    Regional,
+}
+
+impl Tier {
+    pub const ALL: [Tier; 5] = [Tier::Edge, Tier::Public, Tier::App, Tier::Data, Tier::Regional];
+    pub fn key(self) -> &'static str {
+        match self {
+            Tier::Edge => "edge",
+            Tier::Public => "public",
+            Tier::App => "app",
+            Tier::Data => "data",
+            Tier::Regional => "regional",
+        }
+    }
+    pub fn label(self) -> &'static str {
+        match self {
+            Tier::Edge => "Edge",
+            Tier::Public => "Public",
+            Tier::App => "Application",
+            Tier::Data => "Data",
+            Tier::Regional => "Regional services",
+        }
+    }
+    pub fn from_key(s: &str) -> Option<Tier> {
+        Tier::ALL
+            .into_iter()
+            .find(|t| t.key().eq_ignore_ascii_case(s.trim()))
+    }
+    pub fn index(self) -> usize {
+        self as usize
+    }
+    /// The band a category belongs to when its definition does not say.
+    pub fn of_category(category: &str) -> Tier {
+        match category {
+            "dns" => Tier::Edge,
+            "network" | "load_balancer" => Tier::Public,
+            "database" | "storage" => Tier::Data,
+            "iam" | "secrets" | "monitoring" | "organization" => Tier::Regional,
+            _ => Tier::App,
+        }
+    }
+    /// The band of a native provider type (`aws_lb`, `google_sql_database_instance`),
+    /// guessed from words in its name; regional when nothing matches.
+    pub fn of_native(tf_type: &str) -> Tier {
+        let t = tf_type.to_ascii_lowercase();
+        let has = |words: &[&str]| words.iter().any(|w| t.contains(w));
+        if has(&[
+            "cloudfront",
+            "route53",
+            "dns",
+            "acm_",
+            "wafv2",
+            "_cdn",
+            "frontdoor",
+            "certificate",
+        ]) {
+            Tier::Edge
+        } else if has(&[
+            "_lb",
+            "lb_",
+            "load_balancer",
+            "nat_",
+            "internet_gateway",
+            "_eip",
+            "public_ip",
+        ]) {
+            Tier::Public
+        } else if has(&[
+            "db_",
+            "_db",
+            "rds",
+            "sql",
+            "elasticache",
+            "redis",
+            "s3_",
+            "_bucket",
+            "dynamodb",
+            "sqs",
+            "efs",
+            "storage",
+            "cosmos",
+        ]) {
+            Tier::Data
+        } else if has(&[
+            "ecs_",
+            "eks_",
+            "lambda",
+            "instance",
+            "container",
+            "kubernetes",
+            "function",
+            "app_service",
+            "cloud_run",
+            "security_group",
+            "endpoint",
+        ]) {
+            Tier::App
+        } else {
+            Tier::Regional
+        }
     }
 }
 

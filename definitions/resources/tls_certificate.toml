@@ -24,6 +24,7 @@ description = "A server certificate for an HTTPS load balancer or CDN. Link 'Val
 kind = "node"
 allowed_parents = ["resource_group", "key_vault"]
 icon = "TLS"
+tier = "edge"
 network_agnostic = true
 
 [[fields]]

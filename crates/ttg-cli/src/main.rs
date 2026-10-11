@@ -207,12 +207,19 @@ enum Cmd {
         #[arg(long)]
         json: bool,
     },
-    /// Re-lay out a project file automatically (columns by dependency, containers fitted).
+    /// Re-lay out a project file automatically (columns by dependency, containers fitted;
+    /// or `--by tiers`: bands edge / public / app / data / regional, one row per zone).
     Tidy {
         project: PathBuf,
         /// Where to write the tidied project; defaults to overwriting the input.
         #[arg(long)]
         out: Option<PathBuf>,
+        /// `links` (default) or `tiers`.
+        #[arg(long, default_value = "links")]
+        by: String,
+        /// With `--by tiers`: bands top to bottom instead of left to right.
+        #[arg(long)]
+        rows: bool,
     },
 }
 
@@ -671,7 +678,12 @@ fn main() -> Result<()> {
                 std::process::exit(1);
             }
         }
-        Cmd::Tidy { project, out } => {
+        Cmd::Tidy {
+            project,
+            out,
+            by,
+            rows,
+        } => {
             let mut p = ttg_core::project::load(&project)?;
             cat.ensure_native_types(&p);
             let size = |p: &ttg_core::Project, id: &str| -> ttg_core::Size {
@@ -683,7 +695,14 @@ fn main() -> Result<()> {
                     .and_then(|n| n.size)
                     .unwrap_or(ttg_core::Size { w: 176, h: 64 })
             };
-            ttg_core::layout::tidy(&mut p, &size, &ttg_core::layout::TidyOptions::default());
+            let opts = ttg_core::layout::TidyOptions::default();
+            match by.as_str() {
+                "links" => ttg_core::layout::tidy(&mut p, &size, &opts),
+                "tiers" => {
+                    ttg_codegen::canvas::tidy_by_tiers(&mut p, &cat, &Default::default(), &size, &opts, rows)
+                }
+                other => anyhow::bail!("unknown --by \"{other}\" (links | tiers)"),
+            }
             let dest = out.unwrap_or(project);
             ttg_core::project::save(&p, &dest)?;
             println!("tidied -> {}", dest.display());

@@ -18,6 +18,7 @@ description = "Azure only. Put Event Queues and Topics inside it to share one Se
 kind = "container"
 allowed_parents = ["resource_group"]
 icon = "SB"
+tier = "data"
 providers = ["azure"]
 
 [[fields]]

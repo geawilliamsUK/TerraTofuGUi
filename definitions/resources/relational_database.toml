@@ -18,7 +18,7 @@ category = "database"
 display_name = "Relational Database"
 description = "A managed PostgreSQL or MySQL server. Link two subnets, a Security Group and optionally a Secret that holds its password."
 kind = "node"
-allowed_parents = ["virtual_network", "resource_group"]
+allowed_parents = ["virtual_network", "resource_group", "subnet"]
 icon = "DB"
 env_prefix = "DB"
 
@@ -145,6 +145,7 @@ label = "Subnets"
 targets = ["subnet"]
 cardinality = "many"
 min_targets = 2
+via_parent = true
 
 [[relations]]
 kind = "attribute_reference"

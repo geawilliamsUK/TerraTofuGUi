@@ -102,7 +102,7 @@ fn entity_rect_at(
 ) -> Option<Rect> {
     let stored = Rect::new(position_of(p, view, id)?, size_of(p, view, id)?);
     let fits = view.is_some_and(|v| v.layout.is_some());
-    if !fits || depth > 32 || !p.containers.contains_key(id) {
+    if !fits || depth > 32 || !p.is_box(id) {
         return Some(stored);
     }
     let mut content: Option<Rect> = None;
@@ -253,7 +253,7 @@ pub fn note_obstacles(
         .filter(|e| visible(e.id))
         .filter_map(|e| {
             let r = entity_rect(p, Some(v), e.id, visible)?;
-            Some(if e.is_container {
+            Some(if p.is_box(e.id) {
                 Rect {
                     h: CONTAINER_HEADER.min(r.h),
                     ..r

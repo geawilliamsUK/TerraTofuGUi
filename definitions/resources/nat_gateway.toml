@@ -15,7 +15,7 @@ category = "network"
 display_name = "NAT Gateway"
 description = "Outbound internet access for private subnets. Place it in a public subnet and point a Route Table at it."
 kind = "node"
-allowed_parents = ["virtual_network", "resource_group"]
+allowed_parents = ["virtual_network", "resource_group", "subnet"]
 icon = "NAT"
 
 [[relations]]
@@ -24,6 +24,7 @@ label = "Lives in subnet"
 providers = ["aws"]
 targets = ["subnet"]
 cardinality = "one"
+via_parent = true
 
 # ---------------------------------------------------------------- AWS
 [providers.aws]

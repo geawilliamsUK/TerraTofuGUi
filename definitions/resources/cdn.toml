@@ -29,6 +29,7 @@ description = "An edge cache in front of a bucket or load balancer. Link 'Origin
 kind = "node"
 allowed_parents = ["resource_group"]
 icon = "CDN"
+tier = "edge"
 network_agnostic = true
 
 [[fields]]

@@ -3,6 +3,12 @@
 # A layer-3 address range inside a virtual network. Membership in the network comes
 # either from being drawn inside a Virtual Network container (`via_parent = true`) or
 # from an explicit `network_membership` edge to one.
+#
+# A subnet stays a node, but `may_contain = true` lets the resources that run in it be
+# drawn inside it: a type that lists "subnet" in `allowed_parents` and has a `via_parent`
+# network_membership relation to it gets that membership from containment, exactly as
+# from a link. A resource spanning several subnets (a load balancer, a database subnet
+# group) keeps its links; drawn inside one subnet and linked to others, it is in all.
 
 schema_version = 2
 
@@ -14,6 +20,7 @@ description = "An address range inside a virtual network."
 kind = "node"
 allowed_parents = ["virtual_network"]
 icon = "SUB"
+may_contain = true
 
 [[fields]]
 name = "cidr_block"

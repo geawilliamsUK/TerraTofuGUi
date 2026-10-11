@@ -124,14 +124,43 @@ pub fn catalog(cat: &Catalog) -> Vec<String> {
                 )));
             }
         }
+        let mut uses_v2 = false;
         for p in &def.resource.allowed_parents {
-            if !cat.is_container(p) {
+            if cat.may_contain(p) {
+                // A node holding another: only nodes go inside, and being inside must
+                // mean something — the relation it satisfies, as a link would.
+                uses_v2 = true;
+                if def.resource.kind == ResourceKind::Container {
+                    errs.push(where_(&format!(
+                        "allowed_parents entry '{p}' is a node; only nodes may be placed inside a node"
+                    )));
+                }
+                if !def
+                    .relations
+                    .iter()
+                    .any(|r| r.via_parent && r.targets.contains(p))
+                {
+                    errs.push(where_(&format!(
+                        "allowed_parents entry '{p}' is a node that may contain others, but no via_parent relation targets it, so being drawn inside it would mean nothing"
+                    )));
+                }
+            } else if !cat.is_container(p) {
                 errs.push(where_(&format!(
-                    "allowed_parents entry '{p}' is not a container type"
+                    "allowed_parents entry '{p}' is not a container type (nor a node type with may_contain)"
                 )));
             }
         }
-        let mut uses_v2 = false;
+        if def.resource.may_contain {
+            uses_v2 = true;
+            if def.resource.kind == ResourceKind::Container {
+                errs.push(where_(
+                    "may_contain is for nodes; a container holds resources already",
+                ));
+            }
+        }
+        if def.resource.tier.is_some() {
+            uses_v2 = true;
+        }
         // Only the types the Kubernetes export reads may hand it fields and links.
         let manifest_type = MANIFEST_TYPES.contains(&tid.as_str());
         if let Some(prefix) = &def.resource.env_prefix {
@@ -254,9 +283,14 @@ pub fn catalog(cat: &Catalog) -> Vec<String> {
                     )));
                 }
             }
-            if r.via_parent && !r.targets.iter().any(|t| cat.is_container(t)) {
+            if r.via_parent
+                && !r
+                    .targets
+                    .iter()
+                    .any(|t| cat.is_container(t) || cat.may_contain(t))
+            {
                 errs.push(where_(&format!(
-                    "relation '{}' has via_parent but no container target",
+                    "relation '{}' has via_parent but no container target (nor a node type with may_contain)",
                     r.kind
                 )));
             }

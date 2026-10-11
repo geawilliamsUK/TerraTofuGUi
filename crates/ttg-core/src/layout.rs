@@ -52,9 +52,60 @@ pub fn tidy_container(
     node_size: &dyn Fn(&Project, &str) -> Size,
     opts: &TidyOptions,
 ) {
-    if p.containers.contains_key(container) {
-        layout_children(p, Some(container), node_size, opts);
+    if p.is_box(container) {
+        let inner = layout_children(p, Some(container), node_size, opts);
+        // A subnet holding resources is sized here; a container keeps the size the user
+        // gave it, as before.
+        if let Some(n) = p.nodes.get_mut(container) {
+            n.size = Some(box_size(inner, opts));
+        }
     }
+}
+
+/// The box that holds content of size `inner`: padding at the sides and bottom, the
+/// header strip on top, never smaller than a readable minimum.
+fn box_size(inner: Size, opts: &TidyOptions) -> Size {
+    Size {
+        w: (inner.w + 2 * opts.padding).max(220),
+        h: (inner.h + opts.header + opts.padding).max(140),
+    }
+}
+
+/// Fit a node that holds others (a subnet) after something moved in or out of it. When
+/// it holds nothing it goes back to a plain node (its own size forgotten); when it has
+/// just become a box (no size yet) what it holds is laid out inside it; otherwise it
+/// grows, never shrinks, to take in what it holds with the usual padding and header.
+pub fn fit_host(p: &mut Project, host: &str, node_size: &dyn Fn(&Project, &str) -> Size, opts: &TidyOptions) {
+    if !p.nodes.contains_key(host) {
+        return;
+    }
+    if !p.hosts_nodes(host) {
+        p.nodes.get_mut(host).unwrap().size = None;
+        return;
+    }
+    if p.nodes[host].size.is_none() {
+        tidy_container(p, host, node_size, opts);
+        return;
+    }
+    let n = &p.nodes[host];
+    let (pos, size) = (n.position, n.size.unwrap());
+    let (mut x0, mut y0) = (pos.x, pos.y);
+    let (mut x1, mut y1) = (pos.x + size.w, pos.y + size.h);
+    for c in p.children_of(host) {
+        let (Some(e), s) = (p.entity(&c), node_size(p, &c)) else {
+            continue;
+        };
+        x0 = x0.min(e.position.x - opts.padding);
+        y0 = y0.min(e.position.y - opts.header);
+        x1 = x1.max(e.position.x + s.w + opts.padding);
+        y1 = y1.max(e.position.y + s.h + opts.padding);
+    }
+    let n = p.nodes.get_mut(host).unwrap();
+    n.position = Position { x: x0, y: y0 };
+    n.size = Some(Size {
+        w: x1 - x0,
+        h: y1 - y0,
+    });
 }
 
 /// The child of `parent` (or top-level entity) that contains `id`, if any.
@@ -93,14 +144,13 @@ fn layout_children(
     // Bottom-up: sub-containers first so their size is known.
     let mut sizes: BTreeMap<Id, Size> = BTreeMap::new();
     for c in &children {
-        if p.containers.contains_key(c) {
+        if p.is_box(c) {
             let inner = layout_children(p, Some(c), node_size, opts);
-            let s = Size {
-                w: (inner.w + 2 * opts.padding).max(220),
-                h: (inner.h + opts.header + opts.padding).max(140),
-            };
+            let s = box_size(inner, opts);
             if let Some(cc) = p.containers.get_mut(c) {
                 cc.size = s;
+            } else if let Some(n) = p.nodes.get_mut(c) {
+                n.size = Some(s);
             }
             sizes.insert(c.clone(), s);
         } else {
@@ -219,7 +269,7 @@ fn layout_children(
     let total_h = col_h.iter().copied().max().unwrap_or(0);
     let base = match parent {
         Some(c) => {
-            let cp = p.containers[c].position;
+            let cp = p.entity(c).map(|e| e.position).unwrap_or_default();
             Position {
                 x: cp.x + opts.padding,
                 y: cp.y + opts.header,
@@ -242,6 +292,219 @@ fn layout_children(
     Size {
         w: total_w,
         h: total_h,
+    }
+}
+
+/// Where the tier layout puts an entity among its siblings: the band (`0` = the first,
+/// left-most or top-most) and the row within it — the availability zone it is pinned to,
+/// or `""` for what is not pinned to one zone (shared items come first) — and whether it
+/// leads its cell (a zone's subnet, before what sits beside it), so the rows line up.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+pub struct Place {
+    pub band: usize,
+    pub row: String,
+    pub first: bool,
+}
+
+/// Most items stacked in one cell of the tier grid before it wraps into another column.
+const CELL_STACK: usize = 6;
+
+/// Lay out the whole diagram in bands — one per tier, left to right (`vertical`: top to
+/// bottom) — and, across them, one row per availability zone, so subnet `a` of every
+/// tier lines up with the others. Applied recursively: a container (or a subnet holding
+/// resources) is laid out the same way inside and then sized around what it holds, and
+/// takes its own place among its siblings from `place`. Within a cell, boxes come first,
+/// then items by type and name; a long cell wraps into further columns. Deterministic.
+pub fn tidy_tiers(
+    p: &mut Project,
+    place: &dyn Fn(&Project, &str) -> Place,
+    node_size: &dyn Fn(&Project, &str) -> Size,
+    opts: &TidyOptions,
+    vertical: bool,
+) {
+    tier_children(p, None, place, node_size, opts, vertical);
+}
+
+fn tier_children(
+    p: &mut Project,
+    parent: Option<&str>,
+    place: &dyn Fn(&Project, &str) -> Place,
+    node_size: &dyn Fn(&Project, &str) -> Size,
+    opts: &TidyOptions,
+    vertical: bool,
+) -> Size {
+    let children = direct_children(p, parent);
+    if children.is_empty() {
+        return Size { w: 0, h: 0 };
+    }
+    let mut sizes: BTreeMap<Id, Size> = BTreeMap::new();
+    for c in &children {
+        if p.is_box(c) {
+            let inner = tier_children(p, Some(c), place, node_size, opts, vertical);
+            let s = box_size(inner, opts);
+            if let Some(cc) = p.containers.get_mut(c) {
+                cc.size = s;
+            } else if let Some(n) = p.nodes.get_mut(c) {
+                n.size = Some(s);
+            }
+            sizes.insert(c.clone(), s);
+        } else {
+            sizes.insert(c.clone(), node_size(p, c));
+        }
+    }
+    // Cells of the grid: (row, band) -> items in reading order.
+    let mut cells: BTreeMap<(String, usize), Vec<Id>> = BTreeMap::new();
+    let mut first: BTreeSet<Id> = BTreeSet::new();
+    for c in &children {
+        let pl = place(p, c);
+        if pl.first {
+            first.insert(c.clone());
+        }
+        cells.entry((pl.row, pl.band)).or_default().push(c.clone());
+    }
+    for items in cells.values_mut() {
+        items.sort_by_cached_key(|id| {
+            let e = p.entity(id).unwrap();
+            (
+                !first.contains(id),
+                !p.is_box(id),
+                e.resource_type.to_string(),
+                e.name.to_lowercase(),
+                id.clone(),
+            )
+        });
+    }
+    let rows: Vec<String> = cells
+        .keys()
+        .map(|(r, _)| r.clone())
+        .collect::<BTreeSet<_>>()
+        .into_iter()
+        .collect();
+    let bands: Vec<usize> = cells
+        .keys()
+        .map(|(_, b)| *b)
+        .collect::<BTreeSet<_>>()
+        .into_iter()
+        .collect();
+    // Each cell's own arrangement: stacks of at most CELL_STACK along the band, side
+    // by side across it. `main` runs along the band (down a column, or along a row).
+    let main = |s: Size| if vertical { s.w } else { s.h };
+    let cross = |s: Size| if vertical { s.h } else { s.w };
+    let gap_main = if vertical {
+        opts.column_gap / 2
+    } else {
+        opts.row_gap
+    };
+    let gap_cross = if vertical {
+        opts.row_gap
+    } else {
+        opts.column_gap / 2
+    };
+    let mut cell_size: BTreeMap<(String, usize), (i32, i32)> = BTreeMap::new();
+    for (k, items) in &cells {
+        let mut lane_main = Vec::new();
+        let mut lane_cross = Vec::new();
+        for chunk in items.chunks(CELL_STACK) {
+            lane_main.push(
+                chunk.iter().map(|i| main(sizes[i])).sum::<i32>() + gap_main * (chunk.len() as i32 - 1),
+            );
+            lane_cross.push(chunk.iter().map(|i| cross(sizes[i])).max().unwrap_or(0));
+        }
+        let m = lane_main.iter().copied().max().unwrap_or(0);
+        let c = lane_cross.iter().sum::<i32>() + gap_cross * (lane_cross.len() as i32 - 1);
+        cell_size.insert(k.clone(), (m, c));
+    }
+    // Band thickness (across) and row length (along), each the largest cell in it.
+    let band_cross: BTreeMap<usize, i32> = bands
+        .iter()
+        .map(|b| {
+            let w = rows
+                .iter()
+                .filter_map(|r| cell_size.get(&(r.clone(), *b)).map(|s| s.1))
+                .max()
+                .unwrap_or(0);
+            (*b, w)
+        })
+        .collect();
+    let row_main: BTreeMap<String, i32> = rows
+        .iter()
+        .map(|r| {
+            let h = bands
+                .iter()
+                .filter_map(|b| cell_size.get(&(r.clone(), *b)).map(|s| s.0))
+                .max()
+                .unwrap_or(0);
+            (r.clone(), h)
+        })
+        .collect();
+    let band_gap = if vertical {
+        opts.row_gap * 2
+    } else {
+        opts.column_gap
+    };
+    let row_gap = if vertical {
+        opts.column_gap
+    } else {
+        opts.row_gap * 2
+    };
+    let base = match parent {
+        Some(c) => {
+            let cp = p.entity(c).map(|e| e.position).unwrap_or_default();
+            Position {
+                x: cp.x + opts.padding,
+                y: cp.y + opts.header,
+            }
+        }
+        None => opts.origin,
+    };
+    let mut band_at: BTreeMap<usize, i32> = BTreeMap::new();
+    let mut acc = 0;
+    for b in &bands {
+        band_at.insert(*b, acc);
+        acc += band_cross[b] + band_gap;
+    }
+    let total_cross = acc - band_gap;
+    let mut row_at: BTreeMap<String, i32> = BTreeMap::new();
+    let mut acc = 0;
+    for r in &rows {
+        row_at.insert(r.clone(), acc);
+        acc += row_main[r] + row_gap;
+    }
+    let total_main = acc - row_gap;
+    for ((r, b), items) in &cells {
+        let mut lane_offset = 0;
+        for chunk in items.chunks(CELL_STACK) {
+            let mut along = 0;
+            let lane = chunk.iter().map(|i| cross(sizes[i])).max().unwrap_or(0);
+            for i in chunk {
+                let (m, c) = (row_at[r] + along, band_at[b] + lane_offset);
+                let to = if vertical {
+                    Position {
+                        x: base.x + m,
+                        y: base.y + c,
+                    }
+                } else {
+                    Position {
+                        x: base.x + c,
+                        y: base.y + m,
+                    }
+                };
+                move_entity(p, i, to);
+                along += main(sizes[i]) + gap_main;
+            }
+            lane_offset += lane + gap_cross;
+        }
+    }
+    if vertical {
+        Size {
+            w: total_main,
+            h: total_cross,
+        }
+    } else {
+        Size {
+            w: total_cross,
+            h: total_main,
+        }
     }
 }
 

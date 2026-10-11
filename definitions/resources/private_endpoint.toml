@@ -18,8 +18,9 @@ category = "network"
 display_name = "Private Endpoint"
 description = "Private connectivity from a subnet to a managed service (storage, database, vault, queue). Link the subnet and the service."
 kind = "node"
-allowed_parents = ["resource_group", "virtual_network"]
+allowed_parents = ["resource_group", "virtual_network", "subnet"]
 icon = "PE"
+tier = "app"
 
 [[fields]]
 name = "subresource"
@@ -39,6 +40,7 @@ label = "Subnets"
 providers = ["aws", "azure"]
 targets = ["subnet"]
 cardinality = "many"
+via_parent = true
 
 # Optional: an AWS endpoint is defined by its service name alone, and a gateway endpoint
 # fronts S3 or DynamoDB rather than one resource in the diagram.

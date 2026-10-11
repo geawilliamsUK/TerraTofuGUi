@@ -28,6 +28,7 @@ description = "Managed rule groups and per-path rate limits. Link 'Protects' to 
 kind = "node"
 allowed_parents = ["resource_group"]
 icon = "WAF"
+tier = "edge"
 network_agnostic = true
 
 [[fields]]

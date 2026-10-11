@@ -888,6 +888,10 @@
           "items": {
             "$ref": "#/$defs/Classification"
           }
+        },
+        "hide_monitoring": {
+          "description": "Draw no links from or to monitoring resources (alarms, log groups, audit trails,\nbudgets: the catalog's `monitoring` category), so the fan-out of \"watches\" and\n\"logs to\" lines disappears while the resources stay.",
+          "type": "boolean"
         }
       }
     },

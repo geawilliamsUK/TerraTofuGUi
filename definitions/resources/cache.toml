@@ -13,7 +13,7 @@ category = "database"
 display_name = "Cache"
 description = "A managed Redis cache. Link subnets (AWS) and optionally a Security Group."
 kind = "node"
-allowed_parents = ["virtual_network", "resource_group"]
+allowed_parents = ["virtual_network", "resource_group", "subnet"]
 icon = "RED"
 env_prefix = "CACHE"
 
@@ -31,6 +31,7 @@ label = "Subnets"
 providers = ["aws"]
 targets = ["subnet"]
 cardinality = "many"
+via_parent = true
 
 [[relations]]
 kind = "attribute_reference"

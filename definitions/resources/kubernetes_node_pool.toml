@@ -24,7 +24,7 @@ category = "container"
 display_name = "Kubernetes Node Pool"
 description = "An extra group of nodes on a Kubernetes cluster: its own size, scaling range, spot and GPU settings, labels and taints."
 kind = "node"
-allowed_parents = ["virtual_network", "resource_group"]
+allowed_parents = ["virtual_network", "resource_group", "subnet"]
 icon = "POOL"
 
 [[fields]]
@@ -137,6 +137,7 @@ label = "Subnets (defaults to the cluster's)"
 providers = ["aws", "azure"]
 targets = ["subnet"]
 cardinality = "many"
+via_parent = true
 
 # ---------------------------------------------------------------- AWS
 [providers.aws]

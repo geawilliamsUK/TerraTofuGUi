@@ -20,7 +20,7 @@ category = "storage"
 display_name = "File System"
 description = "A shared network file system (NFS) mounted by several machines. Link the subnets it should be reachable from."
 kind = "node"
-allowed_parents = ["resource_group", "virtual_network"]
+allowed_parents = ["resource_group", "virtual_network", "subnet"]
 icon = "FS"
 
 [[fields]]
@@ -49,6 +49,7 @@ label = "Mounted from subnets"
 providers = ["aws", "gcp"]
 targets = ["subnet"]
 cardinality = "many"
+via_parent = true
 
 [[relations]]
 kind = "attribute_reference"

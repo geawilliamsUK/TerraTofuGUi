@@ -25,7 +25,7 @@ category = "serverless"
 display_name = "Function"
 description = "A serverless function. Link the role it runs as; then link queues, secrets, a database, a log group and subnets to wire it up."
 kind = "node"
-allowed_parents = ["resource_group", "virtual_network"]
+allowed_parents = ["resource_group", "virtual_network", "subnet"]
 icon = "FN"
 
 [[fields]]
@@ -108,6 +108,7 @@ kind = "network_membership"
 label = "Subnets (run inside the network)"
 targets = ["subnet"]
 cardinality = "many"
+via_parent = true
 
 # ---------------------------------------------------------------- AWS
 [providers.aws]

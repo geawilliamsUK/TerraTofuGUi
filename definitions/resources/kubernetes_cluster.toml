@@ -21,7 +21,7 @@ category = "container"
 display_name = "Kubernetes Cluster"
 description = "A managed Kubernetes control plane with one autoscaling node pool. Link the subnets it runs in."
 kind = "node"
-allowed_parents = ["virtual_network", "resource_group"]
+allowed_parents = ["virtual_network", "resource_group", "subnet"]
 icon = "K8S"
 
 [[fields]]
@@ -94,6 +94,7 @@ kind = "network_membership"
 label = "Subnets"
 targets = ["subnet"]
 cardinality = "many"
+via_parent = true
 
 [[relations]]
 kind = "logs_to"

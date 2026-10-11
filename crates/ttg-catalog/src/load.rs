@@ -330,6 +330,33 @@ impl Catalog {
             .is_some_and(|r| r.resource.kind == ResourceKind::Container)
     }
 
+    /// A node type that may hold other nodes (a subnet).
+    pub fn may_contain(&self, type_id: &str) -> bool {
+        self.resources
+            .get(type_id)
+            .is_some_and(|r| r.resource.kind == ResourceKind::Node && r.resource.may_contain)
+    }
+
+    /// Can a `child_type` be drawn inside a `parent_type`? A container of a type the
+    /// child lists in `allowed_parents`, or a node type that `may_contain` and is listed
+    /// there too.
+    pub fn allows_parent(&self, child_type: &str, parent_type: &str) -> bool {
+        self.resources
+            .get(child_type)
+            .is_some_and(|d| d.resource.allowed_parents.iter().any(|a| a == parent_type))
+            && (self.is_container(parent_type) || self.may_contain(parent_type))
+    }
+
+    /// The tier layout band of a type (the definition's `tier`, else its category's).
+    pub fn tier(&self, type_id: &str) -> crate::schema::Tier {
+        match self.resources.get(type_id) {
+            Some(d) => d.resource.tier(),
+            None => native_parts(type_id)
+                .map(|(_, t)| crate::schema::Tier::of_native(t))
+                .unwrap_or(crate::schema::Tier::App),
+        }
+    }
+
     /// Distinct categories in palette order.
     pub fn categories(&self) -> Vec<String> {
         let order = [
@@ -466,6 +493,8 @@ impl Catalog {
                 },
                 kind: ResourceKind::Node,
                 allowed_parents: containers,
+                may_contain: false,
+                tier: Some(crate::schema::Tier::of_native(tf_type)),
                 icon: if data_source.is_some() { "DATA".into() } else { "TF".into() },
                 expects_incoming: false,
                 network_agnostic: false,

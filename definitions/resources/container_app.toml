@@ -29,7 +29,7 @@ category = "container"
 display_name = "Container App"
 description = "A long-running container (ECS Fargate / Azure Container Apps / Cloud Run). Draw it inside a Container Environment, link its task role, subnets (AWS), image registry, secrets and the resources it uses."
 kind = "node"
-allowed_parents = ["resource_group", "virtual_network", "container_environment"]
+allowed_parents = ["resource_group", "virtual_network", "container_environment", "subnet"]
 icon = "APP"
 
 [[fields]]
@@ -225,6 +225,7 @@ kind = "network_membership"
 label = "Subnets"
 targets = ["subnet"]
 cardinality = "many"
+via_parent = true
 
 [[relations]]
 kind = "attribute_reference"

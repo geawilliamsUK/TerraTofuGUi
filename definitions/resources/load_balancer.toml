@@ -25,7 +25,7 @@ category = "load_balancer"
 display_name = "Load Balancer"
 description = "Distributes traffic to compute instances or container apps. Link 'Subnets' (AWS needs two availability zones) and 'Forwards to' the targets."
 kind = "node"
-allowed_parents = ["virtual_network", "resource_group"]
+allowed_parents = ["virtual_network", "resource_group", "subnet"]
 icon = "LB"
 
 [[fields]]
@@ -91,6 +91,7 @@ kind = "network_membership"
 label = "Subnets"
 targets = ["subnet"]
 cardinality = "many"
+via_parent = true
 
 [[relations]]
 kind = "attribute_reference"

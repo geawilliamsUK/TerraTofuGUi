@@ -15,6 +15,7 @@ kind = "node"
 allowed_parents = ["resource_group", "virtual_network"]
 network_agnostic = true
 icon = "REG"
+tier = "regional"
 
 [[fields]]
 name = "repositories"

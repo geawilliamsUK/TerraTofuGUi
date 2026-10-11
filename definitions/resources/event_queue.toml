@@ -16,6 +16,7 @@ kind = "node"
 allowed_parents = ["resource_group", "virtual_network", "servicebus_namespace"]
 network_agnostic = true
 icon = "Q"
+tier = "data"
 env_prefix = "QUEUE"
 
 [[fields]]
