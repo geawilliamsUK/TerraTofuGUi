@@ -1129,6 +1129,13 @@
               "type": "null"
             }
           ]
+        },
+        "color": {
+          "description": "One of `crate::view::NOTE_COLORS` (`neutral`, `info`, `warning`, `danger`,\n`success`) or a `#rrggbb`: the note is drawn tinted with it and the Markdown export\nmarks it. Absent: the plain note colour.",
+          "type": [
+            "string",
+            "null"
+          ]
         }
       },
       "required": [

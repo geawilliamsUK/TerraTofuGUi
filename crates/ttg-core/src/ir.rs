@@ -758,6 +758,11 @@ pub struct Note {
     pub size: Size,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub anchor: Option<NoteAnchor>,
+    /// One of `crate::view::NOTE_COLORS` (`neutral`, `info`, `warning`, `danger`,
+    /// `success`) or a `#rrggbb`: the note is drawn tinted with it and the Markdown export
+    /// marks it. Absent: the plain note colour.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub color: Option<String>,
 }
 
 fn default_note_size() -> Size {
@@ -1446,6 +1451,7 @@ mod tests {
             position: Position { x: 5, y: 6 },
             size: Size { w: 260, h: 120 },
             anchor: Some(NoteAnchor::Flow { flow: "f1".into() }),
+            color: Some("warning".into()),
         });
         p.views.push(v.clone());
         let text = serde_json::to_string_pretty(&p).unwrap();

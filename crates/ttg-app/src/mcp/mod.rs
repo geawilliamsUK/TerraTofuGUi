@@ -494,6 +494,22 @@ pub enum AgentCommand {
         h: Option<i32>,
         /// Resource, group, logical node or flow the note explains.
         anchor: Option<String>,
+        /// A palette name or `#rrggbb` (`ttg_core::view::note_color`).
+        color: Option<String>,
+    },
+    /// Change a note in place; a field left out keeps its value. `Some(None)` on `anchor`
+    /// or `color` removes it. `x` / `y` are where it is drawn.
+    NoteUpdate {
+        view: Option<String>,
+        note: String,
+        title: Option<String>,
+        body: Option<String>,
+        anchor: Option<Option<String>>,
+        color: Option<Option<String>>,
+        x: Option<i32>,
+        y: Option<i32>,
+        w: Option<i32>,
+        h: Option<i32>,
     },
     LogicalAdd {
         view: Option<String>,

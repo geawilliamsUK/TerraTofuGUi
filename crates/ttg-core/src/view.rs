@@ -193,6 +193,70 @@ pub fn note_rect(p: &Project, v: &View, n: &Note, visible: &dyn Fn(&str) -> bool
     }
 }
 
+/// The leader from a note to what it explains: from the point of the note's edge nearest
+/// the anchor to the point of the anchor's box nearest the note. Where the two overlap
+/// along an axis the line runs straight across the middle of the overlap, so a note
+/// placed below its resource gets a short vertical line that never crosses its text.
+/// Returns `(from on the note, to on the anchor)`.
+pub fn leader_line(note: Rect, anchor: Rect) -> ((f32, f32), (f32, f32)) {
+    fn axis(a0: f32, a1: f32, b0: f32, b1: f32) -> (f32, f32) {
+        if a0 > b1 {
+            (a0, b1)
+        } else if a1 < b0 {
+            (a1, b0)
+        } else {
+            let mid = (a0.max(b0) + a1.min(b1)) / 2.0;
+            (mid, mid)
+        }
+    }
+    let (nx, ax) = axis(note.x, note.x + note.w, anchor.x, anchor.x + anchor.w);
+    let (ny, ay) = axis(note.y, note.y + note.h, anchor.y, anchor.y + anchor.h);
+    ((nx, ny), (ax, ay))
+}
+
+/// The note colours with a name: name and the accent it is drawn with (the border, and a
+/// pale wash of it as the fill). Any other colour is written as `#rrggbb`.
+pub const NOTE_COLORS: &[(&str, &str)] = &[
+    ("neutral", "#6b7280"),
+    ("info", "#2563eb"),
+    ("warning", "#d97706"),
+    ("danger", "#dc2626"),
+    ("success", "#16a34a"),
+];
+
+/// A note colour as stored: a palette name (any case) or `#rrggbb`, normalised to lower
+/// case; anything else is refused with the choices.
+pub fn note_color(s: &str) -> Result<String, String> {
+    let t = s.trim().to_ascii_lowercase();
+    if NOTE_COLORS.iter().any(|(n, _)| *n == t) {
+        return Ok(t);
+    }
+    let hex = t.strip_prefix('#').unwrap_or("");
+    if hex.len() == 6 && hex.chars().all(|c| c.is_ascii_hexdigit()) {
+        return Ok(t);
+    }
+    Err(format!(
+        "note colour \"{s}\" is neither one of {} nor a #rrggbb colour",
+        NOTE_COLORS.iter().map(|(n, _)| *n).collect::<Vec<_>>().join(", ")
+    ))
+}
+
+/// The accent of a stored note colour as RGB: the palette's for a name, the colour itself
+/// for `#rrggbb`.
+pub fn note_accent(color: &str) -> Option<(u8, u8, u8)> {
+    let hex = NOTE_COLORS
+        .iter()
+        .find(|(n, _)| n.eq_ignore_ascii_case(color.trim()))
+        .map(|(_, h)| *h)
+        .unwrap_or(color.trim());
+    let hex = hex.strip_prefix('#')?;
+    if hex.len() != 6 {
+        return None;
+    }
+    let v = u32::from_str_radix(hex, 16).ok()?;
+    Some(((v >> 16) as u8, (v >> 8) as u8, v as u8))
+}
+
 /// Gap left between an anchored note and the thing it explains.
 pub const NOTE_GAP: f32 = 24.0;
 /// Height of a grouping box's label strip: a note may overlap a box, not its label.
@@ -570,6 +634,7 @@ mod tests {
             position: Position::default(),
             size: Size { w: 260, h: 120 },
             anchor: Some(NoteAnchor::End(FlowEnd::Entity { entity: "a".into() })),
+            color: None,
         };
         v.notes.push(n.clone());
         let before = note_rect(&p, &v, &n, &all);
@@ -598,6 +663,7 @@ mod tests {
                 anchor: Some(NoteAnchor::End(FlowEnd::Entity {
                     entity: anchor.into(),
                 })),
+                color: None,
             });
         }
         v.notes.push(Note {
@@ -607,6 +673,7 @@ mod tests {
             position: Position { x: 3000, y: 3000 },
             size: Size { w: 200, h: 80 },
             anchor: None,
+            color: None,
         });
         assert_eq!(arrange_notes(&p, &mut v, &all), 2);
         let a = entity_rect(&p, Some(&v), "a", &all).unwrap();
@@ -627,5 +694,54 @@ mod tests {
         // The free note is not touched, and a second run changes nothing.
         assert_eq!(v.notes[2].position, Position { x: 3000, y: 3000 });
         assert_eq!(arrange_notes(&p, &mut v, &all), 0);
+    }
+
+    #[test]
+    fn a_leader_runs_between_the_nearest_edges() {
+        let anchor = Rect {
+            x: 100.0,
+            y: 100.0,
+            w: 176.0,
+            h: 64.0,
+        };
+        // Below, overlapping horizontally: a short vertical line from the note's top
+        // edge to the anchor's bottom edge.
+        let below = Rect {
+            x: 120.0,
+            y: 200.0,
+            w: 260.0,
+            h: 120.0,
+        };
+        let (from, to) = leader_line(below, anchor);
+        assert_eq!(from, (198.0, 200.0));
+        assert_eq!(to, (198.0, 164.0));
+        // To the right, overlapping vertically: horizontal, edge to edge.
+        let right = Rect {
+            x: 300.0,
+            y: 80.0,
+            w: 260.0,
+            h: 120.0,
+        };
+        let (from, to) = leader_line(right, anchor);
+        assert_eq!(from, (300.0, 132.0));
+        assert_eq!(to, (276.0, 132.0));
+        // Off a corner: corner to corner.
+        let above_left = Rect {
+            x: -300.0,
+            y: -200.0,
+            w: 260.0,
+            h: 120.0,
+        };
+        assert_eq!(leader_line(above_left, anchor), ((-40.0, -80.0), (100.0, 100.0)));
+    }
+
+    #[test]
+    fn note_colours_are_names_or_hex() {
+        assert_eq!(note_color(" Warning ").unwrap(), "warning");
+        assert_eq!(note_color("#AABBCC").unwrap(), "#aabbcc");
+        assert!(note_color("orange").is_err());
+        assert!(note_color("#abc").is_err());
+        assert_eq!(note_accent("danger"), Some((0xdc, 0x26, 0x26)));
+        assert_eq!(note_accent("#010203"), Some((1, 2, 3)));
     }
 }

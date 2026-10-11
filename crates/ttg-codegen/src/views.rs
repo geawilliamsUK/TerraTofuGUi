@@ -373,10 +373,37 @@ pub fn markdown(p: &Project, cat: &Catalog, v: &View) -> String {
                 .as_ref()
                 .map(|a| format!(" *(on {})*", anchor_name(p, v, a)))
                 .unwrap_or_default();
-            s.push_str(&format!("### {title}{about}\n\n{}\n\n", n.body));
+            s.push_str(&format!("### {title}{about}\n\n{}\n\n", note_body(n)));
         }
     }
     s
+}
+
+/// A note's body, marked with its colour: the four meaningful colours become the alert
+/// GitHub (and most Markdown viewers since) draws as a coloured box — `info` a note,
+/// `success` a tip, `warning` a warning, `danger` a caution — and any other colour is
+/// named in front of the text. A plain or neutral note is plain text.
+fn note_body(n: &ttg_core::Note) -> String {
+    let alert = match n.color.as_deref().map(str::to_ascii_lowercase).as_deref() {
+        None | Some("neutral") => return n.body.clone(),
+        Some("info") => "NOTE".to_string(),
+        Some("success") => "TIP".to_string(),
+        Some("warning") => "WARNING".to_string(),
+        Some("danger") => "CAUTION".to_string(),
+        Some(other) => return format!("*({other})* {}", n.body),
+    };
+    let quoted: Vec<String> = n
+        .body
+        .lines()
+        .map(|l| {
+            if l.is_empty() {
+                ">".to_string()
+            } else {
+                format!("> {l}")
+            }
+        })
+        .collect();
+    format!("> [!{alert}]\n{}", quoted.join("\n"))
 }
 
 /// Markdown table cells cannot hold a raw `|` or a line break.

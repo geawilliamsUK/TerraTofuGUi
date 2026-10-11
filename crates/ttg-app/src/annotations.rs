@@ -33,6 +33,21 @@ pub fn to_rect(r: geom::Rect) -> Rect {
     Rect::from_min_size(Pos2::new(r.x, r.y), Vec2::new(r.w, r.h))
 }
 
+/// Fill and border of a note: the plain note colours, or a pale wash of its colour with
+/// the colour itself as the border.
+pub fn note_colors(color: Option<&str>) -> (Color32, Color32) {
+    match color.and_then(geom::note_accent) {
+        None => (NOTE_FILL, NOTE_INK),
+        Some((r, g, b)) => {
+            let wash = |c: u8| (255.0 - (255.0 - c as f32) * 0.14).round() as u8;
+            (
+                Color32::from_rgb(wash(r), wash(g), wash(b)),
+                Color32::from_rgb(r, g, b),
+            )
+        }
+    }
+}
+
 pub fn parse_color(s: &str) -> Option<Color32> {
     let s = s.trim().trim_start_matches('#');
     if s.len() != 6 {
@@ -262,6 +277,19 @@ impl TtgApp {
         size: Size,
         anchor: Option<NoteAnchor>,
     ) -> Option<Id> {
+        self.add_colored_note(title, body, pos, size, anchor, None)
+    }
+
+    /// [`Self::add_note`] with a colour (`ttg_core::view::note_color`), in the same undo step.
+    pub fn add_colored_note(
+        &mut self,
+        title: &str,
+        body: &str,
+        pos: Position,
+        size: Size,
+        anchor: Option<NoteAnchor>,
+        color: Option<String>,
+    ) -> Option<Id> {
         self.active_view?;
         let id = self.project.fresh_id("note");
         let before = self.snapshot();
@@ -272,6 +300,7 @@ impl TtgApp {
             position: pos,
             size,
             anchor,
+            color,
         });
         self.finish(before);
         self.select_annotation(Annotation::Note(id.clone()));
@@ -1047,26 +1076,34 @@ pub fn draw_notes(app: &mut TtgApp, ui: &mut Ui, origin: Pos2) {
         let Some(wr) = app.note_rect(&n.id) else { continue };
         let sr = app.camera.rect_to_screen(origin, wr);
         let selected = app.selected_annotation == Some(Annotation::Note(n.id.clone()));
+        let (fill, ink) = note_colors(n.color.as_deref());
         painter.rect(
             sr,
             CornerRadius::same(6),
-            NOTE_FILL,
+            fill,
             Stroke::new(
                 if selected { 2.5_f32 } else { 1.0_f32 },
                 if selected {
                     Color32::from_rgb(30, 100, 220)
                 } else {
-                    NOTE_INK
+                    ink
                 },
             ),
             StrokeKind::Inside,
         );
-        // A line back to whatever the note explains.
+        // A line back to whatever the note explains, between the nearest edges.
         if let Some(a) = n.anchor.as_ref() {
             if let Some(ar) = app.anchor_screen_rect(a, origin) {
+                let r = |r: Rect| geom::Rect {
+                    x: r.min.x,
+                    y: r.min.y,
+                    w: r.width(),
+                    h: r.height(),
+                };
+                let (from, to) = geom::leader_line(r(sr), r(ar));
                 painter.line_segment(
-                    [ar.right_center(), sr.left_center()],
-                    Stroke::new(1.0_f32, NOTE_INK.gamma_multiply(0.7)),
+                    [Pos2::new(from.0, from.1), Pos2::new(to.0, to.1)],
+                    Stroke::new(1.0_f32, ink.gamma_multiply(0.7)),
                 );
             }
         }
@@ -1585,7 +1622,49 @@ fn color_row(ui: &mut Ui, current: Option<&str>, allow_none: bool) -> Option<Opt
     picked
 }
 
-/// Inspector for a note: title, body and what it is pinned to.
+/// The note colours as swatches (plain, then the named palette) and a `#rrggbb` field for
+/// any other; returns the pick (`Some(None)` = plain).
+fn note_color_row(ui: &mut Ui, current: Option<&str>) -> Option<Option<String>> {
+    let mut picked = None;
+    let choices = std::iter::once(None).chain(geom::NOTE_COLORS.iter().map(|(n, _)| Some(*n)));
+    for c in choices {
+        let (fill, ink) = note_colors(c);
+        let cur = current.map(str::to_ascii_lowercase).as_deref() == c;
+        let (rect, resp) = ui.allocate_exact_size(Vec2::splat(18.0), Sense::click());
+        ui.painter().rect(
+            rect,
+            CornerRadius::same(4),
+            fill,
+            Stroke::new(
+                if cur { 2.5_f32 } else { 1.5_f32 },
+                if cur { Color32::BLACK } else { ink },
+            ),
+            StrokeKind::Inside,
+        );
+        if resp.on_hover_text(c.unwrap_or("plain")).clicked() {
+            picked = Some(c.map(str::to_string));
+        }
+    }
+    let mut hex = current
+        .filter(|c| c.starts_with('#'))
+        .unwrap_or_default()
+        .to_string();
+    let r = ui.add(
+        egui::TextEdit::singleline(&mut hex)
+            .hint_text("#rrggbb")
+            .desired_width(70.0),
+    );
+    if r.lost_focus() {
+        if let Ok(c) = geom::note_color(&hex) {
+            if Some(c.as_str()) != current {
+                picked = Some(Some(c));
+            }
+        }
+    }
+    picked
+}
+
+/// Inspector for a note: title, body, colour and what it is pinned to.
 fn note_inspector(app: &mut TtgApp, ui: &mut Ui, a: &Annotation, id: &Id) {
     use egui::RichText;
     let Some(n) = app.active_view().and_then(|v| v.note(id)).cloned() else {
@@ -1625,6 +1704,17 @@ fn note_inspector(app: &mut TtgApp, ui: &mut Ui, a: &Annotation, id: &Id) {
         app.dirty = true;
     }
     track_edit(app, &r);
+    ui.add_space(6.0);
+    ui.horizontal_wrapped(|ui| {
+        ui.label("Colour");
+        if let Some(pick) = note_color_row(ui, n.color.as_deref()) {
+            let before = app.snapshot();
+            if let Some(nm) = app.active_view_mut().and_then(|v| v.note_mut(id)) {
+                nm.color = pick;
+            }
+            app.finish(before);
+        }
+    });
     ui.add_space(6.0);
     let anchored = n
         .anchor

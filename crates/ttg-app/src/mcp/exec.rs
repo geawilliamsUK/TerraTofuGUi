@@ -222,9 +222,31 @@ impl TtgApp {
         else {
             return free;
         };
+        offset_from(a, x, y)
+    }
+
+    /// [`Self::note_position_for`] for a note about to be anchored to `anchor`: where to
+    /// store it so it is drawn with its top-left corner at `(x, y)`. A coordinate left out
+    /// keeps the spot beside the anchor that `note_spot_beside` picks.
+    fn note_position_at(
+        &self,
+        anchor: &ttg_core::NoteAnchor,
+        size: ttg_core::Size,
+        x: Option<i32>,
+        y: Option<i32>,
+    ) -> ttg_core::Position {
+        let beside = self.note_spot_beside(anchor, size);
+        let visible = |e: &str| self.is_visible(e);
+        let Some(a) = self
+            .active_view()
+            .and_then(|v| ttg_core::view::anchor_rect(&self.project, v, anchor, &visible))
+        else {
+            return beside;
+        };
+        let at = offset_from(a, x.unwrap_or(0), y.unwrap_or(0));
         ttg_core::Position {
-            x: x - (a.x + a.w).round() as i32,
-            y: y - a.y.round() as i32,
+            x: if x.is_some() { at.x } else { beside.x },
+            y: if y.is_some() { at.y } else { beside.y },
         }
     }
 
@@ -327,7 +349,7 @@ impl TtgApp {
                 let (position, offset) = note_geometry(&self.project, v, n, &visible);
                 json!({
                     "id": n.id, "title": n.title, "body": n.body, "position": position, "offset": offset,
-                    "size": n.size, "anchor": n.anchor,
+                    "size": n.size, "anchor": n.anchor, "color": n.color,
                 })
             }).collect::<Vec<_>>(),
             "logicals": v.logicals.iter().map(|l| json!({
@@ -1020,24 +1042,116 @@ impl TtgApp {
                 w,
                 h,
                 anchor,
+                color,
             } => self.with_view(view, |app| {
                 app.require_view("notes")?;
                 let anchor = anchor.map(|a| app.resolve_anchor(&a)).transpose()?;
+                let color = color
+                    .filter(|c| !c.trim().is_empty())
+                    .map(|c| ttg_core::view::note_color(&c))
+                    .transpose()?;
                 let size = ttg_core::Size {
                     w: w.unwrap_or(260).max(120),
                     h: h.unwrap_or(120).max(60),
                 };
-                // An anchored note with no position of its own goes beside its anchor,
-                // not off the right-hand edge of the whole diagram.
-                let spot = match (&anchor, x, y) {
-                    (Some(a), None, None) => app.note_spot_beside(a, size),
-                    _ => app.annotation_spot(x, y),
+                // An anchored note goes where it is asked to (the position stored as the
+                // offset from its anchor, so it still follows it), or beside its anchor
+                // when no position is given — not off the right-hand edge of the diagram.
+                let spot = match &anchor {
+                    Some(a) => app.note_position_at(a, size, x, y),
+                    None => app.annotation_spot(x, y),
                 };
                 let id = app
-                    .add_note(&title, &body, spot, size, anchor)
+                    .add_colored_note(&title, &body, spot, size, anchor, color)
                     .ok_or("could not add the note")?;
                 let rect = app.note_rect(&id).map(|r| json!({"x": r.min.x, "y": r.min.y, "w": r.width(), "h": r.height()}));
                 Ok(json!({"status": "note added", "id": id, "at": rect, "in_view": app.view_name()}))
+            }),
+            AgentCommand::NoteUpdate {
+                view,
+                note,
+                title,
+                body,
+                anchor,
+                color,
+                x,
+                y,
+                w,
+                h,
+            } => self.with_view(view, |app| {
+                app.require_view("notes")?;
+                let Some(v) = app.active_view() else {
+                    return Err("no view is active".into());
+                };
+                let id = v
+                    .notes
+                    .iter()
+                    .find(|n| n.id == note || (!n.title.is_empty() && n.title.eq_ignore_ascii_case(&note)))
+                    .map(|n| n.id.clone())
+                    .ok_or_else(|| format!("no note with id or title \"{note}\" in {}", app.view_name().unwrap_or_default()))?;
+                // Everything is checked before anything changes.
+                let anchor = match anchor {
+                    None => None,
+                    Some(None) => Some(None),
+                    Some(Some(a)) if a.trim().is_empty() => Some(None),
+                    Some(Some(a)) => Some(Some(app.resolve_anchor(&a)?)),
+                };
+                let color = match color {
+                    None => None,
+                    Some(None) => Some(None),
+                    Some(Some(c)) if c.trim().is_empty() => Some(None),
+                    Some(Some(c)) => Some(Some(ttg_core::view::note_color(&c)?)),
+                };
+                let drawn = app.note_rect(&id);
+                let old = app.active_view().and_then(|v| v.note(&id)).cloned().unwrap();
+                let size = ttg_core::Size {
+                    w: w.map(|w| w.max(120)).unwrap_or(old.size.w),
+                    h: h.map(|h| h.max(60)).unwrap_or(old.size.h),
+                };
+                let new_anchor = match &anchor {
+                    Some(a) => a.clone(),
+                    None => old.anchor.clone(),
+                };
+                // Where it goes: asked for, or where it is drawn now; a note given a new
+                // anchor and no position goes beside it.
+                let position = match (&new_anchor, &anchor) {
+                    (Some(a), Some(Some(_))) if x.is_none() && y.is_none() => app.note_position_at(a, size, None, None),
+                    (Some(a), _) => {
+                        let at_x = x.or(drawn.map(|r| r.min.x.round() as i32));
+                        let at_y = y.or(drawn.map(|r| r.min.y.round() as i32));
+                        if x.is_none() && y.is_none() && anchor.is_none() {
+                            old.position
+                        } else {
+                            app.note_position_at(a, size, at_x, at_y)
+                        }
+                    }
+                    (None, _) => ttg_core::Position {
+                        x: x.or(drawn.map(|r| r.min.x.round() as i32)).unwrap_or(old.position.x),
+                        y: y.or(drawn.map(|r| r.min.y.round() as i32)).unwrap_or(old.position.y),
+                    },
+                };
+                let before = app.snapshot();
+                if let Some(n) = app.active_view_mut().and_then(|v| v.note_mut(&id)) {
+                    if let Some(t) = title {
+                        n.title = t;
+                    }
+                    if let Some(b) = body {
+                        n.body = b;
+                    }
+                    if let Some(c) = color {
+                        n.color = c;
+                    }
+                    n.anchor = new_anchor;
+                    n.position = position;
+                    n.size = size;
+                }
+                app.finish(before);
+                let n = app.active_view().and_then(|v| v.note(&id)).cloned().unwrap();
+                let rect = app.note_rect(&id).map(|r| json!({"x": r.min.x, "y": r.min.y, "w": r.width(), "h": r.height()}));
+                Ok(json!({
+                    "status": "note updated", "id": id, "title": n.title, "anchor": n.anchor,
+                    "color": n.color, "at": rect, "in_view": app.view_name(),
+                }))
             }),
             AgentCommand::LogicalAdd {
                 view,
@@ -2330,6 +2444,22 @@ impl ReachFilter {
 
     fn keeps(&self, p: &ttg_codegen::reach::Path, intent: Option<&Vec<ttg_codegen::reach::Intent>>) -> bool {
         self.status.is_none_or(|s| s == p.status) && (!self.only_intended || intent.is_some())
+    }
+}
+
+/// The offset an anchored note stores (from its anchor's top-right corner, see
+/// `ttg_core::view::note_rect`) to be drawn with its top-left corner at `(x, y)`. An
+/// offset of exactly (0, 0) reads as "no offset yet" (beside the anchor), so that one
+/// spot is stored a pixel lower.
+fn offset_from(a: ttg_core::view::Rect, x: i32, y: i32) -> ttg_core::Position {
+    let p = ttg_core::Position {
+        x: x - (a.x + a.w).round() as i32,
+        y: y - a.y.round() as i32,
+    };
+    if p == ttg_core::Position::default() {
+        ttg_core::Position { x: 0, y: 1 }
+    } else {
+        p
     }
 }
 

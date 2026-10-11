@@ -220,8 +220,10 @@ pub fn command_from_json(tool: &str, args: serde_json::Value) -> Result<AgentCom
                 w: a.w,
                 h: a.h,
                 anchor: a.anchor,
+                color: a.color,
             }
         }
+        "view_note_update" => parse::<NoteUpdateArgs>(args)?.into_command()?,
         "view_logical_add" => {
             let a: LogicalAddArgs = parse(args)?;
             AgentCommand::LogicalAdd {
@@ -820,13 +822,69 @@ pub struct NoteAddArgs {
         description = "Resource, group, logical node or flow (id, name or label) this note explains: the note is drawn beside it and moves with it"
     )]
     pub anchor: Option<String>,
-    #[schemars(description = "Top-left canvas position; defaults to the right of the diagram")]
+    #[schemars(
+        description = "Top-left canvas position where the note is drawn, honoured with or without an anchor (an anchored note stores it as an offset and keeps following its anchor). Defaults to beside the anchor, or to the right of the diagram for a free note"
+    )]
     pub x: Option<i32>,
     pub y: Option<i32>,
     pub w: Option<i32>,
     pub h: Option<i32>,
+    #[schemars(
+        description = "Note colour: neutral, info, warning, danger, success, or a #rrggbb. Drawn as a tinted box and border; the Markdown view export marks it (a GitHub alert for the four with a meaning)"
+    )]
+    pub color: Option<String>,
     #[schemars(description = "View to draw in; defaults to the active view")]
     pub view: Option<String>,
+}
+
+#[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
+pub struct NoteUpdateArgs {
+    #[schemars(description = "The note: its id or title")]
+    pub note: String,
+    pub title: Option<String>,
+    pub body: Option<String>,
+    #[schemars(
+        description = "Resource, group, logical node or flow it explains (id, name or label); null removes the anchor and leaves the note where it is drawn. A new anchor with no x / y puts the note beside it"
+    )]
+    #[serde(default, deserialize_with = "present")]
+    pub anchor: Option<serde_json::Value>,
+    #[schemars(
+        description = "neutral, info, warning, danger, success or #rrggbb; null for the plain colour"
+    )]
+    #[serde(default, deserialize_with = "present")]
+    pub color: Option<serde_json::Value>,
+    #[schemars(description = "Top-left canvas position where the note is drawn (anchored or not)")]
+    pub x: Option<i32>,
+    pub y: Option<i32>,
+    pub w: Option<i32>,
+    pub h: Option<i32>,
+    #[schemars(description = "View the note is in; defaults to the active view")]
+    pub view: Option<String>,
+}
+
+impl NoteUpdateArgs {
+    pub fn into_command(self) -> Result<AgentCommand, String> {
+        let opt = |v: Option<serde_json::Value>, what: &str| -> Result<Option<Option<String>>, String> {
+            match v {
+                None => Ok(None),
+                Some(serde_json::Value::Null) => Ok(Some(None)),
+                Some(serde_json::Value::String(s)) => Ok(Some(Some(s))),
+                Some(_) => Err(format!("{what} must be a string or null")),
+            }
+        };
+        Ok(AgentCommand::NoteUpdate {
+            anchor: opt(self.anchor, "anchor")?,
+            color: opt(self.color, "color")?,
+            view: self.view,
+            note: self.note,
+            title: self.title,
+            body: self.body,
+            x: self.x,
+            y: self.y,
+            w: self.w,
+            h: self.h,
+        })
+    }
 }
 
 #[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
@@ -1857,8 +1915,19 @@ impl TtgServer {
             w: a.w,
             h: a.h,
             anchor: a.anchor,
+            color: a.color,
         })
         .await
+    }
+
+    #[tool(
+        description = "Change a note in place: title, body, anchor (null removes it and the note stays where it is drawn), colour (neutral, info, warning, danger, success or #rrggbb; null for plain), position (x / y where it is drawn) and size. Fields left out keep their value; one undo step."
+    )]
+    async fn view_note_update(&self, Parameters(a): Parameters<NoteUpdateArgs>) -> CallToolResult {
+        match a.into_command() {
+            Ok(c) => self.run(c).await,
+            Err(e) => fail(e),
+        }
     }
 
     #[tool(
