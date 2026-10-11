@@ -86,6 +86,8 @@ pub fn show(app: &mut TtgApp, ui: &mut Ui) {
                         .small()
                         .color(Color32::from_gray(110)),
                 );
+                ui.add_space(12.0);
+                audit_ui(app, ui);
             }
         }
         1 => {
@@ -99,6 +101,65 @@ pub fn show(app: &mut TtgApp, ui: &mut Ui) {
                 app.delete_selection();
             }
         }
+    }
+}
+
+/// The reachability audit, under the network posture while the overlay is on: intent
+/// against the network, worst first. Clicking a finding selects its resources.
+fn audit_ui(app: &mut TtgApp, ui: &mut Ui) {
+    use ttg_codegen::Severity;
+    let findings = app.reach_audit().to_vec();
+    let count = |s: Severity| findings.iter().filter(|f| f.severity == s).count();
+    let title = format!(
+        "Audit: {} blocked, {} unintended, {} notes",
+        count(Severity::Error),
+        count(Severity::Warning),
+        count(Severity::Info)
+    );
+    let mut select: Option<Vec<Id>> = None;
+    egui::CollapsingHeader::new(RichText::new(title).strong())
+        .id_salt("reach-audit")
+        .default_open(true)
+        .show(ui, |ui| {
+            ui.label(
+                RichText::new(
+                    "Intent (links, load balancers, flows in views, a database's password secret) \
+                     against what the network lets through.",
+                )
+                .small()
+                .color(Color32::from_gray(110)),
+            );
+            if findings.is_empty() {
+                ui.label(
+                    RichText::new("Nothing to report: every intended path is open.")
+                        .small()
+                        .color(Color32::from_gray(110)),
+                );
+            }
+            for f in &findings {
+                let (glyph, color) = match f.severity {
+                    Severity::Error => ("×", Color32::from_rgb(200, 40, 40)),
+                    Severity::Warning => ("⚠", Color32::from_rgb(200, 100, 20)),
+                    Severity::Info => ("i", Color32::from_gray(110)),
+                };
+                let r = ui.add(
+                    egui::Label::new(
+                        RichText::new(format!("{glyph} {}", f.message))
+                            .small()
+                            .color(color),
+                    )
+                    .sense(egui::Sense::click()),
+                );
+                if r.on_hover_text("Select the resources of this finding").clicked() {
+                    let mut ids: Vec<Id> = f.sources.clone();
+                    ids.push(f.target.clone());
+                    ids.retain(|id| app.project.entity(id).is_some());
+                    select = Some(ids);
+                }
+            }
+        });
+    if let Some(ids) = select {
+        app.selection = ids.into_iter().collect();
     }
 }
 
@@ -195,11 +256,7 @@ fn entity_inspector(app: &mut TtgApp, ui: &mut Ui, id: &Id) {
         if !incoming.is_empty() {
             ui.label(RichText::new("Reached by").strong());
             for (src, path) in &incoming {
-                let name = app
-                    .project
-                    .entity(src)
-                    .map(|e| e.name.to_string())
-                    .unwrap_or_default();
+                let name = ttg_codegen::reach::source_name(&app.project, src);
                 let (glyph, color) = reach_glyph(path.status);
                 ui.horizontal(|ui| {
                     ui.label(RichText::new(format!("{glyph} {name}")).color(color))
@@ -1487,6 +1544,35 @@ fn provider_versions_ui(app: &mut TtgApp, ui: &mut Ui) {
     }
 }
 
+/// The posture rules, each with a box to turn it off for this project. A rule that is
+/// off reports nothing; its id is what every posture diagnostic names.
+fn posture_ui(app: &mut TtgApp, ui: &mut Ui) {
+    ui.label(RichText::new("Posture rules").strong());
+    ui.label(
+        RichText::new(
+            "Warnings and notes about the design, never export-blocking. Untick a rule to silence it.",
+        )
+        .small()
+        .color(Color32::from_gray(110)),
+    );
+    for rule in ttg_codegen::posture::RULES {
+        let mut on = app.project.settings.posture.is_enabled(rule.id);
+        if ui
+            .checkbox(&mut on, rule.title)
+            .on_hover_text(format!("{}\n\nRule id: {}", rule.description, rule.id))
+            .changed()
+        {
+            let before = app.snapshot();
+            let disabled = &mut app.project.settings.posture.disabled;
+            disabled.retain(|d| d != rule.id);
+            if !on {
+                disabled.push(rule.id.to_string());
+            }
+            app.finish(before);
+        }
+    }
+}
+
 /// Rows to a map, dropping the blank key a freshly added row starts with.
 fn collect_tags(rows: &[(String, String)]) -> std::collections::BTreeMap<String, String> {
     rows.iter()
@@ -1529,6 +1615,8 @@ pub fn settings_ui(app: &mut TtgApp, ui: &mut Ui) {
     crate::environments::settings_section(app, ui);
     ui.add_space(8.0);
     provider_versions_ui(app, ui);
+    ui.add_space(8.0);
+    posture_ui(app, ui);
     ui.add_space(8.0);
     ui.label(RichText::new("Provider settings").strong());
     ui.label(

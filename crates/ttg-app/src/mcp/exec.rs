@@ -383,14 +383,25 @@ impl TtgApp {
                 Ok(self.diagnostics_json())
             }
             AgentCommand::ReachPosture => Ok(self.reach_posture_json()),
-            AgentCommand::ReachFrom { entity } => {
+            AgentCommand::ReachFrom {
+                entity,
+                status,
+                only_intended,
+            } => {
                 let id = self.resolve(&entity)?;
-                Ok(self.reach_from_json(&id))
+                let filter = ReachFilter::parse(status.as_deref(), only_intended)?;
+                Ok(self.reach_from_json(&id, &filter))
             }
-            AgentCommand::ReachTo { entity } => {
+            AgentCommand::ReachTo {
+                entity,
+                status,
+                only_intended,
+            } => {
                 let id = self.resolve(&entity)?;
-                Ok(self.reach_to_json(&id))
+                let filter = ReachFilter::parse(status.as_deref(), only_intended)?;
+                Ok(self.reach_to_json(&id, &filter))
             }
+            AgentCommand::ReachAudit { provider } => self.reach_audit_json(provider),
             AgentCommand::ExportPreview { provider, k8s } => self.export_preview_json(provider, k8s),
             AgentCommand::Screenshot { .. } => Err("screenshots are handled by the frame loop".into()),
             AgentCommand::EntityAdd {
@@ -1168,9 +1179,14 @@ impl TtgApp {
                 state_encryption,
                 state_encryption_key,
                 provider_versions,
+                posture,
                 name,
                 verbose,
             } => {
+                let posture = match posture {
+                    None => None,
+                    Some(v) => Some(parse_posture_settings(&v)?),
+                };
                 if let Some(n) = &name {
                     if n.trim().is_empty() {
                         return Err("name must not be empty".into());
@@ -1280,6 +1296,9 @@ impl TtgApp {
                         }
                     }
                 }
+                if let Some(ps) = posture {
+                    self.project.settings.posture = ps;
+                }
                 if let Some(n) = name {
                     self.project.name = n.trim().to_string();
                 }
@@ -1299,6 +1318,7 @@ impl TtgApp {
                     "state_encryption": s.state_encryption,
                     "state_encryption_key": s.state_encryption_key,
                     "provider_versions": s.provider_versions,
+                    "posture": { "disabled": s.posture.disabled },
                 }))
             }
             AgentCommand::ProjectSave { path } => {
@@ -2009,40 +2029,114 @@ impl TtgApp {
         )
     }
 
-    fn path_json(&self, other: &str, p: &ttg_codegen::reach::Path) -> J {
-        let name = |id: &str| {
-            self.project
-                .entity(id)
-                .map(|e| e.name.to_string())
-                .unwrap_or_default()
-        };
+    fn path_json(
+        &self,
+        other: &str,
+        p: &ttg_codegen::reach::Path,
+        intent: Option<&Vec<ttg_codegen::reach::Intent>>,
+    ) -> J {
+        let name = |id: &str| ttg_codegen::reach::source_name(&self.project, id);
         json!({
             "entity": other,
             "name": name(other),
-            "status": format!("{:?}", p.status).to_lowercase(),
+            "status": p.status.key(),
             "hops": p.hops.iter().map(|h| name(h)).collect::<Vec<_>>(),
             "reason": p.reason,
             "notes": p.notes,
+            "intent": intent.map(|i| i.iter().map(|x| x.describe(&self.project)).collect::<Vec<_>>()).unwrap_or_default(),
         })
     }
 
-    fn reach_from_json(&mut self, id: &str) -> J {
+    fn reach_from_json(&mut self, id: &str, filter: &ReachFilter) -> J {
         let reach = self.reach().clone();
-        let paths = ttg_codegen::reach::paths_from(&self.project, &self.catalog, &reach, id);
+        let intents = ttg_codegen::reach::intents(&self.shown_project(), &self.catalog, &reach.provider);
+        let paths = ttg_codegen::reach::paths_from(&self.shown_project(), &self.catalog, &reach, id);
+        let total = paths.len();
+        let kept: Vec<J> = paths
+            .iter()
+            .filter_map(|p| {
+                let why = intents.get(&(id.to_string(), p.target.clone()));
+                filter.keeps(p, why).then(|| self.path_json(&p.target, p, why))
+            })
+            .collect();
         json!({
             "from": id,
             "initiates": self.project.entity(id).is_some_and(|e| ttg_codegen::reach::initiates(e.resource_type)),
-            "paths": paths.iter().map(|p| self.path_json(&p.target, p)).collect::<Vec<_>>(),
+            "paths": kept,
+            "filtered_out": total - kept.len(),
         })
     }
 
-    fn reach_to_json(&mut self, id: &str) -> J {
+    fn reach_to_json(&mut self, id: &str, filter: &ReachFilter) -> J {
         let reach = self.reach().clone();
-        let paths = ttg_codegen::reach::paths_to(&self.project, &self.catalog, &reach, id);
+        let intents = ttg_codegen::reach::intents(&self.shown_project(), &self.catalog, &reach.provider);
+        let paths = ttg_codegen::reach::paths_to(&self.shown_project(), &self.catalog, &reach, id);
+        let total = paths.len();
+        let kept: Vec<J> = paths
+            .iter()
+            .filter_map(|(s, p)| {
+                let why = intents.get(&(s.clone(), id.to_string()));
+                filter.keeps(p, why).then(|| self.path_json(s, p, why))
+            })
+            .collect();
         json!({
             "to": id,
-            "paths": paths.iter().map(|(s, p)| self.path_json(s, p)).collect::<Vec<_>>(),
+            "paths": kept,
+            "filtered_out": total - kept.len(),
         })
+    }
+
+    fn reach_audit_json(&mut self, provider: Option<String>) -> R {
+        let provider = provider.unwrap_or(self.project.settings.target_provider.clone());
+        if self.catalog.provider(&provider).is_none() {
+            return Err(format!(
+                "unknown provider \"{provider}\" (known: {})",
+                self.catalog.provider_ids().join(", ")
+            ));
+        }
+        // The environment the canvas shows, like the diagnostics; the others below.
+        let reach = if provider == self.project.settings.target_provider {
+            self.reach().clone()
+        } else {
+            ttg_codegen::reach::analyse(&self.shown_project(), &self.catalog, &provider)
+        };
+        let shown = self.shown_project().into_owned();
+        let findings = ttg_codegen::reach::audit(&shown, &self.catalog, &reach);
+        let others = ttg_codegen::reach::audit_other_environments(
+            &self.project,
+            &self.catalog,
+            &provider,
+            self.env.current.as_deref(),
+        );
+        let name = |id: &str| ttg_codegen::reach::source_name(&shown, id);
+        let one = |f: &ttg_codegen::reach::Finding| {
+            json!({
+                "severity": format!("{:?}", f.severity).to_lowercase(),
+                "kind": f.kind,
+                "source": f.source,
+                "source_name": name(&f.source),
+                "target": f.target,
+                "target_name": name(&f.target),
+                "sources": f.sources.iter().map(|s| name(s)).collect::<Vec<_>>(),
+                "message": f.message,
+                "intent": f.intent.iter().map(|i| i.describe(&shown)).collect::<Vec<_>>(),
+                "hops": f.path.as_ref().map(|p| p.hops.iter().map(|h| name(h)).collect::<Vec<_>>()).unwrap_or_default(),
+            })
+        };
+        let count = |s: ttg_codegen::Severity| findings.iter().filter(|f| f.severity == s).count();
+        Ok(json!({
+            "provider": provider,
+            "environment": self.env.current,
+            "errors": count(ttg_codegen::Severity::Error),
+            "warnings": count(ttg_codegen::Severity::Warning),
+            "infos": count(ttg_codegen::Severity::Info),
+            "findings": findings.iter().map(one).collect::<Vec<_>>(),
+            "other_environments": others.iter().map(|(env, f)| {
+                let mut j = one(f);
+                j["environment"] = json!(env);
+                j
+            }).collect::<Vec<_>>(),
+        }))
     }
 
     /// The project to export: the open one, with `settings.kubernetes_manifests`
@@ -2074,6 +2168,71 @@ impl TtgApp {
             "files": g.files,
             "manual_steps": g.manual_steps.iter().map(|m| m.title.clone()).collect::<Vec<_>>(),
         }))
+    }
+}
+
+/// `settings_set { posture }`: `{ "disabled": [rule ids] }`, every id a known posture rule.
+fn parse_posture_settings(v: &J) -> Result<ttg_core::PostureSettings, String> {
+    let known = || {
+        ttg_codegen::posture::RULES
+            .iter()
+            .map(|r| r.id)
+            .collect::<Vec<_>>()
+            .join(", ")
+    };
+    let J::Object(m) = v else {
+        return Err(format!(
+            "posture must be an object such as {{ \"disabled\": [\"open_ingress\"] }}; rule ids: {}",
+            known()
+        ));
+    };
+    if let Some(k) = m.keys().find(|k| k.as_str() != "disabled") {
+        return Err(format!("posture takes only `disabled`, not `{k}`"));
+    }
+    let mut disabled: Vec<String> = Vec::new();
+    match m.get("disabled") {
+        None | Some(J::Null) => {}
+        Some(J::Array(items)) => {
+            for i in items {
+                let Some(id) = i.as_str().map(str::trim) else {
+                    return Err("posture.disabled must list rule ids as strings".into());
+                };
+                if ttg_codegen::posture::rule(id).is_none() {
+                    return Err(format!("unknown posture rule \"{id}\"; rule ids: {}", known()));
+                }
+                if !disabled.iter().any(|d| d == id) {
+                    disabled.push(id.to_string());
+                }
+            }
+        }
+        Some(_) => return Err("posture.disabled must be a list of rule ids".into()),
+    }
+    Ok(ttg_core::PostureSettings { disabled })
+}
+
+/// The `status` and `only_intended` narrowing of `reach_from` / `reach_to`.
+struct ReachFilter {
+    status: Option<ttg_codegen::reach::Status>,
+    only_intended: bool,
+}
+
+impl ReachFilter {
+    fn parse(status: Option<&str>, only_intended: bool) -> Result<Self, String> {
+        let status = match status.map(str::trim).filter(|s| !s.is_empty()) {
+            None => None,
+            Some(s) => Some(
+                ttg_codegen::reach::Status::from_key(s)
+                    .ok_or_else(|| format!("status must be ok, blocked or unknown, not \"{s}\""))?,
+            ),
+        };
+        Ok(Self {
+            status,
+            only_intended,
+        })
+    }
+
+    fn keeps(&self, p: &ttg_codegen::reach::Path, intent: Option<&Vec<ttg_codegen::reach::Intent>>) -> bool {
+        self.status.is_none_or(|s| s == p.status) && (!self.only_intended || intent.is_some())
     }
 }
 

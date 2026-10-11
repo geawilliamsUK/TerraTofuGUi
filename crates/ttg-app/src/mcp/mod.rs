@@ -314,9 +314,19 @@ pub enum AgentCommand {
     ReachPosture,
     ReachFrom {
         entity: String,
+        /// Only paths with this status (`ok`, `blocked`, `unknown`).
+        status: Option<String>,
+        /// Only pairs the diagram intends (`reach::intents`).
+        only_intended: bool,
     },
     ReachTo {
         entity: String,
+        status: Option<String>,
+        only_intended: bool,
+    },
+    /// Intent against the network (`reach::audit`), for the target provider or another.
+    ReachAudit {
+        provider: Option<String>,
     },
     ExportPreview {
         provider: Option<String>,
@@ -540,6 +550,8 @@ pub enum AgentCommand {
         state_encryption_key: Option<serde_json::Value>,
         /// Merged into the pins; a null or empty value removes one.
         provider_versions: Option<serde_json::Map<String, serde_json::Value>>,
+        /// `{ "disabled": [rule ids] }`: replaces the posture rules turned off.
+        posture: Option<serde_json::Value>,
         /// The project's name (used in the export's README and the default state key).
         name: Option<String>,
         /// Session default for entity_add / entity_update / link_add replies: `false`
@@ -750,6 +762,7 @@ impl AgentCommand {
                 | AgentCommand::ReachPosture
                 | AgentCommand::ReachFrom { .. }
                 | AgentCommand::ReachTo { .. }
+                | AgentCommand::ReachAudit { .. }
                 | AgentCommand::ExportPreview { .. }
                 | AgentCommand::Screenshot { .. }
                 | AgentCommand::ViewGet { .. }

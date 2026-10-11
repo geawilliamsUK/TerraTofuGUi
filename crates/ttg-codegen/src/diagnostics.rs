@@ -66,6 +66,9 @@ pub enum Code {
     /// between environments the export cannot express as variables
     /// (`crate::environments`).
     Environment,
+    /// A posture rule fired (`crate::posture`): warning or info, never blocking; the
+    /// message ends with the rule's id.
+    Posture,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -706,6 +709,8 @@ pub fn run(full: &Project, cat: &Catalog, provider: &str) -> Vec<Diagnostic> {
     network_checks(p, cat, provider, &mut out);
     crate::edge::checks(p, cat, provider, &mut out);
     extra_checks(p, cat, provider, &mut out);
+    // Posture rules: warnings and info only, each with an id the project can turn off.
+    crate::posture::check(full, p, cat, provider, &mut out);
     out.extend(refs.diagnostics);
     out.extend(crate::state::checks(full, p, cat, provider, full.settings.tool));
     out.extend(crate::versions::checks(p, cat, provider));
@@ -1807,9 +1812,6 @@ fn network_checks(p: &Project, cat: &Catalog, provider: &str, out: &mut Vec<Diag
         if subnets.iter().any(|s| egress_subnets.contains(s)) {
             continue; // another subnet has a way out
         }
-        let vnet = relation_targets(p, cat, &p.entity(s).unwrap(), Relation::NetworkMembership)
-            .into_iter()
-            .next();
         let managed_targets: Vec<Id> = p
             .edges_from(f.id)
             .filter(|e| e.relation != Relation::DependsOn)
@@ -1821,10 +1823,7 @@ fn network_checks(p: &Project, cat: &Catalog, provider: &str, out: &mut Vec<Diag
             .collect();
         let uncovered: Vec<String> = managed_targets
             .iter()
-            .filter(|t| {
-                vnet.as_deref()
-                    .is_none_or(|v| crate::reach::private_endpoint_in(p, cat, v, t).is_none())
-            })
+            .filter(|t| crate::reach::private_endpoint_for(p, cat, provider, &subnets, t).is_none())
             .map(|t| name_of(t))
             .collect();
         if managed_targets.is_empty() {

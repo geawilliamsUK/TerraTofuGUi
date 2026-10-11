@@ -6,10 +6,24 @@
 //! and outbound traffic by default). It is deliberately conservative: when a rule cannot
 //! be decided from the diagram the answer is `Unknown`, never a silent "ok".
 
-use crate::diagnostics::relation_targets;
+use crate::diagnostics::{relation_targets, Severity};
 use std::collections::BTreeMap;
 use ttg_catalog::Catalog;
 use ttg_core::{EntityRef, Id, Project, Relation, Value};
+
+/// Stands for traffic from outside every network: the source [`paths_to`] and [`audit`]
+/// name for a path to something internet-facing.
+pub const INTERNET: &str = "internet";
+
+/// How a source is named in a sentence: an entity by its name, [`INTERNET`] as such.
+pub fn source_name(p: &Project, id: &str) -> String {
+    if id == INTERNET {
+        return "the internet".into();
+    }
+    p.entity(id)
+        .map(|e| e.name.to_string())
+        .unwrap_or_else(|| id.to_string())
+}
 
 /// How a resource gets out of its network.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -46,6 +60,21 @@ pub enum Status {
     Ok,
     Blocked,
     Unknown,
+}
+
+impl Status {
+    pub fn key(self) -> &'static str {
+        match self {
+            Status::Ok => "ok",
+            Status::Blocked => "blocked",
+            Status::Unknown => "unknown",
+        }
+    }
+    pub fn from_key(s: &str) -> Option<Status> {
+        [Status::Ok, Status::Blocked, Status::Unknown]
+            .into_iter()
+            .find(|x| x.key().eq_ignore_ascii_case(s.trim()))
+    }
 }
 
 /// The result of asking "can `source` reach `target`?".
@@ -578,17 +607,24 @@ fn is_worker(e: &EntityRef) -> bool {
         .unwrap_or(false)
 }
 
-/// What the source type calls its link to a database ("Uses"), when it has one.
-fn database_link_label(cat: &Catalog, source_type: &str) -> Option<String> {
+/// A relation label as it reads in a sentence: "Uses (read / write): queue, database, …"
+/// is "Uses", "Mounts (file system)" is "Mounts", "Sends to" stays.
+fn short_label(label: &str) -> String {
+    label.split(['(', ':']).next().unwrap_or(label).trim().to_string()
+}
+
+/// What the source type calls its link to a target type ("Uses", "Mounts"), when it has
+/// one, preferring a declaration of the given kind.
+fn link_label(cat: &Catalog, source_type: &str, target_type: &str, kind: Option<Relation>) -> Option<String> {
     let def = cat.resource(source_type)?;
+    let fits = |r: &&ttg_catalog::RelationDef| r.targets.iter().any(|t| t == target_type);
     let r = def
         .relations
         .iter()
-        .find(|r| r.targets.iter().any(|t| t == "relational_database"))?;
-    let label = r.label.clone().unwrap_or_else(|| r.kind.clone());
-    // "Uses (read / write): queue, database, ..." is called "Uses" in a sentence.
-    let short = label.split([' ', ':']).next().unwrap_or(&label);
-    Some(short.to_string())
+        .filter(fits)
+        .find(|r| kind.is_some_and(|k| r.kind == k.key()))
+        .or_else(|| def.relations.iter().find(fits))?;
+    Some(short_label(r.label.as_deref().unwrap_or(&r.kind)))
 }
 
 fn subnet_cidr(p: &Project, subnet: &str) -> Option<String> {
@@ -633,47 +669,386 @@ fn subnet_routes_via_peering(p: &Project, cat: &Catalog, subnet: &str, peering: 
         })
 }
 
-/// A private endpoint in network `vnet` that fronts `target`.
-pub(crate) fn private_endpoint_in(p: &Project, cat: &Catalog, vnet: &str, target: &str) -> Option<Id> {
-    p.entities()
+/// The AWS service an endpoint serves: its `service` field; without one, the service of
+/// what it "Connects to"; else the field's default, which is what the export generates.
+fn endpoint_service(p: &Project, cat: &Catalog, pe: &EntityRef) -> String {
+    if let Some(s) = pe
+        .provider_field("aws", "service")
+        .map(|v| v.display())
+        .filter(|s| !s.is_empty())
+    {
+        return s;
+    }
+    let implied = relation_targets(p, cat, pe, Relation::AttributeReference)
+        .iter()
+        .filter_map(|t| p.entity(t))
+        .find_map(|t| match t.resource_type {
+            "event_queue" => Some("sqs"),
+            "object_storage" => Some("s3"),
+            "nosql_table" => Some("dynamodb"),
+            "key_vault" | "secret" => Some("secretsmanager"),
+            "relational_database" => Some("rds"),
+            _ => None,
+        });
+    if let Some(s) = implied {
+        return s.to_string();
+    }
+    crate::diagnostics::field_or_default(cat, "aws", pe, "service", true)
+        .map(|v| v.display())
+        .unwrap_or_default()
+}
+
+/// The abstract types an AWS endpoint service answers for, every resource of them in the
+/// region: an SQS endpoint carries the calls to every queue. `rds` is the management API,
+/// not the database connection, so it covers nothing here.
+fn service_types(service: &str) -> &'static [&'static str] {
+    match service {
+        "sqs" => &["event_queue"],
+        "sns" => &["topic"],
+        "secretsmanager" => &["secret"],
+        "logs" => &["log_group"],
+        "ecr.api" | "ecr.dkr" => &["container_registry"],
+        "s3" => &["object_storage"],
+        "dynamodb" => &["nosql_table"],
+        _ => &[],
+    }
+}
+
+/// Gateway endpoints install routes rather than an interface, and have no security group.
+fn is_gateway_service(service: &str) -> bool {
+    matches!(service, "s3" | "dynamodb")
+}
+
+/// Does endpoint `pe` front `target` by its own link: "Connects to" the target, or the
+/// container holding it (a key vault's secrets, a namespace's queues)?
+fn endpoint_links(p: &Project, cat: &Catalog, pe: &EntityRef, target: &str) -> bool {
+    relation_targets(p, cat, pe, Relation::AttributeReference)
+        .iter()
+        .any(|t| t == target || p.is_ancestor(t, target))
+}
+
+/// Does endpoint `pe` carry traffic to `target`? An AWS endpoint fronts a whole service,
+/// so it covers every resource of that service whatever it links; only managed services
+/// count, since an `rds` endpoint never carries a database connection. Elsewhere a private
+/// endpoint fronts the one resource it connects to.
+fn endpoint_covers(p: &Project, cat: &Catalog, provider: &str, pe: &EntityRef, target: &EntityRef) -> bool {
+    if provider == "aws" {
+        is_managed(target.resource_type)
+            && (endpoint_links(p, cat, pe, target.id)
+                || service_types(&endpoint_service(p, cat, pe)).contains(&target.resource_type))
+    } else {
+        endpoint_links(p, cat, pe, target.id)
+    }
+}
+
+/// The network an endpoint sits in: through its subnets, the subnets of the route tables
+/// it is linked to (a gateway endpoint), or the network drawn around it.
+fn endpoint_network(p: &Project, cat: &Catalog, pe: &EntityRef) -> Option<Id> {
+    subnets_of(p, cat, pe)
+        .iter()
+        .find_map(|s| vnet_of_subnet(p, cat, s))
+        .or_else(|| {
+            targets_of_type(p, cat, pe, Relation::Attachment, "route_table")
+                .iter()
+                .flat_map(|rt| relation_targets(p, cat, rt, Relation::Attachment))
+                .find_map(|s| vnet_of_subnet(p, cat, &s))
+        })
+        .or_else(|| p.ancestor_of_type(pe.id, "virtual_network").map(|c| c.id.clone()))
+}
+
+/// Does endpoint `pe` answer for traffic from these subnets? On AWS a gateway endpoint
+/// installs routes, so it serves the subnets whose route table it is linked to (with no
+/// route table linked, the subnets it is linked to); an interface endpoint with private
+/// DNS answers for its service everywhere in its network. Elsewhere a private endpoint
+/// serves its whole network.
+fn endpoint_serves(p: &Project, cat: &Catalog, provider: &str, pe: &EntityRef, src_subnets: &[Id]) -> bool {
+    if provider == "aws" && is_gateway_service(&endpoint_service(p, cat, pe)) {
+        let tables = targets_of_type(p, cat, pe, Relation::Attachment, "route_table");
+        if tables.is_empty() {
+            return subnets_of(p, cat, pe).iter().any(|s| src_subnets.contains(s));
+        }
+        return tables.iter().any(|rt| {
+            relation_targets(p, cat, rt, Relation::Attachment)
+                .iter()
+                .any(|s| src_subnets.contains(s))
+        });
+    }
+    let src_vnet = src_subnets.iter().find_map(|s| vnet_of_subnet(p, cat, s));
+    src_vnet.is_some() && endpoint_network(p, cat, pe) == src_vnet
+}
+
+/// The private endpoint that carries traffic from these subnets to `target`, if one does.
+/// An endpoint that links the target wins over one that covers it by service.
+pub(crate) fn private_endpoint_for(
+    p: &Project,
+    cat: &Catalog,
+    provider: &str,
+    src_subnets: &[Id],
+    target: &str,
+) -> Option<Id> {
+    let tgt = p.entity(target)?;
+    if src_subnets.is_empty() {
+        return None;
+    }
+    let serving: Vec<EntityRef> = p
+        .entities()
         .into_iter()
         .filter(|e| e.resource_type == "private_endpoint")
-        .find(|pe| {
-            relation_targets(p, cat, pe, Relation::AttributeReference)
-                .iter()
-                .any(|t| t == target)
-                && subnets_of(p, cat, pe)
-                    .iter()
-                    .any(|s| vnet_of_subnet(p, cat, s).as_deref() == Some(vnet))
+        .filter(|pe| {
+            endpoint_covers(p, cat, provider, pe, &tgt) && endpoint_serves(p, cat, provider, pe, src_subnets)
         })
+        .collect();
+    serving
+        .iter()
+        .find(|pe| endpoint_links(p, cat, pe, target))
+        .or(serving.first())
         .map(|e| e.id.to_string())
 }
 
-/// Load balancers that forward to `target` (LB "Forwards to" instance, or an autoscaling
-/// group "Registered with" the LB).
-fn load_balancers_for(p: &Project, cat: &Catalog, target: &str) -> Vec<Id> {
-    let mut out: Vec<Id> = p
-        .entities()
+/// An endpoint in the source's network for the target's service that does not carry this
+/// source's traffic, with what would make it: traffic that leaves through a NAT for a
+/// service the network has an endpoint for pays NAT processing and crosses the internet
+/// edge for nothing.
+fn unused_endpoint(
+    p: &Project,
+    cat: &Catalog,
+    provider: &str,
+    src_subnets: &[Id],
+    target: &EntityRef,
+) -> Option<(Id, String)> {
+    let src_vnet = src_subnets.iter().find_map(|s| vnet_of_subnet(p, cat, s))?;
+    let name_of = |id: &str| p.entity(id).map(|e| e.name.to_string()).unwrap_or_default();
+    p.entities()
         .into_iter()
-        .filter(|e| e.resource_type == "load_balancer")
-        .filter(|lb| {
-            relation_targets(p, cat, lb, Relation::Attachment)
-                .iter()
-                .any(|t| t == target)
-        })
-        .map(|e| e.id.to_string())
-        .collect();
-    if let Some(t) = p.entity(target) {
-        for lb in relation_targets(p, cat, &t, Relation::Attachment) {
-            if p.entity(&lb).is_some_and(|x| x.resource_type == "load_balancer") && !out.contains(&lb) {
-                out.push(lb);
+        .filter(|e| e.resource_type == "private_endpoint")
+        .filter(|pe| endpoint_network(p, cat, pe).as_deref() == Some(src_vnet.as_str()))
+        .find_map(|pe| {
+            if provider == "aws" {
+                let service = endpoint_service(p, cat, &pe);
+                if !endpoint_covers(p, cat, provider, &pe, target) {
+                    return None;
+                }
+                let why = if is_gateway_service(&service) {
+                    format!(
+                        "it is a gateway endpoint for {service} and no route table of {} is linked to it",
+                        src_subnets
+                            .first()
+                            .map(|s| format!("\"{}\"", name_of(s)))
+                            .unwrap_or_default()
+                    )
+                } else {
+                    format!("it does not serve {service} to this subnet")
+                };
+                Some((pe.id.to_string(), why))
+            } else {
+                let fronts: Vec<Id> = relation_targets(p, cat, &pe, Relation::AttributeReference);
+                let same_kind = fronts
+                    .iter()
+                    .filter_map(|t| p.entity(t))
+                    .any(|t| t.resource_type == target.resource_type);
+                same_kind.then(|| {
+                    (
+                        pe.id.to_string(),
+                        format!(
+                            "a private endpoint fronts only the resource it connects to ({}); add one for \"{}\"",
+                            fronts.iter().map(|t| format!("\"{}\"", name_of(t))).collect::<Vec<_>>().join(", "),
+                            target.name
+                        ),
+                    )
+                })
             }
+        })
+}
+
+/// The first ingress rule of `groups` that admits a client carrying `client_groups` from
+/// `client_subnets` on `port`: an open range, a group the client carries, or a range that
+/// covers one of its subnets.
+fn admitting_rule(
+    p: &Project,
+    groups: &[Id],
+    client_groups: &[Id],
+    client_subnets: &[Id],
+    port: Option<i64>,
+) -> Option<(Id, Rule)> {
+    groups.iter().find_map(|g| {
+        rules_of(p, g)
+            .into_iter()
+            .find(|r| {
+                r.ingress
+                    && rule_matches_port(r, port)
+                    && (r.cidr == "0.0.0.0/0"
+                        || (!r.source_group.is_empty() && client_groups.contains(&r.source_group))
+                        || (!r.cidr.is_empty()
+                            && client_subnets
+                                .iter()
+                                .any(|s| subnet_cidr(p, s).is_some_and(|c| cidr_covers(&r.cidr, &c)))))
+            })
+            .map(|r| (g.clone(), r))
+    })
+}
+
+/// Does one of the source's groups let traffic out to the destination on `port`? Azure
+/// and Google Cloud allow outbound by default; so does a source with no group.
+fn egress_allowed(
+    p: &Project,
+    pol: &Policy,
+    src_groups: &[Id],
+    dst_groups: &[Id],
+    dst_subnets: &[Id],
+    port: Option<i64>,
+) -> bool {
+    pol.egress_default_allow
+        || src_groups.is_empty()
+        || src_groups.iter().flat_map(|g| rules_of(p, g)).any(|r| {
+            !r.ingress
+                && rule_matches_port(&r, port)
+                && (r.cidr == "0.0.0.0/0"
+                    || dst_subnets
+                        .iter()
+                        .any(|s| subnet_cidr(p, s).is_some_and(|c| cidr_covers(&r.cidr, &c)))
+                    || (!r.source_group.is_empty() && dst_groups.contains(&r.source_group)))
+        })
+}
+
+/// Does workload `w` run on `cluster`, directly or on one of its pools?
+fn runs_on(p: &Project, cat: &Catalog, w: &EntityRef, cluster: &str) -> bool {
+    targets_of_type(p, cat, w, Relation::Attachment, "kubernetes_cluster")
+        .iter()
+        .any(|c| c.id == cluster)
+        || matches!(hosts_of(p, cat, w), Some(Hosts::Pools(pools)) if pools.iter().any(|pool| {
+            targets_of_type(p, cat, pool, Relation::Attachment, "kubernetes_cluster")
+                .iter()
+                .any(|c| c.id == cluster)
+        }))
+}
+
+/// One thing a load balancer forwards to.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Forward {
+    pub target: Id,
+    /// The port the traffic arrives on.
+    pub port: Option<i64>,
+    /// A workload on a cluster whose nodes the load balancer forwards to, when no
+    /// workload says it receives that traffic: the network delivers it to the nodes, but
+    /// the diagram does not say which pods get it.
+    pub assumed: bool,
+}
+
+/// What a load balancer forwards to. The instances and apps it links ("Forwards to")
+/// get its target port, a container app its own port (the target group is of type ip, on
+/// the app's port); for a cluster, the workloads that say they receive its traffic
+/// ("Receives traffic from"), each on its own port or else the target port, or, when no
+/// workload says so, the cluster's nodes on the target port and every workload on it as
+/// an assumed target; and every autoscaling group registered with it.
+pub fn forwarding_targets(p: &Project, cat: &Catalog, lb: &EntityRef) -> Vec<Forward> {
+    let target_port = lb.field("target_port").and_then(|v| v.as_int());
+    let port_of = |e: &EntityRef| e.field("port").and_then(|v| v.as_int()).or(target_port);
+    let mut out: Vec<Forward> = Vec::new();
+    let mut push = |id: &str, port: Option<i64>, assumed: bool| {
+        if !out.iter().any(|f| f.target == id) {
+            out.push(Forward {
+                target: id.to_string(),
+                port,
+                assumed,
+            });
         }
+    };
+    let incoming: Vec<EntityRef> = p
+        .edges_to(lb.id)
+        .filter(|x| x.relation == Relation::Attachment)
+        .filter_map(|x| p.entity(&x.source))
+        .collect();
+    let receivers: Vec<&EntityRef> = incoming
+        .iter()
+        .filter(|e| e.resource_type == "kubernetes_workload")
+        .collect();
+    let ents = p.entities();
+    for t in relation_targets(p, cat, lb, Relation::Attachment) {
+        let Some(te) = p.entity(&t) else { continue };
+        match te.resource_type {
+            "kubernetes_cluster" => {
+                let on: Vec<&&EntityRef> = receivers.iter().filter(|w| runs_on(p, cat, w, &t)).collect();
+                for w in &on {
+                    push(w.id, port_of(w), false);
+                }
+                if on.is_empty() {
+                    push(&t, target_port, false);
+                    for w in ents
+                        .iter()
+                        .filter(|w| w.resource_type == "kubernetes_workload" && runs_on(p, cat, w, &t))
+                    {
+                        push(w.id, target_port, true);
+                    }
+                }
+            }
+            "container_app" => push(&t, port_of(&te), false),
+            "compute_instance" => push(&t, target_port, false),
+            _ => {}
+        }
+    }
+    for w in &receivers {
+        push(w.id, port_of(w), false);
+    }
+    for asg in incoming.iter().filter(|e| e.resource_type == "autoscaling_group") {
+        push(asg.id, target_port, false);
     }
     out
 }
 
-/// Compute the posture of every resource for a provider.
+/// Load balancers that forward to `target`, each with how.
+fn load_balancers_for(p: &Project, cat: &Catalog, target: &str) -> Vec<(Id, Forward)> {
+    p.entities()
+        .into_iter()
+        .filter(|e| e.resource_type == "load_balancer")
+        .filter_map(|lb| {
+            forwarding_targets(p, cat, &lb)
+                .into_iter()
+                .find(|f| f.target == target)
+                .map(|f| (lb.id.to_string(), f))
+        })
+        .collect()
+}
+
+/// The path a load balancer's forwarded traffic takes to `tgt`. An assumed receiver (see
+/// [`Forward::assumed`]) that the network would let through is undecided: the diagram
+/// does not say the pods behind the nodes are this workload's.
+#[allow(clippy::too_many_arguments)]
+fn forward_leg(
+    p: &Project,
+    cat: &Catalog,
+    reach: &Reach,
+    lb: &EntityRef,
+    lp: &Posture,
+    tgt: &EntityRef,
+    tp: &Posture,
+    f: &Forward,
+) -> Path {
+    let mut path = direct_path(p, cat, reach, lb, lp, tgt, tp, f.port);
+    let on_port = f.port.map(|x| format!(" on port {x}")).unwrap_or_default();
+    if !f.assumed {
+        path.reason = format!("forwards to it{on_port}: {}", path.reason);
+        return path;
+    }
+    let cluster = relation_targets(p, cat, lb, Relation::Attachment)
+        .into_iter()
+        .filter_map(|c| p.entity(&c))
+        .find(|c| c.resource_type == "kubernetes_cluster" && runs_on(p, cat, tgt, c.id))
+        .map(|c| c.name.to_string())
+        .unwrap_or_default();
+    if path.status == Status::Ok {
+        path.notes
+            .insert(0, format!("the nodes admit it: {}", path.reason));
+        path.status = Status::Unknown;
+        path.reason = format!(
+            "\"{}\" forwards to the nodes of \"{cluster}\"{on_port}, but nothing says \"{}\" receives that traffic (link it with 'Receives traffic from')",
+            lb.name, tgt.name
+        );
+    } else {
+        path.reason = format!("forwards to the nodes of \"{cluster}\"{on_port}: {}", path.reason);
+    }
+    path
+}
+// Compute the posture of every resource for a provider.
 pub fn analyse(full: &Project, cat: &Catalog, provider: &str) -> Reach {
     let layer = crate::layers::project_for(full, cat, provider);
     let p = &layer;
@@ -825,59 +1200,99 @@ fn exposure(
 }
 
 /// Paths from one resource to every other managed or networked resource. A target that
-/// cannot be reached directly is retried through a load balancer that forwards to it.
+/// cannot be reached directly is retried through a load balancer that forwards to it; a
+/// load balancer's own paths to what it forwards to use the port it forwards on.
 pub fn paths_from(full: &Project, cat: &Catalog, reach: &Reach, source: &str) -> Vec<Path> {
     let layer = crate::layers::project_for(full, cat, &reach.provider);
-    let p = &layer;
+    paths_from_in(&layer, cat, reach, source)
+}
+
+fn paths_from_in(p: &Project, cat: &Catalog, reach: &Reach, source: &str) -> Vec<Path> {
     let Some(src) = p.entity(source) else {
         return vec![];
     };
     let Some(sp) = reach.posture.get(source) else {
         return vec![];
     };
-    let mut out = Vec::new();
-    for (tid, tp) in &reach.posture {
-        if tid == source {
-            continue;
-        }
-        let Some(tgt) = p.entity(tid) else { continue };
-        let mut path = direct_path(p, cat, reach, &src, sp, &tgt, tp);
-        if path.status != Status::Ok && !tp.managed && tgt.resource_type != "load_balancer" {
-            for lb in load_balancers_for(p, cat, tid) {
-                let (Some(lbe), Some(lp)) = (p.entity(&lb), reach.posture.get(&lb)) else {
-                    continue;
-                };
-                let first = direct_path(p, cat, reach, &src, sp, &lbe, lp);
-                if first.status != Status::Ok {
-                    path.notes
-                        .push(format!("via load balancer \"{}\": {}", lbe.name, first.reason));
-                    continue;
-                }
-                let second = direct_path(p, cat, reach, &lbe, lp, &tgt, tp);
-                if second.status == Status::Ok {
-                    let mut hops = first.hops.clone();
-                    hops.push(lb.clone());
-                    hops.extend(second.hops.iter().cloned());
-                    path = Path {
-                        target: tid.clone(),
-                        status: Status::Ok,
-                        hops,
-                        reason: format!("via load balancer \"{}\": {}", lbe.name, second.reason),
-                        notes: second.notes.clone(),
-                    };
-                    break;
-                }
-                path.notes
-                    .push(format!("via load balancer \"{}\": {}", lbe.name, second.reason));
-            }
-        }
-        out.push(path);
-    }
-    out
+    let forwards = forwards_of(p, cat, &src);
+    reach
+        .posture
+        .iter()
+        .filter(|(tid, _)| tid.as_str() != source)
+        .filter_map(|(tid, tp)| path_in(p, cat, reach, &src, sp, &forwards, tid, tp))
+        .collect()
 }
 
-/// One hop: can `src` talk to `tgt` without an intermediary (other than gateways,
-/// peerings and private endpoints, which are part of the network fabric)?
+fn forwards_of(p: &Project, cat: &Catalog, src: &EntityRef) -> Vec<Forward> {
+    if src.resource_type == "load_balancer" {
+        forwarding_targets(p, cat, src)
+    } else {
+        Vec::new()
+    }
+}
+
+/// The path from `source` to `target` alone (see [`paths_from`]), on a layer.
+fn path_between(p: &Project, cat: &Catalog, reach: &Reach, source: &str, target: &str) -> Option<Path> {
+    let src = p.entity(source)?;
+    let sp = reach.posture.get(source)?;
+    let tp = reach.posture.get(target)?;
+    path_in(p, cat, reach, &src, sp, &forwards_of(p, cat, &src), target, tp)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn path_in(
+    p: &Project,
+    cat: &Catalog,
+    reach: &Reach,
+    src: &EntityRef,
+    sp: &Posture,
+    forwards: &[Forward],
+    tid: &str,
+    tp: &Posture,
+) -> Option<Path> {
+    let tgt = p.entity(tid)?;
+    if let Some(f) = forwards.iter().find(|f| f.target == tid) {
+        return Some(forward_leg(p, cat, reach, src, sp, &tgt, tp, f));
+    }
+    let mut path = direct_path(p, cat, reach, src, sp, &tgt, tp, listening_port(&tgt));
+    if path.status != Status::Ok && !tp.managed && tgt.resource_type != "load_balancer" {
+        for (lb, f) in load_balancers_for(p, cat, tid) {
+            if lb == src.id {
+                continue;
+            }
+            let (Some(lbe), Some(lp)) = (p.entity(&lb), reach.posture.get(&lb)) else {
+                continue;
+            };
+            let first = direct_path(p, cat, reach, src, sp, &lbe, lp, listening_port(&lbe));
+            if first.status != Status::Ok {
+                path.notes
+                    .push(format!("via load balancer \"{}\": {}", lbe.name, first.reason));
+                continue;
+            }
+            let second = forward_leg(p, cat, reach, &lbe, lp, &tgt, tp, &f);
+            if second.status == Status::Ok {
+                let mut hops = first.hops.clone();
+                hops.push(lb.clone());
+                hops.extend(second.hops.iter().cloned());
+                path = Path {
+                    target: tid.to_string(),
+                    status: Status::Ok,
+                    hops,
+                    reason: format!("via load balancer \"{}\": {}", lbe.name, second.reason),
+                    notes: second.notes.clone(),
+                };
+                break;
+            }
+            path.notes
+                .push(format!("via load balancer \"{}\": {}", lbe.name, second.reason));
+        }
+    }
+    Some(path)
+}
+
+/// One hop: can `src` talk to `tgt` on `port` without an intermediary (other than
+/// gateways, peerings and private endpoints, which are part of the network fabric)?
+#[allow(clippy::too_many_arguments)]
 fn direct_path(
     p: &Project,
     cat: &Catalog,
@@ -886,8 +1301,10 @@ fn direct_path(
     sp: &Posture,
     tgt: &EntityRef,
     tp: &Posture,
+    port: Option<i64>,
 ) -> Path {
     let pol = policy(&reach.provider);
+    let provider = reach.provider.as_str();
     let tid = tgt.id.to_string();
     let linked = p
         .edges_from(src.id)
@@ -900,32 +1317,81 @@ fn direct_path(
         notes,
     };
     let sv = sp.subnets.iter().filter_map(|s| vnet_of_subnet(p, cat, s)).next();
-    let pe = sv.as_deref().and_then(|v| private_endpoint_in(p, cat, v, &tid));
+    let pe = private_endpoint_for(p, cat, provider, &sp.subnets, &tid);
     let name_of = |id: &str| p.entity(id).map(|x| x.name.to_string()).unwrap_or_default();
+    // Over a private endpoint the traffic never leaves the network. An AWS interface
+    // endpoint has security groups of its own, which must admit the source on 443.
+    let via_pe = |pe: &Id| -> Path {
+        let pe_e = p.entity(pe).expect("endpoint on the layer");
+        let mut hops: Vec<Id> = sp.subnets.first().cloned().into_iter().collect();
+        hops.push(pe.clone());
+        let service = endpoint_service(p, cat, &pe_e);
+        if provider == "aws" && !is_gateway_service(&service) {
+            let groups = linked_groups(p, cat, &pe_e);
+            if groups.is_empty() {
+                return path(
+                    Status::Unknown,
+                    hops,
+                    format!(
+                        "private endpoint \"{}\" has no security group; the VPC default group decides whether it admits \"{}\"",
+                        pe_e.name, src.name
+                    ),
+                    vec![],
+                );
+            }
+            let pe_subnets = subnets_of(p, cat, &pe_e);
+            if !egress_allowed(p, &pol, &sp.security_groups, &groups, &pe_subnets, Some(443)) {
+                return path(
+                    Status::Blocked,
+                    hops,
+                    format!(
+                        "\"{}\"'s security group has no egress rule allowing port 443 to private endpoint \"{}\"",
+                        src.name, pe_e.name
+                    ),
+                    vec![],
+                );
+            }
+            let Some((g, _)) = admitting_rule(p, &groups, &sp.security_groups, &sp.subnets, Some(443)) else {
+                return path(
+                    Status::Blocked,
+                    hops,
+                    format!(
+                        "private endpoint \"{}\" answers for {service} in this network (private DNS), but {} {} no ingress rule allowing port 443 from \"{}\"",
+                        pe_e.name,
+                        groups.iter().map(|g| group_label(p, g)).collect::<Vec<_>>().join(", "),
+                        if groups.len() == 1 { "has" } else { "have" },
+                        src.name
+                    ),
+                    vec![],
+                );
+            };
+            hops.push(g);
+        }
+        path(
+            Status::Ok,
+            hops,
+            format!("over private endpoint \"{}\"", pe_e.name),
+            vec![],
+        )
+    };
 
     if tp.managed {
         // A private endpoint in the source's network bypasses egress altogether.
         if let Some(pe) = pe {
-            let pe_name = name_of(&pe);
             if !linked {
                 return path(
                     Status::Blocked,
                     vec![],
                     format!(
-                        "private endpoint \"{pe_name}\" exists but there is no link from \"{}\" to \"{}\", so it gets no permission or address",
-                        src.name, tgt.name
+                        "private endpoint \"{}\" exists but there is no link from \"{}\" to \"{}\", so it gets no permission or address",
+                        name_of(&pe),
+                        src.name,
+                        tgt.name
                     ),
                     vec![],
                 );
             }
-            let mut hops: Vec<Id> = sp.subnets.first().cloned().into_iter().collect();
-            hops.push(pe);
-            return path(
-                Status::Ok,
-                hops,
-                format!("over private endpoint \"{pe_name}\""),
-                vec![],
-            );
+            return via_pe(&pe);
         }
         // Reached over the provider API: needs a way out of the network + a link.
         let (net_ok, hops, reason) = match &sp.egress {
@@ -956,24 +1422,27 @@ fn direct_path(
         if sp.egress == Egress::Unrestricted {
             notes.push("source is outside the network; no NAT or gateway involved".into());
         }
+        if let Some(note) = nat_note(p, cat, provider, &sp.subnets, &hops, tgt) {
+            notes.push(note);
+        }
         return path(Status::Ok, hops, "reachable over the provider API".into(), notes);
     }
 
     // Networked target.
-    let via_pe = |pe: Id| {
-        let pe_name = name_of(&pe);
-        let mut hops: Vec<Id> = sp.subnets.first().cloned().into_iter().collect();
-        hops.push(pe);
-        path(
-            Status::Ok,
-            hops,
-            format!("over private endpoint \"{pe_name}\""),
-            vec![],
-        )
-    };
     if tp.subnets.is_empty() {
         if let Some(pe) = pe {
-            return via_pe(pe);
+            return via_pe(&pe);
+        }
+        if tgt.resource_type == "file_system" {
+            return path(
+                Status::Blocked,
+                vec![],
+                format!(
+                    "\"{}\" has no mount target: link the subnets it should be mounted from",
+                    tgt.name
+                ),
+                vec![],
+            );
         }
         // e.g. a function outside the network, or an Azure public database.
         let status = if tp.exposed.is_some() {
@@ -1008,7 +1477,7 @@ fn direct_path(
     if let (Some(svn), Some(tvn)) = (sv.as_deref(), tv.as_deref()) {
         if svn != tvn {
             if let Some(pe) = pe {
-                return via_pe(pe);
+                return via_pe(&pe);
             }
             let Some(peer) = peering_between(p, cat, svn, tvn) else {
                 return path(
@@ -1043,22 +1512,16 @@ fn direct_path(
             fabric.push(peer);
         }
     }
-    let port = listening_port(tgt);
     let mut notes = Vec::new();
     // Source egress rule (AWS only): any of the source's groups may allow it.
-    let src_egress_ok = pol.egress_default_allow
-        || sp.security_groups.is_empty()
-        || sp.security_groups.iter().flat_map(|g| rules_of(p, g)).any(|r| {
-            !r.ingress
-                && rule_matches_port(&r, port)
-                && (r.cidr == "0.0.0.0/0"
-                    || tp
-                        .subnets
-                        .iter()
-                        .any(|s| subnet_cidr(p, s).is_some_and(|c| cidr_covers(&r.cidr, &c)))
-                    || tp.security_groups.contains(&r.source_group))
-        });
-    if !src_egress_ok {
+    if !egress_allowed(
+        p,
+        &pol,
+        &sp.security_groups,
+        &tp.security_groups,
+        &tp.subnets,
+        port,
+    ) {
         return path(
             Status::Blocked,
             vec![],
@@ -1072,22 +1535,7 @@ fn direct_path(
     }
     // Target ingress rule: any of the target's groups may admit it, by an open range, a
     // group the source carries, or a range covering the source's subnet.
-    let matched = tp.security_groups.iter().find_map(|g| {
-        rules_of(p, g)
-            .into_iter()
-            .find(|r| {
-                r.ingress
-                    && rule_matches_port(r, port)
-                    && (r.cidr == "0.0.0.0/0"
-                        || (!r.source_group.is_empty() && sp.security_groups.contains(&r.source_group))
-                        || (!r.cidr.is_empty()
-                            && sp
-                                .subnets
-                                .iter()
-                                .any(|s| subnet_cidr(p, s).is_some_and(|c| cidr_covers(&r.cidr, &c)))))
-            })
-            .map(|r| (g.clone(), r))
-    });
+    let matched = admitting_rule(p, &tp.security_groups, &sp.security_groups, &sp.subnets, port);
     // A cluster's own group can admit traffic but never decides a refusal: the provider
     // and its controllers (the AWS Load Balancer Controller, GKE) add rules to it that
     // the diagram cannot see. Without a Security Group entity the target counts as having
@@ -1145,23 +1593,58 @@ fn direct_path(
             ),
         ),
     };
-    if status == Status::Ok && !linked && tgt.resource_type == "relational_database" {
-        notes.push(match database_link_label(cat, src.resource_type) {
-            Some(label) => format!(
-                "no '{label}' link from \"{}\", so it receives no host name or credentials",
-                src.name
-            ),
-            None => format!(
-                "\"{}\" cannot link to a database, so nothing hands it a host name or credentials",
-                src.name
-            ),
-        });
+    if status == Status::Ok && !linked {
+        if let Some(note) = unlinked_note(cat, src, tgt) {
+            notes.push(note);
+        }
+    }
+    // A file system answers through one mount target per linked subnet; a client mounts
+    // the one in its own availability zone by the file system's DNS name.
+    let mut mount_target: Option<Id> = None;
+    if tgt.resource_type == "file_system" {
+        let zone = |s: &Id| {
+            p.entity(s)
+                .and_then(|e| e.provider_field("aws", "availability_zone").map(|v| v.display()))
+                .filter(|z| !z.is_empty())
+        };
+        mount_target = sp
+            .subnets
+            .first()
+            .and_then(|own| {
+                tp.subnets
+                    .iter()
+                    .find(|t| zone(t).is_some() && zone(t) == zone(own))
+            })
+            .or(tp.subnets.first())
+            .cloned();
+        if provider == "aws" {
+            let fs_zones: Vec<String> = tp.subnets.iter().filter_map(zone).collect();
+            let mut missing: Vec<String> = sp
+                .subnets
+                .iter()
+                .filter_map(zone)
+                .filter(|z| !fs_zones.contains(z))
+                .collect();
+            missing.dedup();
+            if !fs_zones.is_empty() && !missing.is_empty() && status == Status::Ok {
+                notes.push(format!(
+                    "\"{}\" has no mount target in {} (it gets one per linked subnet), so clients there cannot mount it by its DNS name",
+                    tgt.name,
+                    missing.join(", ")
+                ));
+            }
+        }
     }
     let mut hops: Vec<Id> = Vec::new();
     if let Some(s) = sp.subnets.first() {
         hops.push(s.clone());
     }
     hops.extend(fabric);
+    if let Some(m) = mount_target {
+        if !hops.contains(&m) {
+            hops.push(m);
+        }
+    }
     // The group that let it in, or the first one that could have.
     if let Some(g) = matched
         .map(|(g, _)| g)
@@ -1174,24 +1657,573 @@ fn direct_path(
     path(status, hops, reason, notes)
 }
 
-/// Who can reach `target`: every initiating resource, with the path it would take.
-/// The mirror image of [`paths_from`] for passive resources (databases, caches, queues).
-pub fn paths_to(p: &Project, cat: &Catalog, reach: &Reach, target: &str) -> Vec<(Id, Path)> {
+/// What a missing link costs when the network would let the traffic through: a database
+/// hands out no host name or credentials, a file system is mounted by nothing, a cache's
+/// address reaches no one.
+fn unlinked_note(cat: &Catalog, src: &EntityRef, tgt: &EntityRef) -> Option<String> {
+    let what = match tgt.resource_type {
+        "relational_database" => "it receives no host name or credentials",
+        "file_system" => "nothing mounts it (no volume, no file system id)",
+        "cache" => "it receives no address",
+        _ => return None,
+    };
+    let kind = match tgt.resource_type {
+        "relational_database" => "a database",
+        "file_system" => "a file system",
+        _ => "a cache",
+    };
+    Some(
+        match link_label(cat, src.resource_type, tgt.resource_type, None) {
+            Some(label) => format!("no '{label}' link from \"{}\", so {what}", src.name),
+            None if tgt.resource_type == "relational_database" => format!(
+                "\"{}\" cannot link to a database, so nothing hands it a host name or credentials",
+                src.name
+            ),
+            None => format!("\"{}\" cannot link to {kind}, so {what}", src.name),
+        },
+    )
+}
+
+/// Traffic to a managed service that leaves through a NAT gateway although the network
+/// has an endpoint for that service: say so, and why the endpoint is not used.
+fn nat_note(
+    p: &Project,
+    cat: &Catalog,
+    provider: &str,
+    src_subnets: &[Id],
+    hops: &[Id],
+    tgt: &EntityRef,
+) -> Option<String> {
+    let nat = hops
+        .iter()
+        .find(|h| p.entity(h).is_some_and(|e| e.resource_type == "nat_gateway"))?;
+    let (pe, why) = unused_endpoint(p, cat, provider, src_subnets, tgt)?;
+    let name_of = |id: &str| p.entity(id).map(|e| e.name.to_string()).unwrap_or_default();
+    Some(format!(
+        "leaves through NAT \"{}\" although private endpoint \"{}\" in the same network serves that service ({why}); the traffic pays NAT processing and crosses the internet edge",
+        name_of(nat),
+        name_of(&pe)
+    ))
+}
+
+/// Who can reach `target`: [`INTERNET`] when it is internet-facing or sits behind
+/// something that is, every load balancer that forwards to it, and every initiating
+/// resource, each with the path it would take. The mirror image of [`paths_from`] for
+/// passive resources (databases, caches, queues) and for what load balancers front.
+pub fn paths_to(full: &Project, cat: &Catalog, reach: &Reach, target: &str) -> Vec<(Id, Path)> {
+    let layer = crate::layers::project_for(full, cat, &reach.provider);
+    let p = &layer;
     let mut out = Vec::new();
+    if let Some(path) = internet_path(p, cat, reach, target) {
+        out.push((INTERNET.to_string(), path));
+    }
     for sid in reach.posture.keys() {
         if sid == target {
             continue;
         }
         let Some(src) = p.entity(sid) else { continue };
-        if !initiates(src.resource_type) {
+        let forwards = src.resource_type == "load_balancer"
+            && forwarding_targets(p, cat, &src)
+                .iter()
+                .any(|f| f.target == target);
+        if !initiates(src.resource_type) && !forwards {
             continue;
         }
-        if let Some(path) = paths_from(p, cat, reach, sid)
-            .into_iter()
-            .find(|x| x.target == target)
-        {
+        if let Some(path) = path_between(p, cat, reach, sid, target) {
             out.push((sid.clone(), path));
         }
     }
     out
+}
+
+/// CDNs whose origin is `id`.
+fn cdns_in_front_of(p: &Project, cat: &Catalog, id: &str) -> Vec<Id> {
+    p.entities()
+        .into_iter()
+        .filter(|e| e.resource_type == "cdn")
+        .filter(|c| {
+            relation_targets(p, cat, c, Relation::AttributeReference)
+                .iter()
+                .any(|t| t == id)
+        })
+        .map(|c| c.id.to_string())
+        .collect()
+}
+
+/// How the internet reaches `target`, if it does: directly when the target is
+/// internet-facing (through a CDN when one fronts it), through a CDN in front of a
+/// bucket, or through an internet-facing load balancer that forwards to it.
+fn internet_path(p: &Project, cat: &Catalog, reach: &Reach, target: &str) -> Option<Path> {
+    let tgt = p.entity(target)?;
+    let tp = reach.posture.get(target)?;
+    let name_of = |id: &str| p.entity(id).map(|e| e.name.to_string()).unwrap_or_default();
+    let ok = |hops: Vec<Id>, reason: String, notes: Vec<String>| Path {
+        target: target.to_string(),
+        status: Status::Ok,
+        hops,
+        reason,
+        notes,
+    };
+    if let Some(how) = &tp.exposed {
+        let cloudfront_only = how.contains("admits only CloudFront");
+        return Some(match cdns_in_front_of(p, cat, target).first() {
+            Some(c) => ok(
+                vec![c.clone()],
+                format!("through CDN \"{}\" to its {how}", name_of(c)),
+                if cloudfront_only {
+                    vec![]
+                } else {
+                    vec!["also reachable directly, around the CDN".into()]
+                },
+            ),
+            None if cloudfront_only => ok(
+                vec![],
+                format!("only through CloudFront: it is an {how}, and no CDN in the diagram fronts it"),
+                vec![],
+            ),
+            None => ok(vec![], format!("through its {how}"), vec![]),
+        });
+    }
+    if tgt.resource_type == "object_storage" {
+        if let Some(c) = cdns_in_front_of(p, cat, target).first() {
+            return Some(ok(
+                vec![c.clone()],
+                format!(
+                    "through CDN \"{}\", which reads the bucket as its origin",
+                    name_of(c)
+                ),
+                vec![],
+            ));
+        }
+    }
+    let mut best: Option<Path> = None;
+    for (lb, f) in load_balancers_for(p, cat, target) {
+        let (Some(lbe), Some(lp)) = (p.entity(&lb), reach.posture.get(&lb)) else {
+            continue;
+        };
+        let Some(how) = &lp.exposed else { continue };
+        let leg = forward_leg(p, cat, reach, &lbe, lp, &tgt, tp, &f);
+        let cdn = cdns_in_front_of(p, cat, &lb).into_iter().next();
+        let mut hops: Vec<Id> = cdn.iter().cloned().collect();
+        hops.push(lb.clone());
+        hops.extend(leg.hops.iter().cloned());
+        let mut notes = leg.notes;
+        if cdn.is_none() && how.contains("admits only CloudFront") {
+            notes.insert(
+                0,
+                format!(
+                    "\"{}\" admits only CloudFront, and no CDN in the diagram fronts it",
+                    lbe.name
+                ),
+            );
+        }
+        let path = Path {
+            target: target.to_string(),
+            status: leg.status,
+            hops,
+            reason: format!(
+                "through{} internet-facing load balancer \"{}\": {}",
+                cdn.as_ref()
+                    .map(|c| format!(" CDN \"{}\" and", name_of(c)))
+                    .unwrap_or_default(),
+                lbe.name,
+                leg.reason
+            ),
+            notes,
+        };
+        if path.status == Status::Ok {
+            return Some(path);
+        }
+        best.get_or_insert(path);
+    }
+    best
+}
+
+// ---------------------------------------------------------------------------------
+// Intent and the audit: what the diagram says should talk, against what the network
+// lets through.
+
+/// Why the diagram says one resource talks to another.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Intent {
+    /// A link from the source, by its label as it reads in a sentence ("Uses", "Mounts").
+    Link(String),
+    /// The source is a load balancer that forwards to the target.
+    Forwards,
+    /// A flow drawn between them in a view.
+    Flow { view: String, label: String },
+    /// The source reads the secret the target (a database or cache) takes its password
+    /// from.
+    Secret(Id),
+}
+
+impl Intent {
+    /// A link or a forwarding rule: something the export turns into an address and a
+    /// permission. Flows and shared secrets are only evidence of intent.
+    pub fn is_link(&self) -> bool {
+        matches!(self, Intent::Link(_) | Intent::Forwards)
+    }
+
+    pub fn describe(&self, p: &Project) -> String {
+        match self {
+            Intent::Link(l) => format!("link '{l}'"),
+            Intent::Forwards => "forwards to it".into(),
+            Intent::Flow { view, label } if label.is_empty() => format!("flow in view \"{view}\""),
+            Intent::Flow { view, label } => format!("flow \"{label}\" in view \"{view}\""),
+            Intent::Secret(s) => format!(
+                "reads \"{}\", its password",
+                p.entity(s).map(|e| e.name.to_string()).unwrap_or_default()
+            ),
+        }
+    }
+}
+
+/// Intended pairs, `(source, target)`, each with every reason the diagram gives.
+pub type Intents = BTreeMap<(Id, Id), Vec<Intent>>;
+
+/// Does this entity take part in reachability at all?
+fn in_scope(e: &EntityRef) -> bool {
+    !e.is_container && (is_managed(e.resource_type) || is_networked(e.resource_type))
+}
+
+/// Every pair of resources the diagram says talk to each other, on one provider's layer.
+pub fn intents(full: &Project, cat: &Catalog, provider: &str) -> Intents {
+    let layer = crate::layers::project_for(full, cat, provider);
+    intents_in(&layer, cat, &full.views)
+}
+
+/// The pairs, source first:
+/// - a link from a resource that opens connections to one that takes part in
+///   reachability, except where it runs (a workload's cluster), where it lives, and
+///   logs a provider delivers itself (a cluster's control plane, a function);
+/// - a load balancer to what it forwards to;
+/// - a flow drawn between two such resources in a view, from the end that opens the
+///   connection (a flow from a queue to its consumer is the consumer polling it);
+/// - a resource that reads the secret a database or cache takes its password from, to
+///   that database or cache.
+fn intents_in(p: &Project, cat: &Catalog, views: &[ttg_core::View]) -> Intents {
+    let mut out: Intents = BTreeMap::new();
+    let mut add = |s: &str, t: &str, why: Intent| {
+        if s == t {
+            return;
+        }
+        let list = out.entry((s.to_string(), t.to_string())).or_default();
+        if !list.contains(&why) {
+            list.push(why);
+        }
+    };
+    let ents = p.entities();
+    let scoped = |id: &str| p.entity(id).is_some_and(|e| in_scope(&e));
+    for s in ents.iter().filter(|e| in_scope(e) && initiates(e.resource_type)) {
+        for edge in p.edges_from(s.id) {
+            let Some(t) = p.entity(&edge.target) else { continue };
+            if !in_scope(&t) || matches!(edge.relation, Relation::DependsOn | Relation::NetworkMembership) {
+                continue;
+            }
+            let hosting = edge.relation == Relation::Attachment
+                && (t.resource_type == "kubernetes_cluster" || t.resource_type == "load_balancer");
+            let provider_logs = edge.relation == Relation::LogsTo
+                && matches!(s.resource_type, "kubernetes_cluster" | "function");
+            if hosting || provider_logs {
+                continue;
+            }
+            let label = link_label(cat, s.resource_type, t.resource_type, Some(edge.relation))
+                .unwrap_or_else(|| edge.relation.display_name().to_string());
+            add(s.id, t.id, Intent::Link(label));
+        }
+        // A database's password secret, read by the source.
+        for secret in p
+            .edges_from(s.id)
+            .filter(|x| x.relation == Relation::Reads)
+            .filter(|x| p.entity(&x.target).is_some_and(|e| e.resource_type == "secret"))
+        {
+            // The store reads its password from the secret, or the secret holds the
+            // store's endpoint.
+            let owners: Vec<Id> = p
+                .edges_to(&secret.target)
+                .map(|x| x.source.clone())
+                .chain(p.edges_from(&secret.target).map(|x| x.target.clone()))
+                .filter(|o| {
+                    p.entity(o)
+                        .is_some_and(|e| matches!(e.resource_type, "relational_database" | "cache"))
+                })
+                .collect();
+            for owner in owners {
+                add(s.id, &owner, Intent::Secret(secret.target.clone()));
+            }
+        }
+    }
+    for lb in ents
+        .iter()
+        .filter(|e| e.resource_type == "load_balancer" && in_scope(e))
+    {
+        for f in forwarding_targets(p, cat, lb).into_iter().filter(|f| !f.assumed) {
+            if scoped(&f.target) {
+                add(lb.id, &f.target, Intent::Forwards);
+            }
+        }
+    }
+    let opens = |id: &str| {
+        p.entity(id)
+            .is_some_and(|e| initiates(e.resource_type) || e.resource_type == "load_balancer")
+    };
+    for v in views {
+        for f in &v.flows {
+            let (ttg_core::FlowEnd::Entity { entity: a }, ttg_core::FlowEnd::Entity { entity: b }) =
+                (&f.from, &f.to)
+            else {
+                continue;
+            };
+            if !scoped(a) || !scoped(b) {
+                continue;
+            }
+            let why = Intent::Flow {
+                view: v.name.clone(),
+                label: f.label.clone(),
+            };
+            if opens(a) {
+                add(a, b, why);
+            } else if opens(b) {
+                add(b, a, why);
+            }
+        }
+    }
+    out
+}
+
+/// Data worth guarding: classified personal, payment or confidential, or, with no
+/// classification, a database, a secret or a bucket. Public and internal opt out.
+pub fn is_sensitive(e: &EntityRef) -> bool {
+    use ttg_core::Classification as C;
+    match e.classification {
+        Some(c) => matches!(c, C::Personal | C::Payment | C::Confidential),
+        None => matches!(
+            e.resource_type,
+            "relational_database" | "secret" | "object_storage"
+        ),
+    }
+}
+
+/// One finding of [`audit`].
+#[derive(Debug, Clone)]
+pub struct Finding {
+    pub severity: Severity,
+    /// What kind of finding, stable for filtering:
+    /// - `blocked` (error): intended, and the network or a missing link stops it;
+    /// - `unintended` (warning): sensitive data reachable from resources with no intent;
+    /// - `undecided` (info): intended, and the diagram cannot decide;
+    /// - `unlinked` (info): intended by a flow or a secret only, and the network allows
+    ///   it, but without a link the export hands over no address or credentials;
+    /// - `nat_egress` (info): intended, and leaving through NAT for a service the
+    ///   network has an endpoint for.
+    pub kind: &'static str,
+    /// Where the traffic starts: an entity id, or [`INTERNET`]. For `unintended`, the
+    /// first of `sources`.
+    pub source: Id,
+    pub target: Id,
+    /// Every source of a finding that groups several (`unintended`); else `[source]`.
+    pub sources: Vec<Id>,
+    pub message: String,
+    /// Why the diagram says they talk (empty for `unintended`).
+    pub intent: Vec<Intent>,
+    pub path: Option<Path>,
+}
+
+/// Compare intent with the network: every intended pair the network blocks (error) or
+/// cannot decide (info), intended pairs that work only on the network (info), traffic
+/// through NAT for a service with an endpoint (info), and sensitive data that resources
+/// with no intent can reach (warning, one per target). Errors first.
+pub fn audit(full: &Project, cat: &Catalog, reach: &Reach) -> Vec<Finding> {
+    let layer = crate::layers::project_for(full, cat, &reach.provider);
+    let p = &layer;
+    let intents = intents_in(p, cat, &full.views);
+    let name = |id: &str| source_name(p, id);
+    let mut out: Vec<Finding> = Vec::new();
+    for ((s, t), why) in &intents {
+        let Some(path) = path_between(p, cat, reach, s, t) else {
+            continue;
+        };
+        let Some(tgt) = p.entity(t) else { continue };
+        let because = why.iter().map(|w| w.describe(p)).collect::<Vec<_>>().join("; ");
+        let finding = |severity, kind, message: String| Finding {
+            severity,
+            kind,
+            source: s.clone(),
+            target: t.clone(),
+            sources: vec![s.clone()],
+            message,
+            intent: why.clone(),
+            path: Some(path.clone()),
+        };
+        match path.status {
+            Status::Blocked => out.push(finding(
+                Severity::Error,
+                "blocked",
+                format!(
+                    "\"{}\" → \"{}\" is intended ({because}) but blocked: {}",
+                    name(s),
+                    name(t),
+                    path.reason
+                ),
+            )),
+            Status::Unknown => out.push(finding(
+                Severity::Info,
+                "undecided",
+                format!(
+                    "\"{}\" → \"{}\" is intended ({because}) but cannot be decided: {}",
+                    name(s),
+                    name(t),
+                    path.reason
+                ),
+            )),
+            Status::Ok => {
+                if !why.iter().any(Intent::is_link) {
+                    if let Some(note) = unlinked_note(cat, &p.entity(s).unwrap(), &tgt) {
+                        out.push(finding(
+                            Severity::Info,
+                            "unlinked",
+                            format!(
+                                "\"{}\" → \"{}\" is intended ({because}) and the network allows it, but there is {note}",
+                                name(s),
+                                name(t)
+                            ),
+                        ));
+                    }
+                }
+                if let Some(note) = path.notes.iter().find(|n| n.starts_with("leaves through NAT")) {
+                    out.push(finding(
+                        Severity::Info,
+                        "nat_egress",
+                        format!("\"{}\" → \"{}\" {note}", name(s), name(t)),
+                    ));
+                }
+            }
+        }
+    }
+    // Sensitive data that something with no intent can reach. Managed services need a
+    // link to be reached at all, so only networked targets (and anything internet-facing)
+    // can be open by accident.
+    for (t, tp) in &reach.posture {
+        let Some(tgt) = p.entity(t) else { continue };
+        if !is_sensitive(&tgt) {
+            continue;
+        }
+        let mut sources: Vec<(Id, Path)> = Vec::new();
+        if let Some(path) = internet_path(p, cat, reach, t).filter(|x| x.status == Status::Ok) {
+            sources.push((INTERNET.to_string(), path));
+        }
+        if !tp.managed {
+            for s in reach.posture.keys() {
+                if s == t || intents.contains_key(&(s.clone(), t.clone())) {
+                    continue;
+                }
+                if !p.entity(s).is_some_and(|e| initiates(e.resource_type)) {
+                    continue;
+                }
+                if let Some(path) = path_between(p, cat, reach, s, t).filter(|x| x.status == Status::Ok) {
+                    sources.push((s.clone(), path));
+                }
+            }
+        }
+        if sources.is_empty() {
+            continue;
+        }
+        sources.sort_by_key(|(s, _)| (s != INTERNET, name(s)));
+        let what = match tgt.classification {
+            Some(c) => format!("classified {}", c.key()),
+            None => format!(
+                "an unclassified {}",
+                match tgt.resource_type {
+                    "relational_database" => "database",
+                    "secret" => "secret",
+                    _ => "bucket",
+                }
+            ),
+        };
+        let names: Vec<String> = sources.iter().map(|(s, _)| name(s)).collect();
+        let port = listening_port(&tgt)
+            .map(|x| format!(" on port {x}"))
+            .unwrap_or_default();
+        let (first, first_path) = sources[0].clone();
+        out.push(Finding {
+            severity: Severity::Warning,
+            kind: "unintended",
+            source: first,
+            target: t.clone(),
+            sources: sources.iter().map(|(s, _)| s.clone()).collect(),
+            message: format!(
+                "\"{}\" ({what}) can be reached{port} by {} with no link or flow to it: {}. Narrow what admits it to the resources that use it, or link them",
+                name(t),
+                if names.len() == 1 {
+                    "one resource".to_string()
+                } else {
+                    format!("{} resources", names.len())
+                },
+                quoted(&names, 8)
+            ),
+            intent: Vec::new(),
+            path: Some(first_path),
+        });
+    }
+    out.sort_by(|a, b| {
+        b.severity
+            .cmp(&a.severity)
+            .then_with(|| name(&a.source).cmp(&name(&b.source)))
+            .then_with(|| name(&a.target).cmp(&name(&b.target)))
+            .then_with(|| a.kind.cmp(b.kind))
+    });
+    out
+}
+
+/// For a project with named environments: the audit of every environment other than
+/// `current` (`None`: the base values) that `current`'s own audit does not already
+/// report, each with its environment and its message prefixed `[env] `, the way
+/// `environments::other_environments` reports the other environments' diagnostics. An
+/// override can open or close a path (a group linked in one environment only), so each
+/// environment is analysed on its own resolved values.
+pub fn audit_other_environments(
+    p: &Project,
+    cat: &Catalog,
+    provider: &str,
+    current: Option<&str>,
+) -> Vec<(String, Finding)> {
+    if p.settings.environments.is_empty() {
+        return Vec::new();
+    }
+    let key = |f: &Finding| (f.kind, f.source.clone(), f.target.clone(), f.message.clone());
+    let shown = p.resolved(current);
+    let mine: Vec<_> = audit(&shown, cat, &analyse(&shown, cat, provider))
+        .iter()
+        .map(key)
+        .collect();
+    let mut out = Vec::new();
+    for env in &p.settings.environments {
+        if Some(env.as_str()) == current {
+            continue;
+        }
+        let ep = p.for_environment(env);
+        for f in audit(&ep, cat, &analyse(&ep, cat, provider)) {
+            if !mine.contains(&key(&f)) {
+                let message = format!("[{env}] {}", f.message);
+                out.push((env.clone(), Finding { message, ..f }));
+            }
+        }
+    }
+    out
+}
+
+/// `"a", "b" and "c"`; past `max` names, `… and N more`.
+fn quoted(names: &[String], max: usize) -> String {
+    let mut shown: Vec<String> = names.iter().take(max).map(|n| format!("\"{n}\"")).collect();
+    if names.len() > max {
+        shown.push(format!("{} more", names.len() - max));
+    }
+    match shown.len() {
+        0 => String::new(),
+        1 => shown.remove(0),
+        _ => {
+            let last = shown.pop().unwrap();
+            format!("{} and {last}", shown.join(", "))
+        }
+    }
 }

@@ -25,6 +25,7 @@ pub mod layers;
 pub mod owned;
 pub mod plan;
 pub mod plan_run;
+pub mod posture;
 pub mod reach;
 pub mod refs;
 pub mod state;

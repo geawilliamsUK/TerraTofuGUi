@@ -132,10 +132,6 @@ pattern = "^[0-9]+\\.[0-9]+$"
 pattern_hint = "major.minor, e.g. 1.33"
 description = "Leave empty to take the EKS default for the region. Pinning a version that the region has retired makes apply fail, which is why there is no default here."
 
-[[providers.aws.checks]]
-when = { all = [ { field = "private_endpoint", equals = "false" }, { field = "public_access_cidrs", absent = true } ] }
-message = "\"{name}\": the Kubernetes API endpoint is public and accepts connections from any address; set 'Public API access from' to the ranges that administer the cluster, or turn on 'Private API endpoint'"
-
 [[providers.aws.blocks]]
 key = "cluster_role"
 resource = "aws_iam_role"
@@ -454,10 +450,6 @@ status = "partial"
 notes = "Network security groups guard subnets on Azure, not clusters: a rule whose source is this cluster admits its node subnets' address ranges, and the NSG that guards the nodes is whichever one is associated with their subnet."
 
 [[providers.azure.checks]]
-when = { all = [ { field = "private_endpoint", equals = "false" }, { field = "public_access_cidrs", absent = true } ] }
-message = "\"{name}\": the Kubernetes API endpoint is public and accepts connections from any address; set 'Public API access from' to the ranges that administer the cluster, or turn on 'Private API endpoint'"
-
-[[providers.azure.checks]]
 when = { relation = "attribute_reference", target_type = "security_group" }
 message = "\"{name}\" uses a Security Group, which Azure cannot attach to a cluster: a network security group guards a subnet. Nothing is generated for the link; associate the group with the node subnets, or admit the nodes elsewhere with a rule whose source is this cluster"
 
@@ -588,10 +580,6 @@ identity (switched on here) and Azure CNI (the network profile) do the same jobs
 [providers.gcp]
 status = "partial"
 notes = "A regional GKE Standard cluster with one autoscaling node pool on the linked subnet's network. Every node carries the network tag <cluster>-nodes plus the tags of the linked Security Groups, which is how firewall rules find them."
-
-[[providers.gcp.checks]]
-when = { all = [ { field = "private_endpoint", equals = "false" }, { field = "public_access_cidrs", absent = true } ] }
-message = "\"{name}\": the Kubernetes API endpoint is public and accepts connections from any address; set 'Public API access from' to the ranges that administer the cluster, or turn on 'Private API endpoint'"
 
 [[providers.gcp.fields]]
 name = "version"

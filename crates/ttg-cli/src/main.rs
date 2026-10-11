@@ -128,14 +128,28 @@ enum Cmd {
         #[arg(long, value_name = "TYPE_ID")]
         example: Option<String>,
     },
-    /// Reachability: what is exposed, and what a resource can reach.
+    /// Reachability: what is exposed, what a resource can reach or is reached by, and
+    /// (`ttg reach audit <project>`) where intent and the network disagree.
+    #[command(args_conflicts_with_subcommands = true)]
     Reach {
-        project: PathBuf,
+        #[command(subcommand)]
+        cmd: Option<ReachCmd>,
+        project: Option<PathBuf>,
         #[arg(long)]
         provider: Option<String>,
-        /// Name of the source resource; omit for the exposure overview.
+        /// Name of the source resource; omit (and omit --to) for the exposure overview.
         #[arg(long)]
         from: Option<String>,
+        /// Name of the target resource: who can reach it, the internet included.
+        #[arg(long, conflicts_with = "from")]
+        to: Option<String>,
+        /// Only paths with this status: ok, blocked or unknown.
+        #[arg(long)]
+        status: Option<String>,
+        /// Only pairs the diagram intends: a link, a load balancer forwarding, a flow in
+        /// a view, or a database's password secret read by the source.
+        #[arg(long)]
+        only_intended: bool,
     },
     /// The bundled / refreshed provider schema index (resources, arguments, nested blocks).
     Schema {
@@ -227,6 +241,26 @@ enum ViewCmd {
     },
     /// List the views a project file holds.
     List { project: PathBuf },
+}
+
+#[derive(Subcommand)]
+enum ReachCmd {
+    /// Compare intent with the network: intended pairs the network blocks (errors),
+    /// sensitive data reachable with no intent (warnings), intended pairs it cannot decide,
+    /// that lack a link, or leave through NAT for a service with an endpoint (info).
+    /// Exits 1 when there are errors.
+    Audit {
+        project: PathBuf,
+        #[arg(long)]
+        provider: Option<String>,
+        /// Audit this named environment's values (default: the base values); the other
+        /// environments' extra findings follow, tagged `[env]`.
+        #[arg(long)]
+        environment: Option<String>,
+        /// Print JSON instead of text.
+        #[arg(long)]
+        json: bool,
+    },
 }
 
 #[derive(Subcommand)]
@@ -655,17 +689,153 @@ fn main() -> Result<()> {
             println!("tidied -> {}", dest.display());
         }
         Cmd::Reach {
+            cmd:
+                Some(ReachCmd::Audit {
+                    project,
+                    provider,
+                    environment,
+                    json,
+                }),
+            ..
+        } => {
+            let raw = ttg_core::project::load(&project)?;
+            cat.ensure_native_types(&raw);
+            if let Some(env) = &environment {
+                if !raw.settings.environments.contains(env) {
+                    bail!(
+                        "no environment '{env}' (the project has: {})",
+                        raw.settings.environments.join(", ")
+                    );
+                }
+            }
+            let p = raw.resolved(environment.as_deref()).into_owned();
+            let provider = provider.unwrap_or(p.settings.target_provider.clone());
+            let reach = ttg_codegen::reach::analyse(&p, &cat, &provider);
+            // The chosen environment (or the base values), then what the other
+            // environments add, tagged with theirs.
+            let mut findings: Vec<(Option<String>, ttg_codegen::reach::Finding)> =
+                ttg_codegen::reach::audit(&p, &cat, &reach)
+                    .into_iter()
+                    .map(|f| (environment.clone(), f))
+                    .collect();
+            findings.extend(
+                ttg_codegen::reach::audit_other_environments(&raw, &cat, &provider, environment.as_deref())
+                    .into_iter()
+                    .map(|(env, f)| (Some(env), f)),
+            );
+            let name = |id: &str| ttg_codegen::reach::source_name(&p, id);
+            let sev = |s: Severity| match s {
+                Severity::Error => "error",
+                Severity::Warning => "warning",
+                Severity::Info => "info",
+            };
+            if json {
+                let rows: Vec<serde_json::Value> = findings
+                    .iter()
+                    .map(|(env, f)| {
+                        serde_json::json!({
+                            "environment": env,
+                            "severity": sev(f.severity),
+                            "kind": f.kind,
+                            "source": name(&f.source),
+                            "target": name(&f.target),
+                            "sources": f.sources.iter().map(|s| name(s)).collect::<Vec<_>>(),
+                            "message": f.message,
+                            "intent": f.intent.iter().map(|i| i.describe(&p)).collect::<Vec<_>>(),
+                        })
+                    })
+                    .collect();
+                println!(
+                    "{}",
+                    serde_json::to_string_pretty(
+                        &serde_json::json!({ "provider": provider, "environment": environment, "findings": rows })
+                    )?
+                );
+            } else if findings.is_empty() {
+                println!("no findings: every intended path is open and nothing sensitive is reachable without intent");
+            } else {
+                for (_, f) in &findings {
+                    println!("{:<7} {:<10} {}", sev(f.severity), f.kind, f.message);
+                }
+            }
+            if findings.iter().any(|(_, f)| f.severity == Severity::Error) {
+                std::process::exit(1);
+            }
+        }
+        Cmd::Reach {
+            cmd: None,
             project,
             provider,
             from,
+            to,
+            status,
+            only_intended,
         } => {
+            let project =
+                project.context("name a project file: ttg reach <project> [--from NAME | --to NAME]")?;
             let p = ttg_core::project::load(&project)?;
             cat.ensure_native_types(&p);
             let provider = provider.unwrap_or(p.settings.target_provider.clone());
             let reach = ttg_codegen::reach::analyse(&p, &cat, &provider);
-            let name = |id: &str| p.entity(id).map(|e| e.name.to_string()).unwrap_or(id.to_string());
-            match from {
-                None => {
+            let name = |id: &str| ttg_codegen::reach::source_name(&p, id);
+            let status = match status.as_deref() {
+                None => None,
+                Some(s) => Some(
+                    ttg_codegen::reach::Status::from_key(s)
+                        .with_context(|| format!("--status must be ok, blocked or unknown, not '{s}'"))?,
+                ),
+            };
+            let intents = only_intended.then(|| ttg_codegen::reach::intents(&p, &cat, &provider));
+            let resolve = |n: &str| {
+                p.entities()
+                    .into_iter()
+                    .find(|e| e.name.eq_ignore_ascii_case(n))
+                    .map(|e| e.id.to_string())
+                    .with_context(|| format!("no resource named '{n}'"))
+            };
+            let print = |other: &str, path: &ttg_codegen::reach::Path, arrow: &str| {
+                let tag = match path.status {
+                    ttg_codegen::reach::Status::Ok => "OK     ",
+                    ttg_codegen::reach::Status::Blocked => "BLOCKED",
+                    ttg_codegen::reach::Status::Unknown => "UNKNOWN",
+                };
+                let hops = if path.hops.is_empty() {
+                    String::new()
+                } else {
+                    format!(
+                        " [{}]",
+                        path.hops.iter().map(|x| name(x)).collect::<Vec<_>>().join(" > ")
+                    )
+                };
+                println!("{tag} {arrow} {:<20} {}{hops}", name(other), path.reason);
+                for n in &path.notes {
+                    println!("           note: {n}");
+                }
+            };
+            let keep = |s: &str, t: &str, path: &ttg_codegen::reach::Path| {
+                status.is_none_or(|x| x == path.status)
+                    && intents
+                        .as_ref()
+                        .is_none_or(|i| i.contains_key(&(s.to_string(), t.to_string())))
+            };
+            match (from, to) {
+                (Some(from), _) => {
+                    let src = resolve(&from)?;
+                    for path in ttg_codegen::reach::paths_from(&p, &cat, &reach, &src) {
+                        if keep(&src, &path.target, &path) {
+                            print(&path.target, &path, "->");
+                        }
+                    }
+                }
+                (None, Some(to)) => {
+                    let tgt = resolve(&to)?;
+                    for (src, path) in ttg_codegen::reach::paths_to(&p, &cat, &reach, &tgt) {
+                        if keep(&src, &tgt, &path) {
+                            print(&src, &path, "<-");
+                        }
+                    }
+                }
+                (None, None) => {
                     for (id, po) in &reach.posture {
                         let egress = match &po.egress {
                             ttg_codegen::reach::Egress::Unrestricted => "outside network".to_string(),
@@ -686,33 +856,6 @@ fn main() -> Result<()> {
                             .map(|x| format!(" | EXPOSED: {x}"))
                             .unwrap_or_default();
                         println!("{:<22} {egress}{exposed}", name(id));
-                    }
-                }
-                Some(from) => {
-                    let src = p
-                        .entities()
-                        .into_iter()
-                        .find(|e| e.name.eq_ignore_ascii_case(&from))
-                        .map(|e| e.id.to_string())
-                        .with_context(|| format!("no resource named '{from}'"))?;
-                    for path in ttg_codegen::reach::paths_from(&p, &cat, &reach, &src) {
-                        let status = match path.status {
-                            ttg_codegen::reach::Status::Ok => "OK     ",
-                            ttg_codegen::reach::Status::Blocked => "BLOCKED",
-                            ttg_codegen::reach::Status::Unknown => "UNKNOWN",
-                        };
-                        let hops = if path.hops.is_empty() {
-                            String::new()
-                        } else {
-                            format!(
-                                " [{}]",
-                                path.hops.iter().map(|x| name(x)).collect::<Vec<_>>().join(" > ")
-                            )
-                        };
-                        println!("{status} -> {:<20} {}{hops}", name(&path.target), path.reason);
-                        for n in &path.notes {
-                            println!("           note: {n}");
-                        }
                     }
                 }
             }

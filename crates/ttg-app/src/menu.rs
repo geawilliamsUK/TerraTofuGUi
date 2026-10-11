@@ -138,6 +138,18 @@ pub fn show(app: &mut TtgApp, ui: &mut Ui) {
                 ui.close();
             }
             ui.checkbox(&mut app.reach_mode, "Reachability overlay   R");
+            if ui
+                .button("Reachability audit")
+                .on_hover_text(
+                    "Turn the overlay on and clear the selection: the inspector lists intended paths the \
+                     network blocks, sensitive data reachable without intent, and notes",
+                )
+                .clicked()
+            {
+                app.reach_mode = true;
+                app.selection.clear();
+                ui.close();
+            }
             ui.separator();
             ui.label("Show as");
             ui.radio_value(&mut app.display, crate::display::DisplayMode::Abstract, "Abstract types");
@@ -228,7 +240,7 @@ pub fn show(app: &mut TtgApp, ui: &mut Ui) {
 
         if ui
             .selectable_label(app.reach_mode, "Reachability")
-            .on_hover_text("Select a resource to see what it can reach and how; with nothing selected, see what is exposed to the internet. (R)")
+            .on_hover_text("Select a resource to see what it can reach and how; with nothing selected, see what is exposed to the internet and the audit of intent against the network. (R)")
             .clicked()
         {
             app.reach_mode = !app.reach_mode;

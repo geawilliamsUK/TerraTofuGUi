@@ -319,9 +319,21 @@ pub struct TypeArgs {
 }
 
 #[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
-pub struct EntityArgs {
+pub struct ReachArgs {
     #[schemars(description = "Entity id or display name (case-insensitive)")]
     pub entity: String,
+    #[schemars(description = "Only paths with this status: ok, blocked or unknown")]
+    pub status: Option<String>,
+    #[schemars(
+        description = "Only pairs the diagram intends: a link, a load balancer forwarding, a flow in a view, or a database's password secret read by the source"
+    )]
+    pub only_intended: Option<bool>,
+}
+
+#[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
+pub struct ReachAuditArgs {
+    #[schemars(description = "Provider to audit; defaults to the target provider")]
+    pub provider: Option<String>,
 }
 
 #[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
@@ -888,6 +900,10 @@ pub struct SettingsArgs {
     )]
     pub provider_versions: Option<serde_json::Map<String, serde_json::Value>>,
     #[schemars(
+        description = "Posture rules to turn off: { \"disabled\": [\"open_ingress\", …] } replaces the list ([] turns every rule back on). Rule ids: public_kubernetes_api, open_ingress, data_tier_open_egress, orphan_security_group, queue_dead_letter_alarm, database_backups, classified_without_cmk; every posture diagnostic names its rule"
+    )]
+    pub posture: Option<serde_json::Value>,
+    #[schemars(
         description = "Rename the project. The name heads the export's README and is the default state key prefix"
     )]
     pub name: Option<String>,
@@ -935,6 +951,7 @@ pub const SETTINGS_KEYS: &[&str] = &[
     "state_encryption",
     "state_encryption_key",
     "provider_versions",
+    "posture",
     "name",
     "verbose",
     "environments",
@@ -993,6 +1010,7 @@ impl SettingsArgs {
             state_encryption: self.state_encryption,
             state_encryption_key: self.state_encryption_key,
             provider_versions: self.provider_versions,
+            posture: self.posture,
             name: self.name,
             verbose: self.verbose,
         };
@@ -1430,14 +1448,35 @@ impl TtgServer {
         self.run(AgentCommand::ReachPosture).await
     }
 
-    #[tool(description = "What one resource can reach, with the path and the reason when blocked.")]
-    async fn reach_from(&self, Parameters(a): Parameters<EntityArgs>) -> CallToolResult {
-        self.run(AgentCommand::ReachFrom { entity: a.entity }).await
+    #[tool(
+        description = "What one resource can reach, with the path and the reason when blocked, and why the diagram intends each pair (`intent`: links, a load balancer forwarding, flows in views, a database's password secret it reads). A load balancer's paths to what it forwards to use the port it forwards on. Narrow with `status` and `only_intended`."
+    )]
+    async fn reach_from(&self, Parameters(a): Parameters<ReachArgs>) -> CallToolResult {
+        self.run(AgentCommand::ReachFrom {
+            entity: a.entity,
+            status: a.status,
+            only_intended: a.only_intended.unwrap_or(false),
+        })
+        .await
     }
 
-    #[tool(description = "Who can reach one (passive) resource, with the path and the reason when blocked.")]
-    async fn reach_to(&self, Parameters(a): Parameters<EntityArgs>) -> CallToolResult {
-        self.run(AgentCommand::ReachTo { entity: a.entity }).await
+    #[tool(
+        description = "Who can reach one resource, with the path and the reason when blocked: every resource that opens connections, the load balancers that forward to it (through the target port; workloads that receive a load balancer's traffic, container apps behind one), and \"the internet\" (entity `internet`) when it is internet-facing or sits behind something that is, through a CDN when one fronts it. Narrow with `status` and `only_intended`."
+    )]
+    async fn reach_to(&self, Parameters(a): Parameters<ReachArgs>) -> CallToolResult {
+        self.run(AgentCommand::ReachTo {
+            entity: a.entity,
+            status: a.status,
+            only_intended: a.only_intended.unwrap_or(false),
+        })
+        .await
+    }
+
+    #[tool(
+        description = "Compare intent with the network. Intent is a link, a load balancer forwarding, a flow drawn in a view, or a database's password secret read by the source. Errors (`blocked`): intended pairs the network or a missing link stops, e.g. \"api\" uses \"db\" but db-sg admits nothing from api's groups on 5432. Warnings (`unintended`): sensitive data (classified personal, payment or confidential; unclassified databases, secrets and buckets) that resources with no intent can reach, one per target. Info: intended pairs the diagram cannot decide (`undecided`), that only a flow or secret intends so the export hands over no address (`unlinked`), and traffic leaving through NAT for a service the network has an endpoint for (`nat_egress`). Read-only."
+    )]
+    async fn reach_audit(&self, Parameters(a): Parameters<ReachAuditArgs>) -> CallToolResult {
+        self.run(AgentCommand::ReachAudit { provider: a.provider }).await
     }
 
     #[tool(
@@ -2116,6 +2155,8 @@ impl ServerHandler for TtgServer {
                 },
                 u if u.starts_with("ttg://reach/") => AgentCommand::ReachFrom {
                     entity: u["ttg://reach/".len()..].to_string(),
+                    status: None,
+                    only_intended: false,
                 },
                 _ => {
                     return Err(McpError::resource_not_found(

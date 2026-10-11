@@ -155,6 +155,10 @@
           "additionalProperties": {
             "$ref": "#/$defs/ProjectVariable"
           }
+        },
+        "posture": {
+          "description": "Which posture rules (`ttg_codegen::posture`) this project turns off.",
+          "$ref": "#/$defs/PostureSettings"
         }
       }
     },
@@ -290,6 +294,18 @@
           }
         }
       ]
+    },
+    "PostureSettings": {
+      "description": "Per-project choices about the posture rules: the ids of the ones turned off. A rule\nthat is off produces no diagnostic at all.",
+      "type": "object",
+      "properties": {
+        "disabled": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        }
+      }
     },
     "Container": {
       "description": "A resource that can hold other resources (VPC, Resource Group, Project).",

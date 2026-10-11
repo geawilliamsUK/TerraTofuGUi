@@ -115,6 +115,27 @@ pub struct Settings {
     /// with a value per environment (see `crate::environment`).
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub variables: BTreeMap<String, crate::environment::ProjectVariable>,
+    /// Which posture rules (`ttg_codegen::posture`) this project turns off.
+    #[serde(default, skip_serializing_if = "PostureSettings::is_empty")]
+    pub posture: PostureSettings,
+}
+
+/// Per-project choices about the posture rules: the ids of the ones turned off. A rule
+/// that is off produces no diagnostic at all.
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+pub struct PostureSettings {
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub disabled: Vec<String>,
+}
+
+impl PostureSettings {
+    pub fn is_empty(&self) -> bool {
+        self.disabled.is_empty()
+    }
+    pub fn is_enabled(&self, rule: &str) -> bool {
+        !self.disabled.iter().any(|d| d == rule)
+    }
 }
 
 fn default_provider() -> String {
@@ -138,6 +159,7 @@ impl Default for Settings {
             environments: Vec::new(),
             name_prefix: None,
             variables: BTreeMap::new(),
+            posture: PostureSettings::default(),
         }
     }
 }

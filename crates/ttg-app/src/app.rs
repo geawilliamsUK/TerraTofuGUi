@@ -136,6 +136,8 @@ pub struct TtgApp {
     pub reach_mode: bool,
     /// Cached analysis for the current project revision and provider.
     pub reach: Option<ttg_codegen::reach::Reach>,
+    /// The audit of `reach`, computed when first asked for and dropped with it.
+    reach_findings: Option<Vec<ttg_codegen::reach::Finding>>,
     /// Working canvas filter (what the view bar edits).
     pub filter: ttg_core::ViewFilter,
     /// Saved view the working filter was loaded from, if any.
@@ -231,6 +233,7 @@ impl TtgApp {
             tool_cache: std::cell::RefCell::new(None),
             reach_mode: false,
             reach: None,
+            reach_findings: None,
             filter: ttg_core::ViewFilter::default(),
             active_view: None,
             visible: None,
@@ -396,6 +399,7 @@ impl TtgApp {
     /// Reachability analysis for the current provider, computed on demand.
     pub fn reach(&mut self) -> &ttg_codegen::reach::Reach {
         if self.reach.is_none() {
+            self.reach_findings = None;
             self.reach = Some(ttg_codegen::reach::analyse(
                 &self.shown_project(),
                 &self.catalog,
@@ -441,7 +445,22 @@ impl TtgApp {
             }
         }
         ids.push(path.target.clone());
+        // "The internet" as a source is not on the canvas.
+        ids.retain(|id| id != ttg_codegen::reach::INTERNET);
         ids
+    }
+
+    /// The reachability audit for the target provider (`reach::audit`).
+    pub fn reach_audit(&mut self) -> &[ttg_codegen::reach::Finding] {
+        let reach = self.reach().clone();
+        if self.reach_findings.is_none() {
+            self.reach_findings = Some(ttg_codegen::reach::audit(
+                &self.shown_project(),
+                &self.catalog,
+                &reach,
+            ));
+        }
+        self.reach_findings.as_deref().unwrap()
     }
 
     pub fn errors(&self) -> Vec<&Diagnostic> {

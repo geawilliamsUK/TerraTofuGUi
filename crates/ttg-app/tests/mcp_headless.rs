@@ -3119,3 +3119,142 @@ fn headless_environments() {
     );
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+/// The reachability audit over MCP, the `status` / `only_intended` filters on
+/// `reach_from` / `reach_to`, the internet as a source, and posture rules turned off
+/// through `settings_set`.
+#[test]
+fn headless_reach_audit_filters_and_posture() {
+    let server = start("kubernetes.ttg.json");
+    let mut c = Client::new(&server);
+    c.initialize();
+    assert!(tool_names(&mut c).contains(&"reach_audit".to_string()));
+
+    // The example's one error: the load balancer forwards to the api, whose nodes' group
+    // admits nothing from it. The database is open to workloads that do not use it.
+    let (err, audit) = c.call("reach_audit", json!({}));
+    assert!(!err, "{audit}");
+    assert_eq!(audit["provider"], "aws");
+    assert_eq!(
+        audit["other_environments"],
+        json!([]),
+        "no environments, nothing else"
+    );
+    assert_eq!(audit["errors"], 1, "{audit}");
+    let findings = audit["findings"].as_array().unwrap();
+    let blocked = &findings[0];
+    assert_eq!(blocked["kind"], "blocked");
+    assert_eq!(blocked["source_name"], "edge");
+    assert_eq!(blocked["target_name"], "api");
+    assert_eq!(blocked["intent"], json!(["forwards to it"]));
+    assert!(findings
+        .iter()
+        .any(|f| f["kind"] == "unintended" && f["target_name"] == "core db" && f["severity"] == "warning"));
+    let (err, msg) = c.call("reach_audit", json!({"provider": "nowhere"}));
+    assert!(
+        err && msg.as_str().unwrap_or_default().contains("unknown provider"),
+        "{msg}"
+    );
+    let (err, azure) = c.call("reach_audit", json!({"provider": "azure"}));
+    assert!(!err, "{azure}");
+    assert_eq!(azure["provider"], "azure");
+
+    // Filters: everything the api can reach, then only what it is meant to, then only
+    // what is blocked.
+    let (_, all) = c.call("reach_from", json!({"entity": "api"}));
+    let (_, meant) = c.call("reach_from", json!({"entity": "api", "only_intended": true}));
+    let all_n = all["paths"].as_array().unwrap().len();
+    let meant_paths = meant["paths"].as_array().unwrap();
+    assert!(meant_paths.len() < all_n, "{meant}");
+    assert_eq!(meant["filtered_out"], all_n - meant_paths.len());
+    assert!(meant_paths
+        .iter()
+        .all(|p| !p["intent"].as_array().unwrap().is_empty()));
+    let db = meant_paths
+        .iter()
+        .find(|p| p["name"] == "core db")
+        .expect("api uses the database");
+    assert_eq!(db["status"], "ok");
+    assert_eq!(db["intent"], json!(["link 'Uses'"]));
+    let (_, blocked) = c.call("reach_from", json!({"entity": "api", "status": "blocked"}));
+    assert!(blocked["paths"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .all(|p| p["status"] == "blocked"));
+    let (err, msg) = c.call("reach_from", json!({"entity": "api", "status": "maybe"}));
+    assert!(
+        err && msg
+            .as_str()
+            .unwrap_or_default()
+            .contains("ok, blocked or unknown"),
+        "{msg}"
+    );
+
+    // Who reaches the api: the load balancer and the internet through it.
+    let (_, to_api) = c.call("reach_to", json!({"entity": "api"}));
+    let sources: Vec<&str> = to_api["paths"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|p| p["entity"].as_str().unwrap())
+        .collect();
+    assert!(
+        sources.contains(&"internet") && sources.contains(&"lb-edge"),
+        "{to_api}"
+    );
+    let internet = to_api["paths"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|p| p["entity"] == "internet")
+        .unwrap();
+    assert_eq!(internet["name"], "the internet");
+    assert_eq!(internet["hops"][0], "edge");
+    let (_, to_fs) = c.call("reach_to", json!({"entity": "models", "only_intended": true}));
+    let fs: Vec<&str> = to_fs["paths"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|p| p["name"].as_str().unwrap())
+        .collect();
+    assert_eq!(fs, ["asr worker"], "{to_fs}");
+
+    // Posture: a rule fires with its id, settings_set turns it off, a wrong id is refused.
+    c.call(
+        "entity_update",
+        json!({"entity": "platform", "config": {"public_access_cidrs": []}}),
+    );
+    let rules = |c: &mut Client| -> Vec<String> {
+        let (_, d) = c.call("diagnostics", json!({}));
+        d["diagnostics"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter_map(|x| x["rule"].as_str().map(str::to_string))
+            .collect()
+    };
+    assert!(rules(&mut c).contains(&"public_kubernetes_api".to_string()));
+    let (err, msg) = c.call("settings_set", json!({"posture": {"disabled": ["no_such_rule"]}}));
+    assert!(err, "{msg}");
+    assert!(
+        msg.as_str()
+            .unwrap_or_default()
+            .contains("unknown posture rule \"no_such_rule\""),
+        "{msg}"
+    );
+    let (err, s) = c.call(
+        "settings_set",
+        json!({"posture": {"disabled": ["public_kubernetes_api"]}}),
+    );
+    assert!(!err, "{s}");
+    assert_eq!(s["posture"]["disabled"], json!(["public_kubernetes_api"]));
+    assert!(!rules(&mut c).contains(&"public_kubernetes_api".to_string()));
+    let (_, p) = c.call("project_get", json!({}));
+    assert_eq!(
+        p["settings"]["posture"]["disabled"],
+        json!(["public_kubernetes_api"])
+    );
+    c.call("settings_set", json!({"posture": {"disabled": []}}));
+    assert!(rules(&mut c).contains(&"public_kubernetes_api".to_string()));
+}

@@ -41,14 +41,19 @@ pub(super) fn gen_error_text(e: &ttg_codegen::GenError) -> String {
 
 /// A diagnostic as the agent sees it, with the entity's name looked up in `p`.
 pub(super) fn diag_json(p: &Project, d: &Diagnostic) -> J {
-    json!({
+    let mut j = json!({
         "entity": d.entity,
         "name": d.entity.as_ref().and_then(|id| p.entity(id).map(|e| e.name.to_string())),
         "severity": format!("{:?}", d.severity).to_lowercase(),
         "code": format!("{:?}", d.code),
         "provider": d.provider,
         "message": d.message,
-    })
+    });
+    // A posture finding names the rule that settings_set { posture } turns off.
+    if let Some(rule) = ttg_codegen::posture::rule_of(d) {
+        j["rule"] = json!(rule);
+    }
+    j
 }
 
 /// Where a note is drawn, and — when it hangs off something that can be found — the
