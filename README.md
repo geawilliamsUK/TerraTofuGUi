@@ -290,9 +290,28 @@ OpenTofu installed, so a definition change that produces invalid HCL fails the b
   that filters the canvas to just that path. Paths follow the network fabric: across a
   Network Peering (on AWS only once both sides' route tables are linked to it), over a
   Private Endpoint in the source's network (no NAT needed), and through a Load Balancer
-  when the target only admits the balancer's group. The same analysis is available
-  headless with `ttg reach <project> --from <name>`; `examples/hub-spoke.ttg.json` shows
-  all three.
+  when the target only admits the balancer's group. An AWS endpoint covers every
+  resource of its service (an SQS endpoint, every queue) and its own security group must
+  admit the caller; file systems are reached on 2049 through the mount target in the
+  client's zone; load balancers are sources of what they forward to (workloads that
+  receive their traffic, container apps behind them) and "the internet" is a source of
+  anything internet-facing, through the CDN in front of it. The same analysis is available
+  headless with `ttg reach <project> --from <name>` or `--to <name>` (narrowed with
+  `--status` and `--only-intended`); `examples/hub-spoke.ttg.json` shows all three.
+- **Reachability audit** (*View ▸ Reachability audit*, `ttg reach audit <project>`, or
+  the agent's `reach_audit`). Compares intent — links, load balancers forwarding, flows
+  drawn in views, a database's password secret read by a workload — with what the network
+  lets through: intended paths the network blocks are errors ("api" uses "db", but
+  "db-sg" admits nothing from api's groups on 5432), sensitive data reachable by
+  resources with no intent is a warning, and intended paths it cannot decide, that only a
+  flow intends, or that leave through NAT for a service with an endpoint are notes.
+- **Posture rules**, reported with the other diagnostics as warnings or notes and never
+  blocking an export: a public Kubernetes API with no allow-list, ingress from anywhere on
+  ports other than 80/443, data-tier groups that let everything out, unused groups, queues
+  whose dead letters no alarm watches, databases without backups, personal or payment
+  data with no customer-managed key. Every finding names its rule; untick it under
+  *Project settings ▸ Posture rules* (or `settings_set { posture: { disabled: [...] } }`)
+  to turn it off for the project.
 
 - **Cost estimate** (*View ▸ Cost estimate…*, `ttg cost <project>`, or the agent's
   `cost_estimate` tool). A monthly figure per resource, per type and per saved view and
@@ -420,8 +439,8 @@ watch it happen. It is off until you switch it on:
    shows what the agent did. Saving to disk only happens when a tool is explicitly asked
    to, and opening another file goes through the same unsaved-changes prompt as the menu.
 
-The 55 tools cover reading (project, catalog, catalog relations, diagnostics,
-reachability, export preview, one entity's HCL with `entity_preview`, export diff,
+The 56 tools cover reading (project, catalog, catalog relations, diagnostics,
+reachability and its audit, export preview, one entity's HCL with `entity_preview`, export diff,
 `view_get`, `view_export`, screenshot, `approval_status`) and editing (add/update/move/resize/
 reparent/delete entities, links, selection, views, tidy/align/distribute, settings,
 save/open/new, `project_import` of a `.ttg.json` given as JSON, export with optional

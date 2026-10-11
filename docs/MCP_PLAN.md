@@ -38,8 +38,24 @@ claude.ai connector ──HTTPS tunnel, OAuth access token───────�
 
 Read: `project_get`, `project_summary`, `catalog_types`, `catalog_type`,
 `catalog_relations`, `diagnostics`, `reach_posture`, `reach_from`, `reach_to`,
-`export_preview`, `entity_preview`, `view_get`, `view_export`, `view_fit`, `screenshot`,
-`cost_estimate`.
+`reach_audit`, `export_preview`, `entity_preview`, `view_get`, `view_export`, `view_fit`,
+`screenshot`, `cost_estimate`.
+
+`reach_from { entity, status?, only_intended? }` and `reach_to { entity, status?,
+only_intended? }` (round 3, R3.7 / R3.8) return each path's `status`, `hops`, `reason`,
+`notes` and `intent` (why the diagram says the pair talks: `link 'Uses'`, `forwards to
+it`, `flow "…" in view "…"`, `reads "…", its password`; empty when nothing does), plus
+`filtered_out`. `status` keeps one of ok / blocked / unknown; `only_intended` keeps the
+pairs with an intent. `reach_to` also lists the load balancers that forward to the
+target and `internet` ("the internet") for anything internet-facing.
+`reach_audit { provider? }` (R3.8, `reach::audit`) returns `errors` / `warnings` /
+`infos` counts and `findings`, errors first, each with `severity`, `kind` (`blocked`,
+`unintended`, `undecided`, `unlinked`, `nat_egress`), `source` / `target` (ids and
+names), `sources` for a finding that groups several, `message`, `intent` and `hops`,
+for the environment shown (`environment`); `other_environments` holds what the other
+named environments add, each finding with its `environment` and a `[env]` prefix.
+Posture diagnostics (R3.9, `Code::Posture`) carry `rule`, the id `settings_set {
+posture: { disabled: [...] } }` turns off; an unknown id is refused with the list.
 
 `cost_estimate { provider?, environment?, view?, group_by?, assumptions?, region? }`
 (round 3, R3.12; `exec/cost.rs` over `ttg_codegen::cost::estimate_with`) answers the
@@ -279,8 +295,9 @@ helpers and stays out of the way of the big `agent_exec` match):
 `tags` and `kubernetes_manifests` it now takes `backend` (`{"type": "s3", "bucket": …, "region": …}` flat, or the
 `{type, args}` shape `project_get` returns, so a read can be written back; `null` clears
 it), `state_encryption` (bool), `state_encryption_key` (an Encryption Key's id or name;
-`null` clears it) and `provider_versions` (`{"aws": "~> 6.0"}`, merged into the pins; `null`
-or `""` removes one). Everything is checked before anything changes, with the same rules as
+`null` clears it), `provider_versions` (`{"aws": "~> 6.0"}`, merged into the pins; `null`
+or `""` removes one) and `posture` (`{"disabled": ["open_ingress"]}`, replacing the list
+of posture rules turned off; an unknown rule id is refused). Everything is checked before anything changes, with the same rules as
 the settings panel and the export gate (`ttg_codegen::state::check_backend`,
 `ttg_codegen::versions::check_constraint`): an unknown backend type, a missing required
 key, a key that is not an Encryption Key or a malformed constraint is refused with what

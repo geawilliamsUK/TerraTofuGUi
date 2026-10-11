@@ -755,6 +755,63 @@ design by hand at £350-400 a month for the architecture document.
   exceeded, so the warning fires; at two GPU hours a day and single-AZ the design is
   about $645.
 
+## Round 3: reachability audit and posture (gap report R3.5–R3.9)
+
+The engine found R3.1, which no other check did; these make it complete enough to trust.
+
+- **File systems** (R3.5) — 2049 behind the file system's own group, through the mount
+  target in the client's zone (one per linked subnet); a client zone without one, and a
+  missing 'Mounts' link, are notes; no subnet at all is no mount target (blocked).
+  `reach_to models-fs` lists every workload.
+- **Endpoints cover their service** (R3.6) — an AWS endpoint answers for every resource
+  of its service (`sqs` → every queue, `secretsmanager`, `logs`, `ecr.*`, `s3`,
+  `dynamodb`), whatever it "Connects to", the service read from its field or else its
+  target. An interface endpoint's own group must admit the caller on 443: with private
+  DNS the call goes there and is refused rather than leaving through the NAT. A gateway
+  endpoint serves the subnets whose route table it is on. Traffic leaving through NAT for
+  a service the network has an endpoint for is a note on the path and an info finding.
+- **Load balancers and the internet as sources** (R3.7) — `reach::forwarding_targets`:
+  instances on the target port, container apps on their own port, and for a cluster the
+  workloads that "Receive traffic from" the balancer (or, when none does, the nodes, with
+  every workload on them an undecided target). `reach_to` lists those balancers and "the
+  internet" for anything internet-facing, through a CDN in front of it; a balancer that
+  admits only CloudFront is reached through the CDN.
+- **Audit** (R3.8) — `reach::intents` (links, forwarding, flows in views from the end that
+  opens the connection, a database's password secret read by the source) against the
+  network, `reach::audit`: `blocked` errors, `unintended` warnings (sensitive data —
+  classified personal, payment or confidential, or unclassified databases, secrets and
+  buckets — reachable with no intent, one per target), `undecided`, `unlinked` and
+  `nat_egress` infos. MCP `reach_audit { provider? }`, `ttg reach audit <project>
+  [--environment] [--json]` (exits 1 on errors), and the inspector's *Audit* list under the network
+  posture (*View ▸ Reachability audit*). `reach_from` / `reach_to` take `status` and
+  `only_intended` (`ttg reach --from/--to … --status --only-intended`) and name each
+  path's intent.
+- **Posture rules** (R3.9) — `ttg_codegen::posture`, `Code::Posture`, warnings and info
+  only: `public_kubernetes_api` (moved from the three providers' catalog checks),
+  `open_ingress`, `data_tier_open_egress`, `orphan_security_group`,
+  `queue_dead_letter_alarm`, `database_backups`, `classified_without_cmk` (R3.26's
+  classification). Each message ends with `(posture rule '<id>')`; `settings.posture.
+  disabled` turns rules off, from the settings window or `settings_set { posture }`.
+- **Environments** — reachability and the audit read the environment shown; the audit
+  adds what each other environment's own values report (`[env]`-tagged
+  `other_environments`), and posture findings appear in the other environments'
+  diagnostics like every other rule.
+
+Acceptance, on a scratch copy of the CallScope design. As it is, `reach_audit` reports 19
+errors: `api → db` ("db-sg" has no ingress rule allowing 5432 from "api"; the intent is the
+flow in "Data flow" and the password secret api reads), `asr-worker → models-fs` (the
+"weights, read-only mount" flow; "efs-sg" admits nothing on 2049 from it), and every
+workload's calls to SQS and Secrets Manager, which the queue and secrets endpoints answer
+with private DNS but whose group admits only `nodes-sg`, which nothing carries — R3.1's
+image-pull and pod-identity failure, seen from the workloads. Three notes say that the
+load balancer's traffic to `api`, `web` and the cluster cannot be decided. With `eks`
+linked to `nodes-sg` nothing is blocked: one warning (every other workload on the nodes
+can reach `db` on 5432 with no link to it), two `undecided` notes (nothing says `api` and
+`web` receive the load balancer's traffic) and two `unlinked` notes (`api → db` and
+`asr-worker → models-fs` are drawn but not linked, so neither gets an address). On the
+zipOS staging graph the audit reports one warning — `web` and `worker` can reach `db` on
+5432 but neither links it — and posture one note (`db-sg` lets everything out).
+
 ## Round 3: views and metadata (gap report R3.22–R3.27)
 
 The CallScope design's "Data flow" view had 31 hand-drawn flows that the workload links

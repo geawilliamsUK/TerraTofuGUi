@@ -467,6 +467,8 @@ Three layers, all surfaced through the same `Diagnostic` list:
    deleted or off the layer, a `local.*`, an undeclared `var.*`, a block key or row key
    that does not exist — is an error naming the `$raw` and the address, so the export
    stops before `validate` would.
+5. **Posture rules** (`ttg-codegen::posture`, `Code::Posture`): warnings and info with a
+   rule id each, which a project can turn off (§6.0a2).
 
 `diagnostics::run` answers for one target provider. `diagnostics::other_providers` adds
 the *other* providers' errors, each downgraded to a warning, tagged with the provider it
@@ -498,6 +500,88 @@ the cluster means, and which can admit traffic but never refuses it, since the p
 controllers add rules to it the diagram cannot see); a node pool carries its own linked groups or else its cluster's, and
 always the cluster's own; a workload carries the groups and subnets of the pools it is
 linked to, or else of its cluster.
+
+**Endpoints.** An AWS endpoint fronts a whole service in the region, not the resource it
+"Connects to": an SQS endpoint carries the calls to every queue, `secretsmanager` every
+secret, `logs` every log group, `ecr.api` / `ecr.dkr` the registries, `s3` / `dynamodb`
+every bucket / table (`rds` is the management API and carries no database connection).
+The service is the endpoint's `service` field, else what its "Connects to" target
+implies. An interface endpoint has private DNS on, so it answers for its service
+everywhere in its network — and its own security groups must admit the source on 443,
+or the call is refused rather than sent through the NAT (`Blocked`; an endpoint with no
+group is `Unknown`, the VPC default group decides). A gateway endpoint serves the
+subnets whose route table it is linked to. On Azure and Google Cloud a private endpoint
+still fronts the one resource it connects to (or the container holding it: a key
+vault's secrets). When traffic to a managed service leaves through a NAT gateway although
+the network has an endpoint for that service, the path carries a note saying why the
+endpoint is not used (a gateway endpoint not on the source's route table; an Azure
+endpoint for another resource).
+
+**File systems** listen on 2049 behind their own group, with one mount target per linked
+subnet: the path goes through the mount target in the client's zone, a client in a
+zone without one gets a note (it cannot mount by the DNS name), and a file system with no
+subnet has no mount target at all (`Blocked`). A missing 'Mounts' link is a note, like a
+missing 'Uses' link to a database or cache: the network allows it, the export hands over
+no volume or address.
+
+**Load balancers and the internet as sources.** `forwarding_targets` says what a load
+balancer forwards to and on which port (`Forward`): instances on its target port, a
+container app on the app's port (an `ip` target group), and for a cluster the workloads
+that "Receive traffic from" it, each on its own port or the target port. When no workload
+on the cluster says so, the cluster's nodes are the target and every workload on it an
+*assumed* one, whose path is `Unknown` even where the nodes' groups would admit it — the
+diagram does not say which pods get the traffic. `paths_to` lists, besides every
+resource that opens connections, the load balancers forwarding to the target and
+`reach::INTERNET` ("the internet") for anything internet-facing: directly (through a CDN
+whose origin it is, when one fronts it), a bucket behind a CDN, or a target behind an
+internet-facing load balancer (CDN → load balancer → target). A load balancer that
+admits only CloudFront's origin-facing prefix list is reached through the CDN that
+fronts it, and noted when none does.
+
+**Intent and the audit.** `reach::intents` lists the pairs the diagram says talk, each
+with its reasons (`Intent`): a link from a resource that opens connections (except where
+it runs and the logs its provider delivers itself), a load balancer to what it forwards
+to (not to assumed receivers), a flow drawn between two resources in any view (from the
+end that opens the connection: a flow from a queue to its consumer is the consumer
+polling it, a flow from a file system to a workload is the workload mounting it), and a
+resource that reads the secret a database or cache takes its password from.
+`reach::audit` compares that with the network and returns `Finding`s, errors first:
+`blocked` (error: intended, but the network or a missing link stops it), `unintended`
+(warning, one per target: sensitive data — classified personal, payment or
+confidential, or an unclassified database, secret or bucket — that resources with no
+intent can reach, the internet included), `undecided` (info: intended but `Unknown`),
+`unlinked` (info: intended only by a flow or a secret, allowed by the network, but with no
+link the export hands over no address or credentials) and `nat_egress` (info: the NAT
+note above on an intended pair). `reach_from` / `reach_to` (MCP and `ttg reach --from /
+--to`) narrow their paths by `status` and to intended pairs (`only_intended`), and every
+path names its intent. The GUI shows the audit under the network posture while the
+overlay is on with nothing selected (*View ▸ Reachability audit*).
+
+With named environments the analysis reads the values of the environment shown
+(`Project::resolved`), and `reach::audit_other_environments` runs the audit on every other
+environment's own values (`Project::for_environment`), keeping what the shown one does
+not already report, tagged `[env]` — an override can open or close a path. `reach_audit`
+returns them as `other_environments`; `ttg reach audit --environment` picks the one to
+audit and prints the others' after it.
+
+### 6.0a2 Posture rules (`ttg-codegen::posture`)
+
+Posture is data, not judgement: a few facts about a design that usually deserve a second
+look, each a rule with a stable id, run on the provider's layer from
+`diagnostics::run` as `Code::Posture` warnings or info (never errors, so never
+export-blocking) — and so, like every rule there, per environment through
+`environments::other_environments`. Every message ends with `(posture rule '<id>')` and
+`posture::rule_of` reads it back (the MCP diagnostics carry it as `rule`).
+`settings.posture.disabled` lists the rules a project turns off — the settings window's
+*Posture rules* boxes, or `settings_set { posture: { disabled: [...] } }`. The rules:
+`public_kubernetes_api` (public endpoint, no allow-list or 0.0.0.0/0 in it; this was a
+catalog check on each provider), `open_ingress` (a rule admitting 0.0.0.0/0 on anything
+but 80 and 443), `data_tier_open_egress` (info: a group carried by a database, cache or
+file system lets everything out), `orphan_security_group` (info: nothing carries, links or
+names it), `queue_dead_letter_alarm` (warning when no alarm watches a queue's dead
+letters, info when it has no dead-letter queue), `database_backups` (retention 0) and
+`classified_without_cmk` (personal or payment data that could be linked to an Encryption
+Key and is not).
 
 ### 6.0b Cost estimate (`ttg-codegen::cost`)
 
