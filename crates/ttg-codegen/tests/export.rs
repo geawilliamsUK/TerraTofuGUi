@@ -2044,7 +2044,7 @@ fn kubernetes_nodes_carry_their_security_groups() {
         d.iter().any(|x| x.entity.as_deref() == Some("sg-nodes")
             && x.severity == Severity::Warning
             && x.message.contains(
-                "is the source of rules in \"db sg\" and \"nodes sg\" but nothing is a member of it"
+                "is the source of rules in \"db sg\", \"edge sg\" and \"nodes sg\" but nothing is a member of it"
             )),
         "{:?}",
         d.iter().map(|x| &x.message).collect::<Vec<_>>()

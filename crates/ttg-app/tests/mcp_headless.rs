@@ -3137,8 +3137,8 @@ fn headless_reach_audit_filters_and_posture() {
     c.initialize();
     assert!(tool_names(&mut c).contains(&"reach_audit".to_string()));
 
-    // The example's one error: the load balancer forwards to the api, whose nodes' group
-    // admits nothing from it. The database is open to workloads that do not use it.
+    // Nothing the example intends is blocked: the nodes' group admits the load balancer's
+    // group on the target port. The database is open to workloads that do not use it.
     let (err, audit) = c.call("reach_audit", json!({}));
     assert!(!err, "{audit}");
     assert_eq!(audit["provider"], "aws");
@@ -3147,13 +3147,9 @@ fn headless_reach_audit_filters_and_posture() {
         json!([]),
         "no environments, nothing else"
     );
-    assert_eq!(audit["errors"], 1, "{audit}");
+    assert_eq!(audit["errors"], 0, "{audit}");
     let findings = audit["findings"].as_array().unwrap();
-    let blocked = &findings[0];
-    assert_eq!(blocked["kind"], "blocked");
-    assert_eq!(blocked["source_name"], "edge");
-    assert_eq!(blocked["target_name"], "api");
-    assert_eq!(blocked["intent"], json!(["forwards to it"]));
+    assert!(!findings.iter().any(|f| f["kind"] == "blocked"), "{audit}");
     assert!(findings
         .iter()
         .any(|f| f["kind"] == "unintended" && f["target_name"] == "core db" && f["severity"] == "warning"));

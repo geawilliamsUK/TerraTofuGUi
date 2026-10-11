@@ -583,6 +583,16 @@
             "description": "pods and nodes talk to each other"
           },
           {
+            "name": "from-edge",
+            "direction": "ingress",
+            "protocol": "tcp",
+            "from_port": 8080,
+            "to_port": 8080,
+            "cidr": "",
+            "source_group": "sg-edge",
+            "description": "the load balancer reaches the pods"
+          },
+          {
             "name": "all-out",
             "direction": "egress",
             "protocol": "all",
@@ -693,6 +703,42 @@
         "y": 700
       },
       "parent": "rg-k8s",
+      "manual": false
+    },
+    "sg-edge": {
+      "id": "sg-edge",
+      "name": "edge sg",
+      "resource_type": "security_group",
+      "config": {
+        "rules": [
+          {
+            "name": "http-in",
+            "direction": "ingress",
+            "protocol": "tcp",
+            "from_port": 80,
+            "to_port": 80,
+            "cidr": "0.0.0.0/0",
+            "source_group": "",
+            "description": "HTTP from the internet"
+          },
+          {
+            "name": "to-nodes",
+            "direction": "egress",
+            "protocol": "tcp",
+            "from_port": 8080,
+            "to_port": 8080,
+            "cidr": "",
+            "source_group": "sg-nodes",
+            "description": "forward to the pods on the nodes"
+          }
+        ]
+      },
+      "provider_config": {},
+      "position": {
+        "x": 700,
+        "y": 180
+      },
+      "parent": "vnet-core",
       "manual": false
     }
   },
@@ -936,6 +982,11 @@
       "source": "wl-api",
       "target": "lb-edge",
       "relation": "attachment"
+    },
+    {
+      "source": "lb-edge",
+      "target": "sg-edge",
+      "relation": "attribute_reference"
     }
   ]
 }

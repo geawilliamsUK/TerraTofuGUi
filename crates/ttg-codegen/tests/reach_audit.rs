@@ -307,10 +307,23 @@ fn audit_compares_intent_with_the_network() {
     let cat = Catalog::builtin();
     let p = example("kubernetes.ttg.json");
     let f = findings(&p, &cat);
-    // The load balancer forwards to the api, which says it receives that traffic, but the
-    // nodes' group admits nothing from the load balancer (it has no group, and no rule
-    // covers its subnets): the one error in the example.
+    // The load balancer forwards to the api, which says it receives that traffic, and the
+    // nodes' group admits the load balancer's group on the target port: nothing the
+    // design intends is blocked.
     let errors: Vec<&Finding> = f.iter().filter(|x| x.severity == Severity::Error).collect();
+    assert!(errors.is_empty(), "{errors:#?}");
+
+    // Take that rule away and the intended path is the audit's one error.
+    let mut closed = p.clone();
+    if let Some(Value::Records(rows)) = closed
+        .nodes
+        .get_mut("sg-nodes")
+        .and_then(|n| n.config.get_mut("rules"))
+    {
+        rows.retain(|r| r.get("name").and_then(|v| v.as_str()) != Some("from-edge"));
+    }
+    let closed = findings(&closed, &cat);
+    let errors: Vec<&Finding> = closed.iter().filter(|x| x.severity == Severity::Error).collect();
     assert_eq!(errors.len(), 1, "{errors:#?}");
     assert_eq!(
         (errors[0].source.as_str(), errors[0].target.as_str()),
