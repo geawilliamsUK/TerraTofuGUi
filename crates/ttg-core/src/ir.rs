@@ -118,6 +118,16 @@ pub struct Settings {
     /// Which posture rules (`ttg_codegen::posture`) this project turns off.
     #[serde(default, skip_serializing_if = "PostureSettings::is_empty")]
     pub posture: PostureSettings,
+    /// Built to be destroyed and created again (a staging stack torn down every night):
+    /// the mappings then leave nothing behind that would stop the next `apply` — no final
+    /// database snapshot, secrets deleted without a recovery window, buckets emptied on
+    /// destroy, key vaults that can be purged. Off by default.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub disposable: bool,
+    /// Environment → whether it is disposable, where it differs from `disposable`
+    /// (staging yes, prod no). Resolved by `Project::for_environment`.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub disposable_environments: BTreeMap<String, bool>,
 }
 
 /// Per-project choices about the posture rules: the ids of the ones turned off. A rule
@@ -160,7 +170,17 @@ impl Default for Settings {
             name_prefix: None,
             variables: BTreeMap::new(),
             posture: PostureSettings::default(),
+            disposable: false,
+            disposable_environments: BTreeMap::new(),
         }
+    }
+}
+
+impl Settings {
+    /// Is the project disposable in `env` (`None`: outside any environment)?
+    pub fn disposable_in(&self, env: Option<&str>) -> bool {
+        env.and_then(|e| self.disposable_environments.get(e).copied())
+            .unwrap_or(self.disposable)
     }
 }
 

@@ -204,7 +204,7 @@ impl Tier {
 pub const MANIFEST_TYPES: &[&str] = &["kubernetes_workload"];
 
 /// Project settings a `{ setting = "…" }` condition may test.
-pub const CONDITION_SETTINGS: &[&str] = &["kubernetes_manifests"];
+pub const CONDITION_SETTINGS: &[&str] = &["kubernetes_manifests", "disposable"];
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Default)]
 #[serde(rename_all = "lowercase")]
@@ -427,6 +427,13 @@ pub struct ProviderMapping {
     /// linked workload uses into a `k8s_<slug>_<key>` output and an environment variable.
     #[serde(default)]
     pub connection: IndexMap<String, ArgSource>,
+    /// What this resource can reach (v2): lower-case name -> a source that resolves to a
+    /// number on this entity (`max_connections` of a database at its instance class).
+    /// Read by other mappings with `{ relation = …, limit = "<name>" }` and by numeric
+    /// conditions whose bound names one, so an alarm can be checked against what the
+    /// thing it watches can actually report.
+    #[serde(default)]
+    pub limits: IndexMap<String, ArgSource>,
 }
 
 /// A definition-level diagnostic: when the condition holds the message is reported.
@@ -647,6 +654,26 @@ pub enum Condition {
     Setting(CondSetting),
     /// `{ not = <condition> }` — the condition does not hold (v2).
     Not(CondNot),
+    /// `{ extra = "load_balancer" }` — the project sets this argument (or nested block)
+    /// on the entity's block for this provider as an extra argument, to anything but
+    /// `null` (v2). `block` names the block (default: the primary one); `absent = true`
+    /// inverts. A manual step that the extra argument already takes care of uses it to
+    /// drop out.
+    Extra(CondExtra),
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct CondExtra {
+    pub extra: String,
+    #[serde(default)]
+    pub block: Option<String>,
+    /// Holds only when the extra argument is set to this value, written as JSON text
+    /// without quotes for a string: `"false"`, `"null"` (the argument removed), `"gp3"`.
+    #[serde(default)]
+    pub equals: Option<String>,
+    #[serde(default)]
+    pub absent: bool,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -813,7 +840,40 @@ pub struct CondField {
     pub greater_than: Option<Box<Bound>>,
     #[serde(default)]
     pub at_least: Option<Box<Bound>>,
+    /// The table field has at least one row whose items match all of these (v2): item ->
+    /// a value or a list of accepted values, compared as text without regard to case.
+    /// `{ field = "parameters", has_row = { name = "rds.force_ssl", value = ["1", "on"] } }`
+    /// holds when a server parameter forces TLS. A `string_list` is a table whose rows
+    /// have the single item `value`.
+    #[serde(default)]
+    pub has_row: IndexMap<String, OneOrMany>,
 }
+
+/// One accepted value, or a list of them.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(untagged)]
+pub enum OneOrMany {
+    One(String),
+    Many(Vec<String>),
+}
+
+impl OneOrMany {
+    pub fn values(&self) -> Vec<&str> {
+        match self {
+            OneOrMany::One(s) => vec![s.as_str()],
+            OneOrMany::Many(v) => v.iter().map(String::as_str).collect(),
+        }
+    }
+
+    /// Does `s` equal one of the values, ignoring case and surrounding space? `*` stands
+    /// for any value that is not empty.
+    pub fn matches(&self, s: &str) -> bool {
+        self.values()
+            .iter()
+            .any(|v| (v.trim() == "*" && !s.trim().is_empty()) || v.trim().eq_ignore_ascii_case(s.trim()))
+    }
+}
+
 #[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct CondProviderField {
@@ -911,6 +971,20 @@ pub enum Bound {
     Number(f64),
     Field(BoundField),
     ProviderField(BoundProviderField),
+    /// A limit of a linked entity (v2): `{ relation = "attribute_reference", target_type =
+    /// "relational_database", limit = "max_connections" }` is the first such target's
+    /// `max_connections` (see `ProviderMapping::limits`). Unknown (no target, or a value
+    /// the target's table does not list) fails the comparison.
+    Limit(BoundLimit),
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct BoundLimit {
+    pub relation: String,
+    #[serde(default)]
+    pub target_type: Option<String>,
+    pub limit: String,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -1132,6 +1206,12 @@ pub struct SrcRelation {
     /// bucket's name. Alternative to `attr`, `field` and `block`.
     #[serde(default)]
     pub connection: Option<String>,
+    /// Resolve one of the target's own `limits` (v2) to a number instead of an
+    /// attribute: what the target can reach at its size, e.g. a database's
+    /// `max_connections`. Cannot be combined with `attr`, `field`, `block` or
+    /// `connection`; a target whose limit is unknown contributes nothing.
+    #[serde(default)]
+    pub limit: Option<String>,
 }
 #[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -1283,6 +1363,62 @@ impl SrcRaw {
             .skip(1)
             .step_by(2)
             .filter(|s| !s.is_empty())
+            .collect()
+    }
+}
+
+impl ArgSource {
+    /// Call `f` on this source and on every source nested inside it (fallbacks, branches,
+    /// object members, list elements, function arguments, `refs`, `each`).
+    pub fn visit<'a>(&'a self, f: &mut dyn FnMut(&'a ArgSource)) {
+        f(self);
+        let mut sub = |s: &'a ArgSource| s.visit(f);
+        match self {
+            ArgSource::Field(x) => x.fallback.iter().for_each(|s| sub(s)),
+            ArgSource::ProviderField(x) => x.fallback.iter().for_each(|s| sub(s)),
+            ArgSource::Relation(x) => x.fallback.iter().for_each(|s| sub(s)),
+            ArgSource::Object(x) => x.object.values().for_each(sub),
+            ArgSource::List(x) => x.list.iter().for_each(sub),
+            ArgSource::Func(x) => x.args.iter().for_each(sub),
+            ArgSource::If(x) => {
+                sub(&x.then);
+                x.otherwise.iter().for_each(|s| sub(s));
+            }
+            ArgSource::Rows(x) => sub(&x.each),
+            ArgSource::Raw(x) => x.refs.values().for_each(sub),
+            _ => {}
+        }
+    }
+}
+
+impl ProviderMapping {
+    /// Every argument source the mapping declares, nested ones included: block, data and
+    /// nested-block arguments, connection values and limits.
+    pub fn all_sources(&self) -> Vec<&ArgSource> {
+        fn nested<'a>(n: &'a NestedBlockDef, out: &mut Vec<&'a ArgSource>) {
+            n.args.values().for_each(|s| s.visit(&mut |x| out.push(x)));
+            n.nested.iter().for_each(|c| nested(c, out));
+        }
+        let mut out = Vec::new();
+        for b in self.blocks.iter().chain(&self.data) {
+            b.args.values().for_each(|s| s.visit(&mut |x| out.push(x)));
+            b.nested.iter().for_each(|n| nested(n, &mut out));
+        }
+        for s in self.connection.values().chain(self.limits.values()) {
+            s.visit(&mut |x| out.push(x));
+        }
+        out
+    }
+
+    /// The per-entity variables (`entity_var`) the mapping can declare, whichever
+    /// branch of its arguments declares them.
+    pub fn entity_vars(&self) -> Vec<&SrcEntityVar> {
+        self.all_sources()
+            .into_iter()
+            .filter_map(|s| match s {
+                ArgSource::EntityVar(v) => Some(v),
+                _ => None,
+            })
             .collect()
     }
 }

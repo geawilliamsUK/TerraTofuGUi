@@ -363,6 +363,8 @@ impl Project {
         let prefix = vars.get("name_prefix").map(|v| v.display()).unwrap_or_default();
         out.settings.name_prefix = (!prefix.is_empty()).then_some(prefix);
         out.settings.variables.clear();
+        out.settings.disposable = self.settings.disposable_in(env);
+        out.settings.disposable_environments.clear();
         out
     }
 
@@ -439,6 +441,9 @@ impl Project {
         for v in self.settings.variables.values_mut() {
             v.environments.retain(|k, _| envs.contains(k));
         }
+        self.settings
+            .disposable_environments
+            .retain(|k, _| envs.contains(k));
         self.settings.environments = envs;
         Ok(lost)
     }
@@ -472,6 +477,9 @@ impl Project {
             if let Some(x) = v.environments.remove(from) {
                 v.environments.insert(to.to_string(), x);
             }
+        }
+        if let Some(x) = self.settings.disposable_environments.remove(from) {
+            self.settings.disposable_environments.insert(to.to_string(), x);
         }
         Ok(())
     }

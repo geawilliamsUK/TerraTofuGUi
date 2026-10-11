@@ -433,6 +433,20 @@ pub fn catalog(cat: &Catalog) -> Vec<String> {
                 }
                 check_source(&mut ctx, &format!("connection '{k}'"), src, &mut errs);
             }
+            // Limits are numbers resolved on the entity itself.
+            for (k, src) in &m.limits {
+                ctx.v2 = true;
+                let ok = k.chars().next().is_some_and(|c| c.is_ascii_lowercase())
+                    && k.chars()
+                        .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '_');
+                if !ok {
+                    errs.push(pw(&format!(
+                        "limit '{k}' must be lower case letters, digits and '_', starting with a letter"
+                    )));
+                }
+                check_limit_source(&pw(&format!("limit '{k}'")), src, &mut errs);
+                check_source(&mut ctx, &format!("limit '{k}'"), src, &mut errs);
+            }
             for (k, o) in &m.outputs {
                 if let Some(b) = &o.block {
                     if !block_keys.contains(&b.as_str()) {
@@ -784,6 +798,21 @@ fn check_condition(ctx: &mut SourceCtx, c: &Condition, errs: &mut Vec<String>) {
                 f.compare(),
                 errs,
             );
+            if !f.has_row.is_empty() {
+                ctx.v2 = true;
+                check_has_row(ctx, f, errs);
+            }
+        }
+        Condition::Extra(x) => {
+            ctx.v2 = true;
+            if let Some(b) = &x.block {
+                if !ctx.blocks.contains(&b.as_str()) && !ctx.data.contains(&b.as_str()) {
+                    errs.push(format!("{}when extra: unknown block '{b}'", ctx.what));
+                }
+            }
+            if x.extra.trim().is_empty() {
+                errs.push(format!("{}when extra: name the argument", ctx.what));
+            }
         }
         Condition::ProviderField(f) => {
             if f.absent || f.ends_with.is_some() || f.not_ends_with.is_some() {
@@ -912,6 +941,51 @@ fn is_numeric(f: &FieldDef) -> bool {
     matches!(f.field_type, FieldType::Int | FieldType::Number)
 }
 
+/// `has_row` reads rows, so the field must be a table (or a string list, whose rows have
+/// the one item `value`), every key one of its items, and it is a test of its own: no
+/// other comparison may ride along.
+fn check_has_row(ctx: &SourceCtx, f: &CondField, errs: &mut Vec<String>) {
+    let items: Vec<String> = match ctx.fields.iter().find(|x| x.name == f.field) {
+        Some(d) if d.field_type == FieldType::StructList => d.items.iter().map(|i| i.name.clone()).collect(),
+        Some(d) if d.field_type == FieldType::StringList => vec!["value".into()],
+        Some(_) => {
+            errs.push(format!(
+                "{}when has_row: '{}' is not a struct_list or string_list",
+                ctx.what, f.field
+            ));
+            return;
+        }
+        None => return, // reported as an undeclared field
+    };
+    for (k, v) in &f.has_row {
+        if !items.iter().any(|i| i == k) {
+            errs.push(format!(
+                "{}when has_row: '{k}' is not an item of '{}' (available: {})",
+                ctx.what,
+                f.field,
+                items.join(", ")
+            ));
+        }
+        if v.values().is_empty() {
+            errs.push(format!("{}when has_row: '{k}' lists no values", ctx.what));
+        }
+    }
+    if f.equals.is_some()
+        || f.not_equals.is_some()
+        || f.starts_with.is_some()
+        || f.not_starts_with.is_some()
+        || f.ends_with.is_some()
+        || f.not_ends_with.is_some()
+        || f.absent
+        || !f.compare().is_empty()
+    {
+        errs.push(format!(
+            "{}when has_row is a test of its own and cannot be combined with equals, starts_with, ends_with, absent, one_of or a numeric comparison",
+            ctx.what
+        ));
+    }
+}
+
 /// `one_of` / `not_one_of` and the numeric comparisons of a field condition: a number
 /// compares only against a numeric field, and a bound that names a field must name a
 /// numeric one this mapping can read.
@@ -941,6 +1015,12 @@ fn check_compare(
             Bound::Number(_) => continue,
             Bound::Field(f) => (&f.field, false),
             Bound::ProviderField(f) => (&f.provider_field, true),
+            Bound::Limit(l) => {
+                let at = format!("when {op}");
+                check_relation_ref(ctx, &at, &l.relation, l.target_type.as_deref(), errs);
+                check_limit_declared(ctx, &at, &l.relation, l.target_type.as_deref(), &l.limit, errs);
+                continue;
+            }
         };
         let pool = if provider { ctx.provider_fields } else { ctx.fields };
         match pool.iter().find(|x| &x.name == other) {
@@ -993,6 +1073,65 @@ fn check_item_ref(ctx: &SourceCtx, at: &str, item: &str, errs: &mut Vec<String>)
             items.join(", ")
         )),
         _ => {}
+    }
+}
+
+/// A limit read off the other end of a relation must be declared by some provider
+/// mapping of a type that end can be.
+fn check_limit_declared(
+    ctx: &SourceCtx,
+    at: &str,
+    relation: &str,
+    target_type: Option<&str>,
+    limit: &str,
+    errs: &mut Vec<String>,
+) {
+    let candidates: Vec<&str> = match target_type {
+        Some(tt) => vec![tt],
+        None => ctx
+            .relations
+            .iter()
+            .filter(|x| x.kind == relation)
+            .flat_map(|x| x.targets.iter().map(String::as_str))
+            .collect(),
+    };
+    let declared = candidates.iter().any(|t| {
+        ctx.cat
+            .resources
+            .get(*t)
+            .is_some_and(|d| d.providers.values().any(|m| m.limits.contains_key(limit)))
+    });
+    if !candidates.is_empty() && !declared {
+        errs.push(format!(
+            "{}{at}: limit '{limit}' is not declared by any mapping of {}",
+            ctx.what,
+            candidates.join(" / ")
+        ));
+    }
+}
+
+/// A limit is a number worked out at export from the entity's own values, so its
+/// source may only use forms that resolve to a literal: values, fields, lookup tables,
+/// conditions, `sum` / `min` / `max` / `floor` of those, and a related entity's field.
+fn check_limit_source(what: &str, src: &ArgSource, errs: &mut Vec<String>) {
+    match src {
+        ArgSource::Literal(l) if l.value.is_integer() || l.value.is_float() => {}
+        ArgSource::Field(f) => f.fallback.iter().for_each(|s| check_limit_source(what, s, errs)),
+        ArgSource::ProviderField(f) => f.fallback.iter().for_each(|s| check_limit_source(what, s, errs)),
+        ArgSource::Map(_) => {}
+        ArgSource::If(i) => {
+            check_limit_source(what, &i.then, errs);
+            if let Some(o) = &i.otherwise {
+                check_limit_source(what, o, errs);
+            }
+        }
+        ArgSource::Func(f) if ["sum", "min", "max", "floor"].contains(&f.func.as_str()) => {
+            f.args.iter().for_each(|s| check_limit_source(what, s, errs));
+        }
+        ArgSource::Relation(r) if r.field.is_some() => {}
+        _ => errs.push(format!(
+            "{what}: a limit may only use value (a number), field, provider_field, map, if, a related entity's field, and sum / min / max / floor of those"
+        )),
     }
 }
 
@@ -1378,6 +1517,18 @@ fn check_source(ctx: &mut SourceCtx, at: &str, src: &ArgSource, errs: &mut Vec<S
                         "connection '{key}' is not declared by any mapping of {}",
                         candidates.join(" / ")
                     )));
+                }
+            }
+            if let Some(limit) = &r.limit {
+                ctx.v2 = true;
+                if !r.attr.is_empty() || r.field.is_some() || r.block.is_some() || r.connection.is_some() {
+                    errs.push(e(
+                        "limit reads the target's own limit, so it cannot be combined with attr, field, block or connection"
+                            .into(),
+                    ));
+                }
+                if !r.incoming {
+                    check_limit_declared(ctx, at, &r.relation, r.target_type.as_deref(), limit, errs);
                 }
             }
             check_no_map_wrap(ctx, at, r.wrap, errs);

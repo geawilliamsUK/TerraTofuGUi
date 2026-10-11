@@ -98,7 +98,7 @@ name = "final_snapshot"
 label = "Take a final snapshot on destroy"
 type = "bool"
 default = true
-description = "Keep a snapshot when the server is destroyed, named after it. Turning this off means a destroy takes the data with it."
+description = "Keep a snapshot when the server is destroyed, named after it with a suffix drawn when the server is created (AWS), so destroying a recreated server does not collide with the last snapshot. Turning this off means a destroy takes the data with it; a disposable project (Settings) never takes one."
 
 [[fields]]
 name = "iam_authentication"
@@ -180,6 +180,10 @@ message = "\"{name}\" enables Performance Insights on the 'small' class (db.t3.m
 [[providers.aws.checks]]
 when = { all = [ { provider_field = "instance_class", ends_with = ".micro" }, { provider_field = "performance_insights" } ] }
 message = "\"{name}\" enables Performance Insights on a .micro instance class override, which does not support it; choose a larger instance class"
+
+[[providers.aws.checks]]
+when = { all = [ { setting = "disposable" }, { field = "deletion_protection" } ] }
+message = "\"{name}\" has deletion protection on in a disposable project: `destroy` fails until it is cleared and applied"
 
 [[providers.aws.checks]]
 when = { field = "backup_retention_days", equals = "0" }
@@ -290,6 +294,18 @@ name         = { item = "name" }
 value        = { item = "value" }
 apply_method = { if = { item = "after_reboot" }, then = { value = "pending-reboot" }, else = { value = "immediate" } }
 
+# A suffix for the final snapshot's name, drawn when the server is created and kept for
+# its lifetime: destroyed with it, drawn afresh by the next create, so every destroy
+# leaves a snapshot of its own name. `keepers` draws a new one when the server is renamed.
+[[providers.aws.blocks]]
+key = "final_id"
+resource = "random_id"
+when = { all = [ { field = "final_snapshot" }, { setting = "disposable", equals = "false" } ] }
+
+[providers.aws.blocks.args]
+byte_length = { value = 4 }
+keepers     = { object = { identifier = { field = "name", transform = "kebab" } } }
+
 [[providers.aws.blocks]]
 key = "main"
 resource = "aws_db_instance"
@@ -315,8 +331,11 @@ publicly_accessible          = { value = false }
 multi_az                     = { if = { field = "high_availability" }, then = { value = true }, else = { value = false } }
 backup_retention_period      = { field = "backup_retention_days", fallback = { value = 7 } }
 deletion_protection          = { if = { field = "deletion_protection" }, then = { value = true }, else = { value = false } }
-skip_final_snapshot          = { if = { field = "final_snapshot" }, then = { value = false }, else = { value = true } }
-final_snapshot_identifier    = { if = { field = "final_snapshot" }, then = { template = "{name}-final", transform = "kebab" } }
+# The final snapshot is named per creation (`<name>-final-<random suffix>`): a fixed name
+# would make the second destroy fail because the first one's snapshot still exists. A
+# disposable project takes none at all.
+skip_final_snapshot          = { if = { all = [ { field = "final_snapshot" }, { setting = "disposable", equals = "false" } ] }, then = { value = false }, else = { value = true } }
+final_snapshot_identifier    = { if = { all = [ { field = "final_snapshot" }, { setting = "disposable", equals = "false" } ] }, then = { func = "format", args = [ { value = "%s-final-%s" }, { field = "name", transform = "kebab" }, { self_block = "final_id", attr = "hex" } ] } }
 performance_insights_enabled = { if = { provider_field = "performance_insights" }, then = { value = true }, else = { value = false } }
 storage_encrypted            = { value = true }
 # With this on, a pod or function holding `rds-db:connect` on the instance's resource id
@@ -337,6 +356,19 @@ MASTER_SECRET_ARN = { if = { provider_field = "master_password", equals = "manag
 endpoint = { attr = "endpoint", description = "Connection endpoint (host:port)" }
 address  = { attr = "address", description = "Host name" }
 master_user_secret_arn = { attr = "master_user_secret.0.secret_arn", description = "ARN of the Secrets Manager secret RDS keeps the master password in", when = { provider_field = "master_password", equals = "managed" } }
+
+# What the server can reach (MAPPING_FORMAT.md §2.9): the connections alarms are checked
+# against. RDS sets `max_connections` from DBInstanceClassMemory, the memory the class
+# leaves the engine once RDS has taken its share: PostgreSQL LEAST(memory / 9531392, 5000),
+# MySQL memory / 12582880. That memory, by the class's nominal size:
+#   1 GiB (t3/t4g.micro) ~792 MiB    2 GiB (small) ~1800 MiB    4 GiB (medium) ~3757 MiB
+#   8 GiB (t.large, m.large) ~7782 MiB    16 GiB (t.xlarge, m.xlarge, r.large) ~15650 MiB
+#   32 GiB ~31600 MiB    64 GiB ~63700 MiB
+# which gives the figures below (RDS's defaults: 87 on a micro, 856 on an m5.large). A
+# class the table does not list, or a `max_connections` server parameter of its own, has
+# no known limit, and nothing is checked against it.
+[providers.aws.limits]
+max_connections = { if = { not = { field = "parameters", has_row = { name = "max_connections", value = "*" } } }, then = { if = { field = "engine", equals = "mysql" }, then = { if = { provider_field = "instance_class", absent = true }, then = { map = "size", table = { small = 66, medium = 313, large = 648 } }, else = { map = "instance_class", optional = true, table = { "db.t3.micro" = 66, "db.t4g.micro" = 66, "db.t3.small" = 150, "db.t4g.small" = 150, "db.t3.medium" = 313, "db.t4g.medium" = 313, "db.t3.large" = 648, "db.t4g.large" = 648, "db.t3.xlarge" = 1304, "db.t4g.xlarge" = 1304, "db.t3.2xlarge" = 2633, "db.t4g.2xlarge" = 2633, "db.m5.large" = 648, "db.m6g.large" = 648, "db.m6i.large" = 648, "db.m7g.large" = 648, "db.m5.xlarge" = 1304, "db.m6g.xlarge" = 1304, "db.m6i.xlarge" = 1304, "db.m7g.xlarge" = 1304, "db.m5.2xlarge" = 2633, "db.m6g.2xlarge" = 2633, "db.m6i.2xlarge" = 2633, "db.m7g.2xlarge" = 2633, "db.m5.4xlarge" = 5308, "db.m6g.4xlarge" = 5308, "db.m6i.4xlarge" = 5308, "db.m7g.4xlarge" = 5308, "db.r5.large" = 1304, "db.r6g.large" = 1304, "db.r6i.large" = 1304, "db.r7g.large" = 1304, "db.r5.xlarge" = 2633, "db.r6g.xlarge" = 2633, "db.r6i.xlarge" = 2633, "db.r7g.xlarge" = 2633, "db.r5.2xlarge" = 5308, "db.r6g.2xlarge" = 5308, "db.r6i.2xlarge" = 5308, "db.r7g.2xlarge" = 5308 } } }, else = { if = { provider_field = "instance_class", absent = true }, then = { map = "size", table = { small = 87, medium = 413, large = 856 } }, else = { map = "instance_class", optional = true, table = { "db.t3.micro" = 87, "db.t4g.micro" = 87, "db.t3.small" = 198, "db.t4g.small" = 198, "db.t3.medium" = 413, "db.t4g.medium" = 413, "db.t3.large" = 856, "db.t4g.large" = 856, "db.t3.xlarge" = 1721, "db.t4g.xlarge" = 1721, "db.t3.2xlarge" = 3476, "db.t4g.2xlarge" = 3476, "db.m5.large" = 856, "db.m6g.large" = 856, "db.m6i.large" = 856, "db.m7g.large" = 856, "db.m5.xlarge" = 1721, "db.m6g.xlarge" = 1721, "db.m6i.xlarge" = 1721, "db.m7g.xlarge" = 1721, "db.m5.2xlarge" = 3476, "db.m6g.2xlarge" = 3476, "db.m6i.2xlarge" = 3476, "db.m7g.2xlarge" = 3476, "db.m5.4xlarge" = 5000, "db.m6g.4xlarge" = 5000, "db.m6i.4xlarge" = 5000, "db.m7g.4xlarge" = 5000, "db.r5.large" = 1721, "db.r6g.large" = 1721, "db.r6i.large" = 1721, "db.r7g.large" = 1721, "db.r5.xlarge" = 3476, "db.r6g.xlarge" = 3476, "db.r6i.xlarge" = 3476, "db.r7g.xlarge" = 3476, "db.r5.2xlarge" = 5000, "db.r6g.2xlarge" = 5000, "db.r6i.2xlarge" = 5000, "db.r7g.2xlarge" = 5000 } } } } }
 
 # ---------------------------------------------------------------- Azure
 [providers.azure]
@@ -612,6 +644,11 @@ NAME = { field = "database_name" }
 postgres_fqdn = { block = "pg", attr = "fqdn", description = "PostgreSQL server host name" }
 mysql_fqdn    = { block = "my", attr = "fqdn", description = "MySQL server host name" }
 
+# A flexible server's default `max_connections` by SKU (Azure keeps 15 of PostgreSQL's
+# for itself). A `max_connections` parameter of the server's own leaves it unknown.
+[providers.azure.limits]
+max_connections = { if = { not = { field = "parameters", has_row = { name = "max_connections", value = "*" } } }, then = { if = { field = "engine", equals = "mysql" }, then = { if = { provider_field = "sku_name", absent = true }, then = { map = "size", table = { small = 341, medium = 1365, large = 2731 } }, else = { map = "sku_name", optional = true, table = { "B_Standard_B1s" = 171, "B_Standard_B1ms" = 341, "B_Standard_B2s" = 683, "B_Standard_B2ms" = 1365, "B_Standard_B4ms" = 2731, "B_Standard_B8ms" = 5461, "GP_Standard_D2ds_v4" = 1365, "GP_Standard_D4ds_v4" = 2731, "GP_Standard_D8ds_v4" = 5461, "GP_Standard_D16ds_v4" = 10923, "MO_Standard_E2ds_v4" = 2731, "MO_Standard_E4ds_v4" = 5461 } } }, else = { if = { provider_field = "sku_name", absent = true }, then = { map = "size", table = { small = 50, medium = 859, large = 1718 } }, else = { map = "sku_name", optional = true, table = { "B_Standard_B1ms" = 50, "B_Standard_B2s" = 429, "B_Standard_B2ms" = 859, "B_Standard_B4ms" = 1718, "B_Standard_B8ms" = 3437, "GP_Standard_D2s_v3" = 859, "GP_Standard_D4s_v3" = 1718, "GP_Standard_D8s_v3" = 3437, "GP_Standard_D16s_v3" = 5000, "GP_Standard_D2ds_v4" = 859, "GP_Standard_D4ds_v4" = 1718, "GP_Standard_D8ds_v4" = 3437, "GP_Standard_D2ds_v5" = 859, "GP_Standard_D4ds_v5" = 1718, "GP_Standard_D8ds_v5" = 3437, "MO_Standard_E2ds_v4" = 1718, "MO_Standard_E4ds_v4" = 3437, "MO_Standard_E8ds_v4" = 5000 } } } } }
+
 [[providers.azure.manual_steps]]
 title = "Create the directory role inside the database"
 when = { all = [ { field = "engine", equals = "postgres" }, { field = "iam_authentication" } ] }
@@ -626,7 +663,7 @@ in place of the password.
 
 [[providers.azure.manual_steps]]
 title = "Keep a copy before destroying the server"
-when = { field = "final_snapshot" }
+when = { all = [ { field = "final_snapshot" }, { setting = "disposable", equals = "false" } ] }
 body = """
 Azure flexible servers have no "final snapshot on destroy": automated backups are deleted
 with the server. Before `destroy`, take a manual copy — `az postgres flexible-server
@@ -659,6 +696,18 @@ name = "tier"
 label = "Machine tier override"
 type = "string"
 description = "Overrides the tier the size table picks, e.g. `db-custom-2-7680`. Regional (high-availability) instances cannot use the shared-core `db-f1-micro` that 'small' selects."
+
+[[providers.gcp.fields]]
+name = "ssl_mode"
+label = "SSL mode"
+type = "enum"
+options = ["ALLOW_UNENCRYPTED_AND_ENCRYPTED", "ENCRYPTED_ONLY", "TRUSTED_CLIENT_CERTIFICATE_REQUIRED"]
+description = "Whether Cloud SQL accepts unencrypted connections (`settings.ip_configuration.ssl_mode`). Cloud SQL enforces TLS here rather than with a database flag. 'ENCRYPTED_ONLY' refuses plain connections, so a Secret built from this database ('Value from database', TLS mode 'auto') asks for `sslmode=require`; 'TRUSTED_CLIENT_CERTIFICATE_REQUIRED' also needs a client certificate, which a connection URI cannot carry. Unset: Cloud SQL's default, which allows both."
+
+[[providers.gcp.checks]]
+severity = "error"
+when = { field = "parameters", has_row = { name = ["ssl_mode", "require_ssl"] } }
+message = "\"{name}\" sets `ssl_mode` / `require_ssl` as a server parameter, which Cloud SQL does not have as a database flag and refuses; use the Google Cloud 'SSL mode' field instead"
 
 [[providers.gcp.checks]]
 severity = "error"
@@ -708,12 +757,26 @@ network                 = { relation = "network_membership", ancestor = "virtual
 service                 = { value = "servicenetworking.googleapis.com" }
 reserved_peering_ranges = { self_block = "psa_range", attr = "name", wrap = "list" }
 
+[[providers.gcp.checks]]
+when = { all = [ { setting = "disposable" }, { field = "deletion_protection" } ] }
+message = "\"{name}\" has deletion protection on in a disposable project: `destroy` fails until it is cleared and applied"
+
+# Cloud SQL keeps a deleted instance's name for up to a week, so a disposable project
+# gives each creation a name of its own: the display name plus a suffix drawn per create.
+[[providers.gcp.blocks]]
+key = "name_suffix"
+resource = "random_id"
+when = { setting = "disposable" }
+
+[providers.gcp.blocks.args]
+byte_length = { value = 3 }
+
 [[providers.gcp.blocks]]
 key = "main"
 resource = "google_sql_database_instance"
 
 [providers.gcp.blocks.args]
-name                     = { field = "name", transform = "kebab" }
+name                     = { if = { setting = "disposable" }, then = { func = "format", args = [ { value = "%s-%s" }, { field = "name", transform = "kebab" }, { self_block = "name_suffix", attr = "hex" } ] }, else = { field = "name", transform = "kebab" } }
 region                   = { var = "region" }
 database_version         = { provider_field = "database_version", fallback = { map = "engine", table = { postgres = "POSTGRES_16", mysql = "MYSQL_8_0" } } }
 deletion_protection      = { if = { field = "deletion_protection" }, then = { value = true }, else = { value = false } }
@@ -728,7 +791,7 @@ disk_size                = { field = "storage" }
 disk_autoresize          = { if = { field = "max_storage_gb" }, then = { value = true }, else = { value = false } }
 disk_autoresize_limit    = { if = { field = "max_storage_gb" }, then = { field = "max_storage_gb" } }
 availability_type        = { if = { field = "high_availability" }, then = { value = "REGIONAL" }, else = { value = "ZONAL" } }
-retain_backups_on_delete = { if = { field = "final_snapshot" }, then = { value = true }, else = { value = false } }
+retain_backups_on_delete = { if = { all = [ { field = "final_snapshot" }, { setting = "disposable", equals = "false" } ] }, then = { value = true }, else = { value = false } }
 
 [[providers.gcp.blocks.nested.nested]]
 block = "backup_configuration"
@@ -752,6 +815,7 @@ block = "ip_configuration"
 [providers.gcp.blocks.nested.nested.args]
 ipv4_enabled    = { if = { relation = "network_membership" }, then = { value = false }, else = { value = true } }
 private_network = { if = { relation = "network_membership" }, then = { self_block = "psa", attr = "network" } }
+ssl_mode        = { provider_field = "ssl_mode", optional = true }
 
 # Cloud SQL IAM authentication is a database flag, and the two engines spell it
 # differently: a dot for PostgreSQL, an underscore for MySQL.
@@ -798,6 +862,13 @@ NAME = { field = "database_name" }
 private_ip      = { attr = "private_ip_address", description = "Private IPv4 address (VNet-integrated instances)" }
 public_ip       = { attr = "public_ip_address", description = "Public IPv4 address (public instances)" }
 connection_name = { attr = "connection_name", description = "Cloud SQL connection name (for the Auth Proxy)" }
+
+# Cloud SQL's default `max_connections` by tier. PostgreSQL follows the tier's memory
+# (0.6 GB 25, 1.7 GB 50, 3.75-6 GB 100, 6-7.5 GB 200, 7.5-15 GB 400, 15-30 GB 500,
+# 30-60 GB 600, 60-120 GB 800); MySQL is 250 on db-f1-micro, 1,000 on db-g1-small and
+# 4,000 on every other tier. A `max_connections` flag of the server's own leaves it unknown.
+[providers.gcp.limits]
+max_connections = { if = { not = { field = "parameters", has_row = { name = "max_connections", value = "*" } } }, then = { if = { field = "engine", equals = "mysql" }, then = { if = { provider_field = "tier", absent = true }, then = { map = "size", table = { small = 250, medium = 4000, large = 4000 } }, else = { if = { provider_field = "tier", equals = "db-f1-micro" }, then = { value = 250 }, else = { if = { provider_field = "tier", equals = "db-g1-small" }, then = { value = 1000 }, else = { value = 4000 } } } }, else = { if = { provider_field = "tier", absent = true }, then = { map = "size", table = { small = 25, medium = 400, large = 500 } }, else = { map = "tier", optional = true, table = { "db-f1-micro" = 25, "db-g1-small" = 50, "db-custom-1-3840" = 100, "db-custom-2-7680" = 400, "db-custom-2-8192" = 400, "db-custom-4-15360" = 500, "db-custom-4-16384" = 500, "db-custom-8-30720" = 600, "db-custom-8-32768" = 600, "db-custom-16-61440" = 800, "db-custom-16-65536" = 800, "db-perf-optimized-N-2" = 500, "db-perf-optimized-N-4" = 600, "db-perf-optimized-N-8" = 800 } } } } }
 
 [[providers.gcp.manual_steps]]
 title = "Let Cloud SQL use the encryption key"

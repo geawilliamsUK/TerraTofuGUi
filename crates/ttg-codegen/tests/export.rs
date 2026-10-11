@@ -669,7 +669,7 @@ fn job_pipeline_wires_functions_to_everything() {
     // database takes its password from the secret; URI secret is composed from the database
     assert!(f("database.tf")
         .contains("password             = aws_secretsmanager_secret_version.dbpass_version.secret_string"));
-    assert!(f("secrets.tf").contains("secret_string = format(\"postgresql://%s:%s@%s/%s\""));
+    assert!(f("secrets.tf").contains("secret_string = format(\"postgresql://%s:%s@%s/%s%s\", urlencode("));
     // security group rule sourced from another group, no CIDR
     let net = f("network.tf");
     assert!(net.contains("referenced_security_group_id = aws_security_group.runner_sg.id"));
@@ -1445,7 +1445,7 @@ fn hardened_example_carries_the_posture_on_every_provider() {
     assert!(db.contains("kms_key_id = aws_kms_key.data_key.arn"), "{db}");
     assert!(db.contains("skip_final_snapshot = false"), "{db}");
     assert!(
-        db.contains("final_snapshot_identifier = \"records-final\""),
+        db.contains("final_snapshot_identifier = format(\"%s-final-%s\", \"records\", random_id.records_final_id.hex)"),
         "{db}"
     );
     assert!(db.contains("performance_insights_enabled = true"), "{db}");
@@ -1613,7 +1613,16 @@ fn hardened_example_carries_the_posture_on_every_provider() {
 #[test]
 fn helper_provider_is_only_required_when_used() {
     let cat = Catalog::builtin();
-    let p = example("job-pipeline.ttg.json");
+    let mut p = example("job-pipeline.ttg.json");
+    // A final snapshot's name suffix is a `random_id`; this database takes none.
+    for n in p
+        .nodes
+        .values_mut()
+        .filter(|n| n.resource_type == "relational_database")
+    {
+        n.config
+            .insert("final_snapshot".into(), ttg_core::Value::Bool(false));
+    }
     let g = generate(&p, &cat, "aws", Tool::OpenTofu).unwrap();
     assert!(
         !g.files["versions.tf"].contains("random"),

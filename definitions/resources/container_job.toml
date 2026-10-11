@@ -79,6 +79,13 @@ default = 0
 description = "How often a failed run is retried (Azure, Google Cloud). ECS retries nothing by itself. Keep 0 for anything that must not run twice."
 
 [[fields]]
+name = "outbound_public_ip"
+label = "Public IP for outbound"
+type = "bool"
+default = false
+description = "Give the task a public IP so it can call out to the internet (image pull, secrets, APIs) from a public subnet with no NAT gateway; it stays unreachable from outside. AWS: the `<job>_run` output says `assign_public_ip = ENABLED`, which `aws ecs run-task` passes on. Azure and Google Cloud jobs reach the internet without one, so there it changes nothing."
+
+[[fields]]
 name = "env"
 label = "Environment variables"
 type = "struct_list"
@@ -205,7 +212,7 @@ cardinality = "optional"
 [providers.aws]
 status = "partial"
 file = "container"
-notes = "A Fargate task definition and nothing that runs it: start it with aws ecs run-task. The <job>_run output carries the cluster, the task definition and the network configuration."
+notes = "A Fargate task definition and nothing that runs it: start it with aws ecs run-task. The <job>_run output carries the cluster, the task definition and the network configuration, including whether the task gets a public IP ('Public IP for outbound')."
 
 [[providers.aws.checks]]
 when = { all = [ { relation = "iam_binding", absent = true }, { relation = "attribute_reference", target_type = "iam_role", absent = true } ] }
@@ -289,6 +296,7 @@ object.cluster          = { if = { ancestor = "container_environment" }, then = 
 object.task_definition  = { self_block = "main", attr = "arn" }
 object.subnets          = { relation = "network_membership", attr = "id", wrap = "list" }
 object.security_groups  = { relation = "attribute_reference", target_type = "security_group", attr = "id", wrap = "list" }
+object.assign_public_ip = { if = { field = "outbound_public_ip" }, then = { value = "ENABLED" } }
 
 [[providers.aws.blocks]]
 key = "exec_secrets"
@@ -366,9 +374,11 @@ the services roll out, for a migration) with the values of the `<job>_run` outpu
 
     aws ecs run-task --launch-type FARGATE \\
       --cluster <cluster> --task-definition <task definition> \\
-      --network-configuration 'awsvpcConfiguration={subnets=[<subnets>],securityGroups=[<security groups>],assignPublicIp=DISABLED}'
+      --network-configuration 'awsvpcConfiguration={subnets=[<subnets>],securityGroups=[<security groups>],assignPublicIp=<assign_public_ip>}'
 
-then wait for it (`aws ecs wait tasks-stopped`) and check the container's exit code
+where `<assign_public_ip>` is the output's `assign_public_ip` (`ENABLED` when the job has
+'Public IP for outbound', so it can reach the internet without a NAT gateway), or
+`DISABLED` when the output has none. Then wait for it (`aws ecs wait tasks-stopped`) and check the container's exit code
 (`aws ecs describe-tasks`). The caller needs `ecs:RunTask` on the task definition and
 `iam:PassRole` on its roles.
 """
@@ -402,7 +412,7 @@ Secret as a secret environment variable.
 [providers.azure]
 status = "full"
 file = "container"
-notes = "A Container Apps job with a manual trigger, in the enclosing Container Environment (or one of its own). Start it with az containerapp job start."
+notes = "A Container Apps job with a manual trigger, in the enclosing Container Environment (or one of its own). Start it with az containerapp job start. 'Public IP for outbound' changes nothing here: a job reaches the internet through its environment's outbound addresses."
 
 [[providers.azure.checks]]
 when = { all = [ { ancestor = "container_environment", absent = true }, { relation = "network_membership" }, { relation = "network_membership", target_provider_field = "delegation", equals = "app_environments", absent = true } ] }
@@ -679,7 +689,7 @@ with `az containerapp job execution list`.
 [providers.gcp]
 status = "full"
 file = "container"
-notes = "A Cloud Run job; start it with gcloud run jobs execute. Subnets become direct VPC egress."
+notes = "A Cloud Run job; start it with gcloud run jobs execute. Subnets become direct VPC egress. 'Public IP for outbound' changes nothing here: a Cloud Run job reaches the internet without one (with its egress through a linked subnet, that network needs Cloud NAT)."
 
 [[providers.gcp.checks]]
 when = { field = "cpu_architecture", equals = "arm64" }

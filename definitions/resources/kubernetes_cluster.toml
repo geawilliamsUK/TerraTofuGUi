@@ -402,6 +402,10 @@ namespace       = { value = "kube-system" }
 service_account = { value = "cluster-autoscaler" }
 role_arn        = { self_block = "autoscaler_role", attr = "arn" }
 
+# The most nodes the cluster can have: its own pool's maximum plus every pool on it.
+[providers.aws.limits]
+max_nodes = { func = "sum", args = [ { field = "max_nodes" }, { relation = "attachment", incoming = true, target_type = "kubernetes_node_pool", field = "max_nodes" } ] }
+
 [providers.aws.outputs]
 endpoint = { attr = "endpoint", description = "Kubernetes API endpoint" }
 name     = { attr = "name", description = "Cluster name (kubectl / aws eks update-kubeconfig)" }
@@ -554,6 +558,10 @@ resource = "terraform_data"
 [providers.azure.blocks.args]
 input = { func = "flatten", args = [ { relation = "network_membership", attr = "address_prefixes", wrap = "list" } ] }
 
+# The most nodes the cluster can have: its own pool's maximum plus every pool on it.
+[providers.azure.limits]
+max_nodes = { func = "sum", args = [ { field = "max_nodes" }, { relation = "attachment", incoming = true, target_type = "kubernetes_node_pool", field = "max_nodes" } ] }
+
 [providers.azure.outputs]
 fqdn        = { attr = "fqdn", description = "Kubernetes API host name" }
 oidc_issuer = { attr = "oidc_issuer_url", description = "OIDC issuer URL used by workload identity" }
@@ -691,6 +699,10 @@ resource = "terraform_data"
 
 [providers.gcp.blocks.args]
 input = { template = "{name}-nodes", transform = "kebab" }
+
+# The most nodes the cluster can have: its own pool's maximum plus every pool on it.
+[providers.gcp.limits]
+max_nodes = { func = "sum", args = [ { field = "max_nodes" }, { relation = "attachment", incoming = true, target_type = "kubernetes_node_pool", field = "max_nodes" } ] }
 
 [providers.gcp.outputs]
 endpoint = { attr = "endpoint", description = "Cluster API endpoint" }

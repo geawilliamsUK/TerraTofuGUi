@@ -515,7 +515,7 @@ pub fn run(full: &Project, cat: &Catalog, provider: &str) -> Vec<Diagnostic> {
                                 Some(e.id),
                                 sev,
                                 Code::Check,
-                                render_message(&chk.message, &e, Some(row)),
+                                render_message(p, cat, provider, &chk.message, &e, Some(row)),
                             );
                         }
                     }
@@ -527,7 +527,7 @@ pub fn run(full: &Project, cat: &Catalog, provider: &str) -> Vec<Diagnostic> {
                             Some(e.id),
                             sev,
                             Code::Check,
-                            render_message(&chk.message, &e, None),
+                            render_message(p, cat, provider, &chk.message, &e, None),
                         );
                     }
                 }
@@ -786,10 +786,10 @@ pub fn omit_checks(p: &Project, cat: &Catalog, provider: &str) -> Vec<(Id, Strin
                     rows.iter()
                         .enumerate()
                         .find(|(n, row)| condition_holds(p, cat, provider, &e, &chk.when, Some((row, *n))))
-                        .map(|(_, row)| render_message(&chk.message, &e, Some(row)))
+                        .map(|(_, row)| render_message(p, cat, provider, &chk.message, &e, Some(row)))
                 }
                 None => condition_holds(p, cat, provider, &e, &chk.when, None)
-                    .then(|| render_message(&chk.message, &e, None)),
+                    .then(|| render_message(p, cat, provider, &chk.message, &e, None)),
             };
             if let Some(msg) = fired {
                 out.push((e.id.to_string(), msg));
@@ -1034,6 +1034,14 @@ pub fn condition_holds_for(
             if f.absent {
                 return e.field(&f.field).is_none_or(|v| v.is_empty());
             }
+            if !f.has_row.is_empty() {
+                return field_rows(e, provider, &f.field).iter().any(|row| {
+                    f.has_row.iter().all(|(k, want)| {
+                        row.get(k)
+                            .is_some_and(|v| !v.is_empty() && want.matches(&v.display()))
+                    })
+                });
+            }
             let v = field_or_default(cat, provider, e, &f.field, false);
             let v = match f.transform {
                 Some(t) => v.map(|v| Value::Str(t.apply(&v.display()))),
@@ -1048,7 +1056,7 @@ pub fn condition_holds_for(
             }
             let cmp = f.compare();
             if !cmp.is_empty() {
-                return compare_holds(cat, provider, e, v.as_ref(), cmp);
+                return compare_holds(p, cat, provider, e, v.as_ref(), cmp);
             }
             if let Some(p) = prefix {
                 let s = v.as_ref().map(|v| v.display()).unwrap_or_default();
@@ -1069,7 +1077,7 @@ pub fn condition_holds_for(
             let v = field_or_default(cat, provider, e, &f.provider_field, true);
             let cmp = f.compare();
             if f.equals.is_none() && f.not_equals.is_none() && !cmp.is_empty() {
-                return compare_holds(cat, provider, e, v.as_ref(), cmp);
+                return compare_holds(p, cat, provider, e, v.as_ref(), cmp);
             }
             if f.equals.is_none() && f.not_equals.is_none() {
                 if let Some(p) = f.ends_with.as_deref().or(f.not_ends_with.as_deref()) {
@@ -1113,6 +1121,28 @@ pub fn condition_holds_for(
             };
             holds != i.absent
         }
+        Condition::Extra(x) => {
+            let block = x.block.clone().or_else(|| {
+                cat.mapping(e.resource_type, provider)
+                    .and_then(|m| m.blocks.iter().find(|b| b.key == "main").or(m.blocks.first()))
+                    .map(|b| b.key.clone())
+            });
+            let v = block
+                .and_then(|b| e.extra_args(provider, &b))
+                .and_then(|args| args.get(&x.extra));
+            let set = match (&x.equals, v) {
+                (Some(want), Some(v)) => {
+                    let text = match v {
+                        serde_json::Value::String(s) => s.clone(),
+                        other => other.to_string(),
+                    };
+                    &text == want
+                }
+                (Some(_), None) => false,
+                (None, v) => v.is_some_and(|v| !v.is_null()),
+            };
+            set != x.absent
+        }
         Condition::Not(n) => !condition_holds_for(p, cat, provider, e, &n.not, item, target),
         Condition::All(a) => a
             .all
@@ -1129,6 +1159,7 @@ pub fn condition_holds_for(
 /// which must hold. A bound naming another field reads that field (or its default); a
 /// value or bound that is not a number fails every comparison.
 fn compare_holds(
+    p: &Project,
     cat: &Catalog,
     provider: &str,
     e: &EntityRef,
@@ -1161,6 +1192,11 @@ fn compare_holds(
                     .as_ref()
                     .and_then(number)
             }
+            ttg_catalog::Bound::Limit(l) => Relation::from_key(&l.relation)
+                .map(|k| relation_targets_of_type(p, cat, e, k, l.target_type.as_deref()))
+                .and_then(|ts| ts.into_iter().next())
+                .and_then(|t| p.entity(&t))
+                .and_then(|t| limit_value(p, cat, provider, &t, &l.limit)),
         };
         let Some(y) = y else { return false };
         match *op {
@@ -1172,11 +1208,119 @@ fn compare_holds(
     })
 }
 
+/// One of an entity's `limits` for a provider (`ProviderMapping::limits`): what it can
+/// reach at its size, worked out from its own values. `None` when the mapping declares
+/// no such limit or the value is not known (an instance class the table does not list).
+pub fn limit_value(p: &Project, cat: &Catalog, provider: &str, e: &EntityRef, name: &str) -> Option<f64> {
+    let src = cat.mapping(e.resource_type, provider)?.limits.get(name)?;
+    let vals = limit_values(p, cat, provider, e, src);
+    (vals.len() == 1).then(|| vals[0])
+}
+
+/// The numbers a limit source yields: one, or several for a related entity's field
+/// (which `sum` / `min` / `max` combine), or none when it is not known.
+fn limit_values(p: &Project, cat: &Catalog, provider: &str, e: &EntityRef, src: &ArgSource) -> Vec<f64> {
+    use ttg_catalog::fields::number;
+    let num = |v: Option<Value>| v.as_ref().and_then(number).into_iter().collect::<Vec<_>>();
+    match src {
+        ArgSource::Literal(l) => l
+            .value
+            .as_float()
+            .or(l.value.as_integer().map(|i| i as f64))
+            .into_iter()
+            .collect(),
+        ArgSource::Field(f) => match e.field(&f.field).filter(|v| !v.is_empty()) {
+            Some(v) => num(Some(v.clone())),
+            None => match &f.fallback {
+                Some(fb) => limit_values(p, cat, provider, e, fb),
+                None => num(field_or_default(cat, provider, e, &f.field, false)),
+            },
+        },
+        ArgSource::ProviderField(f) => match e
+            .provider_field(provider, &f.provider_field)
+            .filter(|v| !v.is_empty())
+        {
+            Some(v) => num(Some(v.clone())),
+            None => match &f.fallback {
+                Some(fb) => limit_values(p, cat, provider, e, fb),
+                None => num(field_or_default(cat, provider, e, &f.provider_field, true)),
+            },
+        },
+        ArgSource::Map(m) => {
+            let key = e
+                .field(&m.map)
+                .or_else(|| e.provider_field(provider, &m.map))
+                .filter(|v| !v.is_empty())
+                .cloned()
+                .or_else(|| field_or_default(cat, provider, e, &m.map, false))
+                .or_else(|| field_or_default(cat, provider, e, &m.map, true));
+            key.and_then(|k| m.table.get(&k.display()))
+                .and_then(|t| t.as_float().or(t.as_integer().map(|i| i as f64)))
+                .into_iter()
+                .collect()
+        }
+        ArgSource::If(i) => {
+            if condition_holds(p, cat, provider, e, &i.cond, None) {
+                limit_values(p, cat, provider, e, &i.then)
+            } else {
+                i.otherwise
+                    .as_ref()
+                    .map(|o| limit_values(p, cat, provider, e, o))
+                    .unwrap_or_default()
+            }
+        }
+        ArgSource::Func(f) => {
+            let parts: Vec<Vec<f64>> = f
+                .args
+                .iter()
+                .map(|a| limit_values(p, cat, provider, e, a))
+                .collect();
+            // An argument that is not known makes the whole value unknown, except a
+            // related entity's field with no entities, which adds nothing.
+            if parts
+                .iter()
+                .zip(&f.args)
+                .any(|(v, a)| v.is_empty() && !matches!(a, ArgSource::Relation(_)))
+            {
+                return Vec::new();
+            }
+            let all: Vec<f64> = parts.into_iter().flatten().collect();
+            let one = match f.func.as_str() {
+                "sum" => Some(all.iter().sum()),
+                "min" => all.iter().copied().reduce(f64::min),
+                "max" => all.iter().copied().reduce(f64::max),
+                "floor" => all.first().map(|x| x.floor()),
+                _ => None,
+            };
+            one.into_iter().collect()
+        }
+        ArgSource::Relation(r) => {
+            let Some(name) = &r.field else { return Vec::new() };
+            let Some(kind) = Relation::from_key(&r.relation) else {
+                return Vec::new();
+            };
+            let others = if r.incoming {
+                relation_sources_of_type(p, e, kind, r.target_type.as_deref())
+            } else {
+                relation_targets_of_type(p, cat, e, kind, r.target_type.as_deref())
+            };
+            others
+                .iter()
+                .filter_map(|t| p.entity(t))
+                .filter_map(|t| field_or_default(cat, provider, &t, name, false))
+                .filter_map(|v| number(&v))
+                .collect()
+        }
+        _ => Vec::new(),
+    }
+}
+
 /// The value of a project setting a `{ setting = "…" }` condition may test (the list is
 /// `ttg_catalog::CONDITION_SETTINGS`; the catalog refuses any other name).
 fn setting_value(p: &Project, name: &str) -> Option<Value> {
     match name {
         "kubernetes_manifests" => Some(Value::Bool(p.settings.kubernetes_manifests)),
+        "disposable" => Some(Value::Bool(p.settings.disposable)),
         _ => None,
     }
 }
@@ -1227,8 +1371,48 @@ fn field_rows(e: &EntityRef, provider: &str, field: &str) -> Vec<Record> {
     }
 }
 
-fn render_message(msg: &str, e: &EntityRef, item: Option<&Record>) -> String {
+/// A check's message with its placeholders filled in: `{name}`, `{item.<x>}` (the row),
+/// `{field.<x>}` (a field of the entity, or its default) and `{target_limit.<x>}` (that
+/// limit of the first entity this one links to that has it, e.g. the connections the
+/// watched database allows).
+fn render_message(
+    p: &Project,
+    cat: &Catalog,
+    provider: &str,
+    msg: &str,
+    e: &EntityRef,
+    item: Option<&Record>,
+) -> String {
     let mut out = msg.replace("{name}", e.name);
+    let placeholders = |prefix: &str, s: &str| -> Vec<String> {
+        s.match_indices(prefix)
+            .filter_map(|(i, _)| {
+                let rest = &s[i + prefix.len()..];
+                rest.find('}').map(|j| rest[..j].to_string())
+            })
+            .collect()
+    };
+    for f in placeholders("{field.", &out.clone()) {
+        let v = field_or_default(cat, provider, e, &f, false)
+            .map(|v| v.display())
+            .unwrap_or_default();
+        out = out.replace(&format!("{{field.{f}}}"), &v);
+    }
+    for l in placeholders("{target_limit.", &out.clone()) {
+        let v = p
+            .edges_from(e.id)
+            .filter_map(|edge| p.entity(&edge.target))
+            .find_map(|t| limit_value(p, cat, provider, &t, &l))
+            .map(|x| {
+                if x.fract() == 0.0 {
+                    format!("{}", x as i64)
+                } else {
+                    format!("{x}")
+                }
+            })
+            .unwrap_or_else(|| "?".into());
+        out = out.replace(&format!("{{target_limit.{l}}}"), &v);
+    }
     if let Some(r) = item {
         for (k, v) in r {
             out = out.replace(&format!("{{item.{k}}}"), &v.display());
@@ -2269,7 +2453,9 @@ fn canonical_in(schema: &ttg_schema::BlockSchema, key: &str, v: serde_json::Valu
         )
     };
     match v {
-        J::Object(o) if !o.contains_key("$ref") && !o.contains_key("$raw") => fix(o),
+        J::Object(o) if !o.contains_key("$ref") && !o.contains_key("$raw") && !o.contains_key("$var") => {
+            fix(o)
+        }
         J::Array(items) => J::Array(
             items
                 .into_iter()
@@ -2286,7 +2472,7 @@ fn canonical_in(schema: &ttg_schema::BlockSchema, key: &str, v: serde_json::Valu
 fn json_matches(kind: ttg_schema::TypeKind, v: &serde_json::Value) -> bool {
     use ttg_schema::TypeKind as K;
     if v.as_object()
-        .is_some_and(|o| o.contains_key("$ref") || o.contains_key("$raw"))
+        .is_some_and(|o| o.contains_key("$ref") || o.contains_key("$raw") || o.contains_key("$var"))
     {
         return true;
     }

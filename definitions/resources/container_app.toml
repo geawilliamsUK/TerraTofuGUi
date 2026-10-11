@@ -92,7 +92,14 @@ name = "public"
 label = "Public ingress"
 type = "bool"
 default = false
-description = "Reachable from the internet (Azure: external ingress; Cloud Run: all traffic and public invocation; AWS: a public IP on the tasks). Prefer a load balancer forwarding to the app for production."
+description = "Reachable from the internet (Azure: external ingress; Cloud Run: all traffic and public invocation; AWS: a public IP on the tasks). Prefer a load balancer forwarding to the app for production. For a public IP only so the app can call out, use 'Public IP for outbound' instead."
+
+[[fields]]
+name = "outbound_public_ip"
+label = "Public IP for outbound"
+type = "bool"
+default = false
+description = "Give the app a public IP so it can call out to the internet (image pulls, secrets, third-party APIs) from a public subnet with no NAT gateway, without making it reachable: inbound traffic is still only what its security groups admit. AWS: `assign_public_ip` on the Fargate tasks. Azure Container Apps and Cloud Run reach the internet without one, so there it changes nothing (Cloud Run with its egress through a linked subnet needs Cloud NAT on that network instead)."
 
 [[fields]]
 name = "background_worker"
@@ -373,7 +380,8 @@ block = "network_configuration"
 [providers.aws.blocks.nested.args]
 subnets          = { relation = "network_membership", attr = "id", wrap = "list" }
 security_groups  = { relation = "attribute_reference", target_type = "security_group", attr = "id", wrap = "list" }
-assign_public_ip = { field = "public" }
+# A public IP for public ingress, or only for calling out (no NAT gateway).
+assign_public_ip = { if = { field = "outbound_public_ip" }, then = { value = true }, else = { field = "public" } }
 
 # A load balancer that forwards here: ECS registers each task's IP in its target group.
 [[providers.aws.blocks.nested]]
@@ -464,7 +472,9 @@ task_definition_arn = { block = "task", attr = "arn", description = "Task defini
 
 [[providers.aws.manual_steps]]
 title = "Front the service with a load balancer for real public traffic"
-when = { all = [ { field = "public" }, { relation = "attachment", incoming = true, target_type = "load_balancer", absent = true } ] }
+# Not when a load balancer already forwards to it (a link, or a `load_balancer` block set
+# as an extra argument), and never for a background worker, which takes no traffic.
+when = { all = [ { field = "public" }, { field = "background_worker", not_equals = "true" }, { relation = "attachment", incoming = true, target_type = "load_balancer", absent = true }, { extra = "load_balancer", absent = true } ] }
 body = """
 `assign_public_ip = true` gives each task a public IP that changes on every deployment.
 For a stable public entry point add a Load Balancer and link it 'Forwards to' this app:
@@ -525,7 +535,7 @@ the engines this type creates. Inject the auth token from a Secret instead.
 [providers.azure]
 status = "full"
 file = "container"
-notes = "A Container App in the enclosing Container Environment (or one of its own). Secret variables are Key Vault references read with the execution identity (or the only one); a linked registry is pulled with that identity, which gets AcrPull."
+notes = "A Container App in the enclosing Container Environment (or one of its own). Secret variables are Key Vault references read with the execution identity (or the only one); a linked registry is pulled with that identity, which gets AcrPull. 'Public IP for outbound' changes nothing here: a Container App reaches the internet through its environment's own outbound addresses."
 
 # VNet integration needs a subnet delegated to Microsoft.App/environments (and /23 or
 # larger: checked by the built-in network checks). Inside a Container Environment the
@@ -852,7 +862,7 @@ link the bucket with 'Reads' when the app only reads it.
 [providers.gcp]
 status = "full"
 file = "container"
-notes = "A Cloud Run (v2) service. Public ingress grants allUsers the invoker role; a load balancer in front makes it internal-and-load-balancer only; subnets become direct VPC egress. A background worker keeps its CPU allocated (min = max instances), and still answers Cloud Run's startup probe on its port."
+notes = "A Cloud Run (v2) service. Public ingress grants allUsers the invoker role; a load balancer in front makes it internal-and-load-balancer only; subnets become direct VPC egress. A background worker keeps its CPU allocated (min = max instances), and still answers Cloud Run's startup probe on its port. 'Public IP for outbound' changes nothing here: Cloud Run reaches the internet without one (with its egress through a linked subnet, that network needs Cloud NAT)."
 
 [[providers.gcp.checks]]
 when = { all = [ { field = "background_worker" }, { relation = "attachment", incoming = true, target_type = "load_balancer" } ] }

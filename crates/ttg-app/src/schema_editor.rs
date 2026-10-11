@@ -305,7 +305,7 @@ fn value_editor(
     );
     let is_ref = value
         .as_object()
-        .is_some_and(|o| o.contains_key("$ref") || o.contains_key("$raw"));
+        .is_some_and(|o| o.contains_key("$ref") || o.contains_key("$raw") || o.contains_key("$var"));
     ui.horizontal(|ui| {
         match (kind, is_block, is_ref) {
             (_, _, true) => {
@@ -447,6 +447,10 @@ fn value_editor(
 fn describe_ref(app: &TtgApp, v: &J) -> String {
     if let Some(raw) = v.get("$raw").and_then(|r| r.as_str()) {
         return format!("raw: {raw}");
+    }
+    if let Some(d) = v.get("$var") {
+        let name = d.get("name").and_then(|x| x.as_str()).unwrap_or("?");
+        return format!("variable: var.{name}");
     }
     if let Some(r) = v.get("$ref") {
         let key = r.get("entity").and_then(|x| x.as_str()).unwrap_or("?");

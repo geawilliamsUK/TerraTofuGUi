@@ -50,7 +50,11 @@ resource_group_name        = { ancestor = "resource_group", attr = "name" }
 tenant_id                  = { self_data = "current", attr = "tenant_id" }
 sku_name                   = { value = "standard" }
 rbac_authorization_enabled = { value = true }
+# Purge protection stays off, so `destroy` can purge the vault (and the provider's
+# default `purge_soft_delete_on_destroy` does) and a redeploy can take its name again. A
+# disposable project also keeps soft-deleted secrets for the shortest period Azure allows.
 purge_protection_enabled   = { value = false }
+soft_delete_retention_days = { if = { setting = "disposable" }, then = { value = 7 } }
 
 [providers.azure.outputs]
 uri = { attr = "vault_uri", description = "Vault URI" }

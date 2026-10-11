@@ -146,6 +146,20 @@ pub fn checks(p: &Project, cat: &Catalog) -> Vec<Diagnostic> {
             );
         }
     }
+    for env in p
+        .settings
+        .disposable_environments
+        .keys()
+        .filter(|e| unknown_env(e))
+    {
+        push(
+            None,
+            Severity::Warning,
+            format!(
+                "\"{env}\" is marked disposable (or not) but is not an environment of the project: ignored"
+            ),
+        );
+    }
     let known = |n: &str| {
         p.settings.variables.contains_key(n) || ttg_core::environment::BUILTIN_VARIABLES.contains(&n)
     };

@@ -269,6 +269,10 @@ struct Emitter<'a> {
     legacy: HashMap<String, String>,
     vars: IndexMap<String, VarSpec>,
     used_vars: HashSet<String>,
+    /// Every `var.<name>` a hand-written `$raw` names. A variable a mapping would declare
+    /// stays declared while one of these still uses it, even when an extra argument has
+    /// replaced the mapping's own use of it (`declare_raw_vars`).
+    raw_vars: Vec<String>,
     /// Provider aliases some emitted block sent itself to; only these get a block.
     used_aliases: HashSet<String>,
     manual: Vec<ManualEntry>,
@@ -354,6 +358,7 @@ pub(crate) fn emit_unchecked(
         plan,
         vars: IndexMap::new(),
         used_vars: HashSet::new(),
+        raw_vars: Vec::new(),
         used_aliases: HashSet::new(),
         manual: Vec::new(),
         manual_refs_done: HashSet::new(),
@@ -659,6 +664,7 @@ pub(crate) fn emit_unchecked(
         }
     }
 
+    em.declare_raw_vars();
     let vars: Vec<&VarSpec> = em
         .vars
         .values()
@@ -1235,6 +1241,22 @@ fn with_depends_on(block: Block, deps: Vec<Expression>) -> Block {
     b.build()
 }
 
+/// A number as HCL: whole numbers without a fraction.
+fn number_expr(x: f64) -> Expression {
+    if x.fract() == 0.0 && x.abs() < 1e15 {
+        Expression::Number(Number::from(x as i64))
+    } else {
+        Number::from_f64(x)
+            .map(Expression::Number)
+            .unwrap_or(Expression::Null)
+    }
+}
+
+/// The default of a variable an extra argument declares (`{"$var": {…, "default": …}}`).
+fn json_default(v: &serde_json::Value) -> Option<Expression> {
+    hcl::to_expression(v).ok()
+}
+
 pub(crate) fn toml_expr(v: &toml::Value) -> Option<Expression> {
     Some(match v {
         toml::Value::String(s) => Expression::String(s.clone()),
@@ -1569,6 +1591,19 @@ impl<'a> Emitter<'a> {
                 if let Some(raw) = o.get("$raw").and_then(|r| r.as_str()) {
                     return self.raw_with_refs(raw, o.get("refs"), at);
                 }
+                if let Some(v) = o.get("$var") {
+                    let spec = crate::refs::var_decl(v).map_err(|m| GenError::Emit(format!("{at}: {m}")))?;
+                    let name = spec.name.clone();
+                    self.vars.entry(name.clone()).or_insert(VarSpec {
+                        name: spec.name,
+                        var_type: spec.var_type,
+                        description: spec.description,
+                        default: spec.default.as_ref().and_then(json_default),
+                        sensitive: spec.sensitive,
+                    });
+                    self.used_vars.insert(name.clone());
+                    return Ok(var_ref(&name));
+                }
                 if let Some(r) = o.get("$ref") {
                     let key = r
                         .get("entity")
@@ -1612,7 +1647,106 @@ impl<'a> Emitter<'a> {
                 text = text.replace(&format!("@{name}@"), &x.to_string());
             }
         }
+        if let Ok(expr) = crate::refs::parse_raw(&text) {
+            for a in crate::refs::addresses(&expr, &[]) {
+                if let crate::refs::Address::Var(n) = a {
+                    if !self.raw_vars.contains(&n) {
+                        self.raw_vars.push(n);
+                    }
+                }
+            }
+        }
         Ok(raw_expr(&text))
+    }
+
+    /// Declare the variables hand-written `$raw` expressions use. One the export already
+    /// knows (a provider variable, or one a mapping registered while resolving) is marked
+    /// used; otherwise it is looked up where a mapping would have declared it — a
+    /// mapping-level variable of an emitted entity, or an entity's own `entity_var`
+    /// (`<slug>_<name>`) in whichever branch of its mapping declares it — so an override
+    /// that replaced the mapping's argument but still reads its variable keeps it
+    /// declared. A stand-in for an external entity (`<slug>_<attr>`) is declared the way
+    /// a reference to it would declare it. Anything else is left undeclared; the `$raw`
+    /// diagnostics already reported it.
+    fn declare_raw_vars(&mut self) {
+        for name in self.raw_vars.clone() {
+            if self.used_vars.contains(&name) {
+                continue;
+            }
+            if self.vars.contains_key(&name) {
+                self.used_vars.insert(name);
+                continue;
+            }
+            if let Some(spec) = self.declarable_var(&name) {
+                self.vars.insert(name.clone(), spec);
+                self.used_vars.insert(name);
+            }
+        }
+    }
+
+    /// Where a mapping of this export would declare `var.<name>` (see `declare_raw_vars`).
+    /// A `{"$var": …}` in any extra argument declares one too.
+    fn declarable_var(&self, name: &str) -> Option<VarSpec> {
+        let emitted: Vec<&Id> = self.plan.blocks.keys().map(|(id, _)| id).collect();
+        for id in &emitted {
+            let Some(e) = self.p.entity(id) else { continue };
+            let Some(m) = self.cat.mapping(e.resource_type, self.provider) else {
+                continue;
+            };
+            if let Some(v) = m.variables.iter().find(|v| v.name == name) {
+                return Some(VarSpec {
+                    name: v.name.clone(),
+                    var_type: v.var_type.clone(),
+                    description: v.description.clone(),
+                    default: v.default.as_ref().and_then(toml_expr),
+                    sensitive: v.sensitive,
+                });
+            }
+            let slug = self.p.hcl_name(e.id);
+            for v in m.entity_vars() {
+                if format!("{slug}_{}", v.entity_var) == name {
+                    let description = self
+                        .render_template(&e, &v.description, None)
+                        .unwrap_or_else(|_| v.description.clone());
+                    return Some(VarSpec {
+                        name: name.to_string(),
+                        var_type: v.var_type.clone(),
+                        description,
+                        default: v.default.as_ref().and_then(toml_expr),
+                        sensitive: v.sensitive,
+                    });
+                }
+            }
+        }
+        if let Some(d) = crate::refs::extra_var_decls(self.p, self.provider)
+            .into_iter()
+            .find(|d| d.name == name)
+        {
+            return Some(VarSpec {
+                name: d.name,
+                var_type: d.var_type,
+                description: d.description,
+                default: d.default.as_ref().and_then(json_default),
+                sensitive: d.sensitive,
+            });
+        }
+        // A stand-in for an entity this export does not create.
+        self.p.entities().iter().find_map(|t| {
+            let attr = name.strip_prefix(&format!("{}_", self.p.hcl_name(t.id)))?;
+            let external = t.manual
+                || self.bootstrap_key.as_deref() == Some(t.id)
+                || self.cat.mapping(t.resource_type, self.provider).is_none();
+            (external && !attr.is_empty()).then(|| VarSpec {
+                name: name.to_string(),
+                var_type: "string".into(),
+                description: format!(
+                    "`{attr}` of \"{}\", which this configuration does not create. Supply after creating it.",
+                    t.name
+                ),
+                default: None,
+                sensitive: false,
+            })
+        })
     }
 
     /// A nested block definition yields zero or more blocks (more than one when it has
@@ -1981,6 +2115,17 @@ impl<'a> Emitter<'a> {
                     if let Some(key) = &r.connection {
                         if let Some(x) = self.connection_value(&subject, key)? {
                             exprs.push(x);
+                        }
+                        continue;
+                    }
+                    // `limit = "…"`: a number worked out from the target's own values
+                    // (a database's connection limit at its instance class).
+                    if let Some(name) = &r.limit {
+                        let value = self.p.entity(&subject).and_then(|te| {
+                            diagnostics::limit_value(self.p, self.cat, self.provider, &te, name)
+                        });
+                        if let Some(x) = value {
+                            exprs.push(number_expr(x));
                         }
                         continue;
                     }

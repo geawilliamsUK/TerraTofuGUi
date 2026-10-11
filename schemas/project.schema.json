@@ -159,6 +159,17 @@
         "posture": {
           "description": "Which posture rules (`ttg_codegen::posture`) this project turns off.",
           "$ref": "#/$defs/PostureSettings"
+        },
+        "disposable": {
+          "description": "Built to be destroyed and created again (a staging stack torn down every night):\nthe mappings then leave nothing behind that would stop the next `apply` — no final\ndatabase snapshot, secrets deleted without a recovery window, buckets emptied on\ndestroy, key vaults that can be purged. Off by default.",
+          "type": "boolean"
+        },
+        "disposable_environments": {
+          "description": "Environment → whether it is disposable, where it differs from `disposable`\n(staging yes, prod no). Resolved by `Project::for_environment`.",
+          "type": "object",
+          "additionalProperties": {
+            "type": "boolean"
+          }
         }
       }
     },

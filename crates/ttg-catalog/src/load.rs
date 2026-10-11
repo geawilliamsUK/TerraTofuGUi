@@ -475,6 +475,7 @@ impl Catalog {
                 manual_steps: Vec::new(),
                 checks: Vec::new(),
                 connection: IndexMap::new(),
+                limits: IndexMap::new(),
             },
         );
         let def = ResourceDef {

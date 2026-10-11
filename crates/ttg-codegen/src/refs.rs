@@ -338,6 +338,100 @@ pub(crate) fn bootstrap_key(layer: &Project, cat: &Catalog, provider: &str) -> O
         .and_then(|e| e.key)
 }
 
+/// An input variable an extra argument declares and uses in place:
+/// `{"$var": {"name": "release_tag", "type": "string", "description": "…",
+/// "sensitive": false, "default": "latest"}}` becomes `var.release_tag`, declared in
+/// `variables.tf`. Only `name` is required; the type defaults to `string`.
+#[derive(Debug, Clone, PartialEq)]
+pub struct VarDecl {
+    pub name: String,
+    pub var_type: String,
+    pub description: String,
+    pub sensitive: bool,
+    pub default: Option<serde_json::Value>,
+}
+
+/// Read a `$var` value, refusing a name Terraform would not accept, a type that is not
+/// a type expression, and keys it does not know.
+pub fn var_decl(v: &serde_json::Value) -> Result<VarDecl, String> {
+    let o = v
+        .as_object()
+        .ok_or("$var must be an object: {\"name\": …, \"type\": …}")?;
+    if let Some(k) = o
+        .keys()
+        .find(|k| !["name", "type", "description", "sensitive", "default"].contains(&k.as_str()))
+    {
+        return Err(format!(
+            "$var has an unknown key \"{k}\" (name, type, description, sensitive, default)"
+        ));
+    }
+    let name = o.get("name").and_then(|x| x.as_str()).unwrap_or_default();
+    let ok = name
+        .chars()
+        .next()
+        .is_some_and(|c| c.is_ascii_alphabetic() || c == '_')
+        && name
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-');
+    if !ok {
+        return Err(format!(
+            "$var needs a \"name\" that is a valid variable name, not \"{name}\""
+        ));
+    }
+    let var_type = o
+        .get("type")
+        .and_then(|x| x.as_str())
+        .unwrap_or("string")
+        .to_string();
+    if parse_raw(&var_type).is_err() {
+        return Err(format!(
+            "$var \"{name}\" has a type that is not a type expression: {var_type}"
+        ));
+    }
+    Ok(VarDecl {
+        name: name.to_string(),
+        var_type,
+        description: o
+            .get("description")
+            .and_then(|x| x.as_str())
+            .unwrap_or_default()
+            .to_string(),
+        sensitive: o.get("sensitive").and_then(|x| x.as_bool()).unwrap_or(false),
+        default: o.get("default").cloned(),
+    })
+}
+
+/// Every well-formed `$var` in the extra arguments of a project's entities for one
+/// provider, in entity order (the first declaration of a name wins).
+pub fn extra_var_decls(p: &Project, provider: &str) -> Vec<VarDecl> {
+    fn walk(v: &serde_json::Value, out: &mut Vec<VarDecl>) {
+        match v {
+            serde_json::Value::Array(items) => items.iter().for_each(|x| walk(x, out)),
+            serde_json::Value::Object(o) => {
+                if let Some(d) = o.get("$var") {
+                    if let Ok(d) = var_decl(d) {
+                        if !out.iter().any(|x| x.name == d.name) {
+                            out.push(d);
+                        }
+                    }
+                } else if !o.contains_key("$raw") && !o.contains_key("$ref") {
+                    o.values().for_each(|x| walk(x, out));
+                }
+            }
+            _ => {}
+        }
+    }
+    let mut out = Vec::new();
+    for e in p.entities() {
+        if let Some(blocks) = e.extra.get(provider) {
+            for args in blocks.values() {
+                args.values().for_each(|v| walk(v, &mut out));
+            }
+        }
+    }
+    out
+}
+
 /// `var.<name>` values the export can declare: the provider's variables, the state
 /// passphrase, the variables of the mappings it emits, and the per-entity variables
 /// (`<slug>_<name>`: entity variables and the stand-ins for external entities).
@@ -355,26 +449,55 @@ fn declared_vars(p: &Project, cat: &Catalog, provider: &str, plan: &Plan) -> Var
         .chain(plan.data.keys())
         .map(|(id, _)| id)
         .collect();
+    if !p.settings.environments.is_empty() {
+        names.insert(crate::environments::ENVIRONMENT_VAR.to_string());
+    }
     for id in emitted {
-        if let Some(m) = p.entity(id).and_then(|e| cat.mapping(e.resource_type, provider)) {
+        let Some(e) = p.entity(id) else { continue };
+        if let Some(m) = cat.mapping(e.resource_type, provider) {
             names.extend(m.variables.iter().map(|v| v.name.clone()));
+            // Entity variables, from whichever branch of the mapping declares them: the
+            // export declares one a `$raw` uses even when an override replaced the
+            // mapping's own use of it.
+            let slug = p.hcl_name(e.id);
+            names.extend(m.entity_vars().iter().map(|v| format!("{slug}_{}", v.entity_var)));
         }
     }
+    // Stand-ins for entities the export does not create (`<slug>_<attr>`).
+    let skip = bootstrap_key(p, cat, provider);
     let prefixes = p
         .entities()
         .iter()
-        .map(|e| format!("{}_", ttg_core::slugify(e.name)))
+        .filter(|e| {
+            e.manual || skip.as_deref() == Some(e.id) || cat.mapping(e.resource_type, provider).is_none()
+        })
+        .map(|e| format!("{}_", p.hcl_name(e.id)))
         .collect();
-    VarSet { names, prefixes }
+    let extra = extra_var_decls(p, provider)
+        .into_iter()
+        .map(|d| (d.name.clone(), d))
+        .collect();
+    VarSet {
+        names,
+        prefixes,
+        extra,
+    }
 }
 
 struct VarSet {
     names: HashSet<String>,
     prefixes: Vec<String>,
+    /// Variables extra arguments declare with `$var`, first declaration of each name.
+    extra: HashMap<String, VarDecl>,
 }
 
 impl VarSet {
     fn contains(&self, name: &str) -> bool {
+        self.declared(name) || self.extra.contains_key(name)
+    }
+
+    /// Declared by the export itself (not by a `$var`).
+    fn declared(&self, name: &str) -> bool {
         self.names.contains(name) || self.prefixes.iter().any(|p| name.starts_with(p.as_str()))
     }
 }
@@ -433,6 +556,8 @@ impl Checker<'_> {
                         Some(text) => self.raw(text, o.get("refs"), at),
                         None => self.diag(Severity::Error, format!("$raw in {at} must be a string")),
                     }
+                } else if let Some(d) = o.get("$var") {
+                    self.var(d, at);
                 } else if let Some(r) = o.get("$ref") {
                     self.reference(r, at);
                 } else {
@@ -442,6 +567,31 @@ impl Checker<'_> {
                 }
             }
             _ => {}
+        }
+    }
+
+    /// A `$var`: well formed, not a name the export already declares, and the same
+    /// declaration wherever the name is declared.
+    fn var(&mut self, d: &serde_json::Value, at: &str) {
+        let d = match var_decl(d) {
+            Ok(d) => d,
+            Err(m) => return self.diag(Severity::Error, format!("{m} (in {at})")),
+        };
+        if self.vars.declared(&d.name) {
+            let msg = format!(
+                "$var in {at} declares var.{}, which the export already declares; read it with {{\"$raw\": \"var.{}\"}} instead",
+                d.name, d.name
+            );
+            return self.diag(Severity::Error, msg);
+        }
+        if let Some(first) = self.vars.extra.get(&d.name) {
+            if first != &d {
+                let msg = format!(
+                    "$var in {at} declares var.{} differently from another $var of the same name; declare it the same way everywhere",
+                    d.name
+                );
+                self.diag(Severity::Error, msg);
+            }
         }
     }
 

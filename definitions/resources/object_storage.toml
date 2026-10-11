@@ -112,13 +112,20 @@ message = "\"{name}\" receives access logs, so it keeps SSE-S3 encryption: S3 ca
 when = { all = [ { field = "cors_methods" }, { field = "cors_origins", absent = true } ] }
 message = "\"{name}\" sets CORS allowed methods with no CORS allowed origins: no CORS configuration is generated until an origin is set"
 
+[[providers.aws.checks]]
+when = { all = [ { setting = "disposable" }, { field = "versioning" }, { any = [ { extra = "force_destroy", equals = "false" }, { extra = "force_destroy", equals = "null" } ] } ] }
+message = "\"{name}\" is a versioned bucket in a disposable project, but an extra argument keeps `force_destroy` off: destroying it fails as soon as it holds an object version"
+
 [[providers.aws.blocks]]
 key = "main"
 resource = "aws_s3_bucket"
 
 [providers.aws.blocks.args]
-bucket = { provider_field = "bucket_name" }
-tags   = { object = { Name = { field = "name" } } }
+bucket        = { provider_field = "bucket_name" }
+# A disposable project empties the bucket on destroy, so the next destroy is not stopped
+# by the objects (and object versions) it holds.
+force_destroy = { if = { setting = "disposable" }, then = { value = true } }
+tags          = { object = { Name = { field = "name" } } }
 
 [[providers.aws.blocks]]
 key = "versioning"
@@ -435,6 +442,10 @@ message = "\"{name}\": set a Google Cloud bucket name; bucket names are global a
 when = { all = [ { field = "cors_methods" }, { field = "cors_origins", absent = true } ] }
 message = "\"{name}\" sets CORS allowed methods with no CORS allowed origins: no CORS configuration is generated until an origin is set"
 
+[[providers.gcp.checks]]
+when = { all = [ { setting = "disposable" }, { field = "versioning" }, { any = [ { extra = "force_destroy", equals = "false" }, { extra = "force_destroy", equals = "null" } ] } ] }
+message = "\"{name}\" is a versioned bucket in a disposable project, but an extra argument keeps `force_destroy` off: destroying it fails as soon as it holds an object version"
+
 [[providers.gcp.blocks]]
 key = "main"
 resource = "google_storage_bucket"
@@ -444,7 +455,7 @@ name                        = { provider_field = "bucket_name", fallback = { fie
 location                    = { var = "region" }
 uniform_bucket_level_access = { value = true }
 public_access_prevention    = { if = { field = "block_public_access" }, then = { value = "enforced" }, else = { value = "inherited" } }
-force_destroy               = { value = false }
+force_destroy               = { if = { setting = "disposable" }, then = { value = true }, else = { value = false } }
 labels                      = { object = { name = { field = "name", transform = "kebab" } } }
 
 [[providers.gcp.blocks.nested]]
