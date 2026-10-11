@@ -96,6 +96,22 @@ pub fn show(app: &mut TtgApp, ui: &mut Ui) {
                     app.tidy(None);
                     ui.close();
                 }
+                if ui
+                    .button("Tidy by tiers")
+                    .on_hover_text("Lay the diagram out in bands left to right — edge (DNS, CDN, WAF, certificates), public (load balancers, gateways, public subnets), application, data, regional services (identity, secrets, logs, alarms) — with one row per availability zone, inside every network too, and fit containers and subnets to what they hold")
+                    .clicked()
+                {
+                    app.tidy_tiers(false);
+                    ui.close();
+                }
+                if ui
+                    .button("Tidy by tiers, top to bottom")
+                    .on_hover_text("The same bands stacked top to bottom, availability zones side by side")
+                    .clicked()
+                {
+                    app.tidy_tiers(true);
+                    ui.close();
+                }
                 ui.separator();
                 let two = app.selection.len() >= 2;
                 let three = app.selection.len() >= 3;
@@ -166,6 +182,24 @@ pub fn show(app: &mut TtgApp, ui: &mut Ui) {
                 app.edge_style == EdgeStyle::Orthogonal,
                 egui::Checkbox::new(&mut app.avoid_obstacles, "Route around nodes"),
             );
+            ui.separator();
+            let mut hide_monitoring = app.filter.hide_monitoring;
+            if ui
+                .checkbox(&mut hide_monitoring, "Hide monitoring links")
+                .on_hover_text("Draw no links from or to alarms, log groups, audit trails and budgets (what they watch, what logs to them, where they notify). The resources stay; saved with the active view.")
+                .changed()
+            {
+                let mut f = app.filter.clone();
+                f.hide_monitoring = hide_monitoring;
+                app.set_filter(f);
+            }
+            ui.checkbox(&mut app.show_region_frame, "Region frame")
+                .on_hover_text("A light frame around the drawing naming the provider and region it is created in; resources created through another region's provider are badged with it. Never exported.");
+            ui.label("Security group rules");
+            use crate::rule_edges::RuleEdges;
+            ui.radio_value(&mut app.rule_edges, RuleEdges::Groups, "Between the groups");
+            ui.radio_value(&mut app.rule_edges, RuleEdges::Members, "Between what carries them");
+            ui.radio_value(&mut app.rule_edges, RuleEdges::Off, "Not drawn");
             crate::view_tools::view_menu(app, ui);
         });
         #[cfg(feature = "mcp")]

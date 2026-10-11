@@ -92,6 +92,7 @@ pub fn show(app: &mut TtgApp, ui: &mut Ui) {
         }
         app.selected_edge = None;
         app.selected_annotation = None;
+        app.selected_rule = None;
     }
     bg.context_menu(|ui| {
         let w = app.camera.to_world(origin, ui.min_rect().min);
@@ -134,29 +135,32 @@ pub fn show(app: &mut TtgApp, ui: &mut Ui) {
         }
     }
 
-    // ---- draw order: containers (shallow first), then edges, then nodes
-    let mut containers: Vec<Id> = app
+    // ---- draw order: boxes — containers and subnets holding resources — shallow first,
+    // then edges, then nodes
+    let mut boxes: Vec<Id> = app
         .project
-        .containers
-        .keys()
-        .filter(|id| app.is_visible(id))
-        .cloned()
+        .entities()
+        .iter()
+        .filter(|e| app.is_visible(e.id) && app.project.is_box(e.id))
+        .map(|e| e.id.to_string())
         .collect();
-    containers.sort_by_key(|id| (app.project.depth_of(id), id.clone()));
+    boxes.sort_by_key(|id| (app.project.depth_of(id), id.clone()));
     let nodes: Vec<Id> = app
         .project
         .nodes
         .keys()
-        .filter(|id| app.is_visible(id))
+        .filter(|id| app.is_visible(id) && !app.project.hosts_nodes(id))
         .cloned()
         .collect();
 
+    crate::region::draw_frame(app, ui, origin);
     crate::annotations::draw_groups(app, ui, origin);
-    for id in &containers {
+    for id in &boxes {
         entity_widget(app, ui, origin, id, true);
     }
     draw_edges(app, ui, origin);
     draw_reference_edges(app, ui, origin);
+    crate::rule_edges::draw(app, ui, origin);
     for id in &nodes {
         entity_widget(app, ui, origin, id, false);
     }
@@ -222,7 +226,7 @@ pub fn show(app: &mut TtgApp, ui: &mut Ui) {
                         continue;
                     }
                     if let Some(r) = app.entity_rect(&id) {
-                        if wr.intersects(r) && (wr.contains_rect(r) || app.project.nodes.contains_key(&id)) {
+                        if wr.intersects(r) && (wr.contains_rect(r) || !app.project.is_box(&id)) {
                             app.selection.insert(id);
                         }
                     }
@@ -289,10 +293,10 @@ fn draw_grid(painter: &egui::Painter, rect: Rect, cam: &crate::camera::Camera) {
     }
 }
 
-/// Topmost entity whose screen rect contains `p` (nodes before containers, deeper first).
+/// Topmost entity whose screen rect contains `p` (nodes before boxes, deeper first).
 fn entity_under(app: &TtgApp, origin: Pos2, p: Pos2, exclude: Option<&str>) -> Option<Id> {
     for id in app.project.nodes.keys() {
-        if Some(id.as_str()) == exclude || !app.is_visible(id) {
+        if Some(id.as_str()) == exclude || !app.is_visible(id) || app.project.hosts_nodes(id) {
             continue;
         }
         if app
@@ -303,7 +307,12 @@ fn entity_under(app: &TtgApp, origin: Pos2, p: Pos2, exclude: Option<&str>) -> O
             return Some(id.clone());
         }
     }
-    let mut cs: Vec<&Id> = app.project.containers.keys().collect();
+    let mut cs: Vec<&Id> = app
+        .project
+        .containers
+        .keys()
+        .chain(app.project.nodes.keys().filter(|id| app.project.hosts_nodes(id)))
+        .collect();
     cs.sort_by_key(|id| std::cmp::Reverse(app.project.depth_of(id)));
     for id in cs {
         if Some(id.as_str()) == exclude || !app.is_visible(id) {
@@ -332,7 +341,13 @@ fn entity_widget(app: &mut TtgApp, ui: &mut Ui, origin: Pos2, id: &str, is_conta
     let (icon, cat) = def
         .map(|d| (d.resource.icon.clone(), d.resource.category.clone()))
         .unwrap_or(("?".into(), String::new()));
-    let display = app.type_subtitle(&type_id);
+    let mut display = app.type_subtitle(&type_id);
+    // A subnet says which zone it is in.
+    if type_id == "subnet" {
+        if let Some(z) = ttg_codegen::canvas::availability_zone(&app.project, id) {
+            display = format!("{display} · {z}");
+        }
+    }
     let concrete = app.concrete_mode();
     let logical = concrete
         && app
@@ -377,6 +392,7 @@ fn entity_widget(app: &mut TtgApp, ui: &mut Ui, origin: Pos2, id: &str, is_conta
             app.selection.insert(id.to_string());
         }
         app.selected_edge = None;
+        app.selected_rule = None;
     }
     if resp.drag_started_by(egui::PointerButton::Primary) {
         if !app.selection.contains(id) {
@@ -419,33 +435,37 @@ fn entity_widget(app: &mut TtgApp, ui: &mut Ui, origin: Pos2, id: &str, is_conta
                 .filter(|m| app.project.parent_of(m).is_none_or(|p| !moving.contains(p)))
                 .cloned()
                 .collect();
+            let mut touched: Vec<Option<Id>> = Vec::new();
             for m in tops {
                 let center = app.entity_rect(&m).unwrap().center();
-                let probe = if app.project.containers.contains_key(&m) {
+                let probe = if app.project.is_box(&m) {
                     app.entity_rect(&m).unwrap().min + Vec2::new(10.0, 10.0)
                 } else {
                     center
                 };
+                let ty = app.project.entity(&m).unwrap().resource_type.to_string();
                 let candidate = app.container_at(probe, &moving);
-                let allowed = candidate.clone().filter(|c| {
-                    let ct = &app.project.containers[c].container_type;
-                    app.catalog
-                        .resource(app.project.entity(&m).unwrap().resource_type)
-                        .is_some_and(|d| d.resource.allowed_parents.iter().any(|a| a == ct))
-                });
+                let allowed = app.allowed_holder_at(probe, &moving, &ty);
+                let old = app.project.parent_of(&m).map(str::to_string);
                 match (allowed, candidate) {
                     (Some(c), _) => {
                         app.project.set_parent(&m, Some(&c));
                     }
                     (None, Some(_)) => {
-                        // Dropped inside a container that cannot hold it: keep old parent
+                        // Dropped inside something that cannot hold it: keep old parent
                         // (diagnostics will explain if that parent is also wrong).
                     }
                     (None, None) => {
                         app.project.set_parent(&m, None);
                     }
                 }
+                let new = app.project.parent_of(&m).map(str::to_string);
+                if new != old {
+                    touched.push(old);
+                    touched.push(new);
+                }
             }
+            app.fit_hosts(&touched);
             if let Drag::Move { before, .. } = std::mem::replace(&mut app.drag, Drag::None) {
                 app.finish(before);
             }
@@ -571,10 +591,21 @@ fn entity_widget(app: &mut TtgApp, ui: &mut Ui, origin: Pos2, id: &str, is_conta
                 accum.x -= dx;
                 accum.y -= dy;
                 let id = id.to_string();
+                let current = app.entity_rect(&id).map(|r| r.size());
                 app.with_layout(|p| {
                     if let Some(c) = p.containers.get_mut(&id) {
                         c.size.w = (c.size.w + dx as i32).max(MIN_CONTAINER.x as i32);
                         c.size.h = (c.size.h + dy as i32).max(MIN_CONTAINER.y as i32);
+                    } else if let (Some(n), Some(cur)) = (p.nodes.get_mut(&id), current) {
+                        // A subnet holding resources.
+                        let s = n.size.unwrap_or(ttg_core::Size {
+                            w: cur.x as i32,
+                            h: cur.y as i32,
+                        });
+                        n.size = Some(ttg_core::Size {
+                            w: (s.w + dx as i32).max(MIN_CONTAINER.x as i32),
+                            h: (s.h + dy as i32).max(MIN_CONTAINER.y as i32),
+                        });
                     }
                 });
             }
@@ -703,6 +734,34 @@ fn entity_widget(app: &mut TtgApp, ui: &mut Ui, origin: Pos2, id: &str, is_conta
     // ---- classification: a small pill on what holds sensitive data
     if let Some(c) = app.project.entity(id).and_then(|e| e.classification) {
         classification_pill(&painter, sr, c, zoom, is_container);
+    }
+
+    // ---- zones: what spans subnets (or is linked to one it is not drawn in) says which
+    // availability zones, "a b", at its bottom-left corner
+    if !is_container {
+        if let Some(z) = ttg_codegen::canvas::zone_badge(&app.project, &app.catalog, id) {
+            let font = FontId::proportional((9.5 * zoom).max(6.0));
+            let galley = painter.layout_no_wrap(format!("AZ {z}"), font, Color32::WHITE);
+            let size = galley.size() + Vec2::new(8.0, 3.0);
+            let pill = Rect::from_min_size(
+                Pos2::new(sr.left() + 6.0 * zoom, sr.bottom() - size.y / 2.0),
+                size,
+            );
+            painter.rect_filled(pill, CornerRadius::same(6), Color32::from_rgb(142, 68, 173));
+            painter.galley(pill.min + Vec2::new(4.0, 1.5), galley, Color32::WHITE);
+        }
+    }
+    // ---- region: a resource the export creates through another region's provider
+    if let Some(r) = app.alias_region(id) {
+        let font = FontId::proportional((9.5 * zoom).max(6.0));
+        let galley = painter.layout_no_wrap(r, font, Color32::WHITE);
+        let size = galley.size() + Vec2::new(8.0, 3.0);
+        let pill = Rect::from_min_size(
+            Pos2::new(sr.center().x - size.x / 2.0, sr.top() - size.y / 2.0),
+            size,
+        );
+        painter.rect_filled(pill, CornerRadius::same(6), Color32::from_rgb(40, 110, 170));
+        painter.galley(pill.min + Vec2::new(4.0, 1.5), galley, Color32::WHITE);
     }
 
     // ---- presentation: fade what the current step does not touch, ring what it does
@@ -846,11 +905,12 @@ fn entity_widget(app: &mut TtgApp, ui: &mut Ui, origin: Pos2, id: &str, is_conta
     }
 }
 
-/// Selected entities plus every descendant of a selected container, each once.
+/// Selected entities plus every descendant of a selected box (container or subnet
+/// holding resources), each once.
 fn moving_set(app: &TtgApp) -> BTreeSet<Id> {
     let mut set: BTreeSet<Id> = app.selection.clone();
     for id in &app.selection {
-        if app.project.containers.contains_key(id) {
+        if app.project.is_box(id) {
             set.extend(app.project.descendants_of(id));
         }
     }
@@ -929,7 +989,7 @@ impl Side {
 /// The rectangle edges attach to: the whole node, or a container's header strip.
 fn anchor_rect(app: &TtgApp, origin: Pos2, id: &str) -> Option<Rect> {
     let r = app.camera.rect_to_screen(origin, app.entity_rect(id)?);
-    if app.project.containers.contains_key(id) {
+    if app.project.is_box(id) {
         Some(Rect::from_min_size(
             r.min,
             Vec2::new(r.width(), HEADER_H * app.camera.zoom),
@@ -1166,7 +1226,8 @@ fn side_point_at(r: Rect, side: Side, offset_pct: i32) -> Pos2 {
 
 /// Point on a container wall nearest to `other` (projection, clamped to the wall).
 fn wall_point(r: Rect, side: Side, other: Pos2) -> Pos2 {
-    let margin = 14.0;
+    // At a small zoom a box can be thinner than both margins together: then the middle.
+    let margin = 14.0_f32.min(r.width() / 2.0).min(r.height() / 2.0);
     match side {
         Side::Left => Pos2::new(r.left(), other.y.clamp(r.top() + margin, r.bottom() - margin)),
         Side::Right => Pos2::new(r.right(), other.y.clamp(r.top() + margin, r.bottom() - margin)),
@@ -1208,8 +1269,8 @@ fn draw_edges(app: &mut TtgApp, ui: &mut Ui, origin: Pos2) {
             ends.push(None);
             continue;
         };
-        let sc = app.project.containers.contains_key(&e.source);
-        let tc = app.project.containers.contains_key(&e.target);
+        let sc = app.project.is_box(&e.source);
+        let tc = app.project.is_box(&e.target);
         // Automatic sides: nodes face each other; containers use the wall nearest the
         // other endpoint (which may be inside them).
         let (auto_sa, auto_sb) = choose_sides(
@@ -1276,7 +1337,7 @@ fn draw_edges(app: &mut TtgApp, ui: &mut Ui, origin: Pos2) {
         app.project
             .nodes
             .keys()
-            .filter(|id| app.is_visible(id))
+            .filter(|id| app.is_visible(id) && !app.project.hosts_nodes(id))
             .filter_map(|id| {
                 app.entity_rect(id)
                     .map(|r| (id.clone(), app.camera.rect_to_screen(origin, r)))
@@ -1545,6 +1606,11 @@ fn draw_reference_edges(app: &mut TtgApp, ui: &mut Ui, origin: Pos2) {
             continue;
         }
         if !app.is_visible(&r.source) || !app.is_visible(&r.target) {
+            continue;
+        }
+        if app.filter.hide_monitoring
+            && ttg_codegen::canvas::is_monitoring_link(&app.project, &app.catalog, &r.source, &r.target)
+        {
             continue;
         }
         // A real edge between the two already says it.

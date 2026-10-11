@@ -120,6 +120,44 @@ impl TtgApp {
         Ok(rep)
     }
 
+    /// Build (or refresh) the "Network" view: the network and what runs in it, without
+    /// monitoring links, laid out by tiers in its own layout. One undo step; returns the
+    /// view's index.
+    pub fn build_network_view(&mut self) -> usize {
+        let before = self.snapshot();
+        let filter = ttg_codegen::canvas::network_view_filter();
+        let i = match self
+            .project
+            .views
+            .iter()
+            .position(|v| v.name.eq_ignore_ascii_case(ttg_codegen::canvas::NETWORK_VIEW))
+        {
+            Some(i) => {
+                self.project.views[i].filter = filter;
+                if self.project.views[i].layout.is_none() {
+                    self.project.views[i].layout = Some(Default::default());
+                }
+                i
+            }
+            None => {
+                let mut v = ttg_core::View::new(ttg_codegen::canvas::NETWORK_VIEW, filter);
+                v.description = ttg_codegen::canvas::NETWORK_VIEW_DESCRIPTION.into();
+                self.project.views.push(v);
+                self.project.views.len() - 1
+            }
+        };
+        self.activate_view(Some(i));
+        let opts = ttg_core::layout::TidyOptions::default();
+        let cat = self.catalog.clone();
+        self.with_layout(|p| {
+            ttg_codegen::canvas::tidy_by_tiers(p, &cat, &Default::default(), &Self::size_of, &opts, false)
+        });
+        self.finish(before);
+        self.fit_requested = true;
+        self.status = format!("\"{}\" view laid out by tiers", ttg_codegen::canvas::NETWORK_VIEW);
+        i
+    }
+
     // ------------------------------------------------------------ presentation mode
 
     /// Step through the active view's numbered flows.
@@ -271,6 +309,14 @@ pub fn view_menu(app: &mut TtgApp, ui: &mut Ui) {
         if let Err(e) = app.start_presentation() {
             app.status = e;
         }
+        ui.close();
+    }
+    if ui
+        .button(format!("Build \"{}\" view", ttg_codegen::canvas::NETWORK_VIEW))
+        .on_hover_text("A view of the network and what runs in it, without monitoring links, laid out by tiers (refreshed if it exists)")
+        .clicked()
+    {
+        app.build_network_view();
         ui.close();
     }
     if ui

@@ -256,6 +256,8 @@ pub fn command_from_json(tool: &str, args: serde_json::Value) -> Result<AgentCom
                 container: a.container,
                 view: a.view,
                 by: a.by,
+                direction: a.direction,
+                tiers: a.tiers,
             }
         }
         // View tools: flows generated from links, notes put back beside their anchors.
@@ -662,7 +664,7 @@ pub struct LinkRemoveArgs {
 #[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
 pub struct ViewSetArgs {
     #[schemars(
-        description = "Filter object: { categories: [..], relations: [..], focus: entity, depth: n, hidden: [..], only: [..], containers: bool, providers: [\"aws\"], origin: \"all\"|\"curated\"|\"native\", types: [\"subnet\"], name_glob: \"jobs*\" (case-insensitive, `*` and `?`), hide_edges: bool, spelt `hide_links` too (draw no structural links, for a pure data-flow view) }. Empty object shows everything"
+        description = "Filter object: { categories: [..], relations: [..], focus: entity, depth: n, hidden: [..], only: [..], containers: bool, providers: [\"aws\"], origin: \"all\"|\"curated\"|\"native\", types: [\"subnet\"], name_glob: \"jobs*\" (case-insensitive, `*` and `?`), hide_edges: bool, spelt `hide_links` too (draw no structural links, for a pure data-flow view), hide_monitoring: bool (no links from or to alarms, log groups, audit trails, budgets) }. Empty object shows everything"
     )]
     pub filter: serde_json::Value,
 }
@@ -832,9 +834,17 @@ pub struct TidyArgs {
     )]
     pub view: Option<String>,
     #[schemars(
-        description = "`links` (default): columns by dependency. `flows`: the view's data flows left to right in step order, crossings reduced, grouping boxes refitted around their members; needs a view"
+        description = "`links` (default): columns by dependency. `flows`: the view's data flows left to right in step order, crossings reduced, grouping boxes refitted around their members; needs a view. `tiers`: bands edge (DNS, CDN, WAF, certificates) / public (load balancers, NAT and internet gateways, public subnets) / app (compute, containers, functions) / data (databases, caches, buckets, queues, file systems) / regional (IAM, secrets, keys, logs, alarms, topics, budgets), with one row per availability zone, applied inside every network and subnet too; containers and subnets are fitted to what they hold"
     )]
     pub by: Option<String>,
+    #[schemars(
+        description = "`by: tiers` only: `columns` (bands left to right, default) or `rows` (top to bottom)"
+    )]
+    pub direction: Option<String>,
+    #[schemars(
+        description = "`by: tiers` only: override the derived tier of some entities, e.g. {\"assets\": \"edge\"} (entity id or name -> edge | public | app | data | regional)"
+    )]
+    pub tiers: Option<std::collections::BTreeMap<String, String>>,
 }
 
 /// Arguments of `view_generate`.
@@ -845,7 +855,7 @@ pub struct ViewGenerateArgs {
     )]
     pub view: Option<String>,
     #[schemars(
-        description = "`data_flow`: flows between the view's visible resources derived from their data-carrying links (sends to, reads, uses, logs to, dead letters, calls, mounts, forwards to), in the direction the data moves. `personal_data`: build or refresh the view \"Where personal data goes\" from the resources classified personal or payment"
+        description = "`data_flow`: flows between the view's visible resources derived from their data-carrying links (sends to, reads, uses, logs to, dead letters, calls, mounts, forwards to), in the direction the data moves. `personal_data`: build or refresh the view \"Where personal data goes\" from the resources classified personal or payment. `network`: build or refresh the view \"Network\" (the network and what runs in it, monitoring links hidden) laid out by tiers in its own layout"
     )]
     pub kind: String,
     #[schemars(
@@ -1620,7 +1630,7 @@ impl TtgServer {
     }
 
     #[tool(
-        description = "Put an entity inside a container (or at top level). Containment implies network membership for subnets etc."
+        description = "Put an entity inside a container (or at top level), or a resource inside a subnet: a type that takes a 'Subnets' link (instance, load balancer, database, container app, function, NAT gateway, …) may be drawn inside one, which then counts exactly as that link (the subnet becomes a box around it). Containment implies network membership for subnets etc."
     )]
     async fn entity_set_parent(&self, Parameters(a): Parameters<SetParentArgs>) -> CallToolResult {
         self.run(AgentCommand::EntitySetParent {
@@ -1817,13 +1827,15 @@ impl TtgServer {
     }
 
     #[tool(
-        description = "Auto-layout. `by: links` (default): columns by dependency, containers fitted to contents. `by: flows` with a `view`: that view's data flows left to right in step order, placed in the view's own layout only. With a `view`, its anchored notes are put back beside their anchors afterwards. Undoable."
+        description = "Auto-layout. `by: links` (default): columns by dependency, containers fitted to contents. `by: tiers`: bands edge / public / app / data / regional services (left to right, or `direction: rows`), one row per availability zone, subnets and containers fitted to what they hold — the readable layout for a large AWS-style design; `tiers` overrides an entity's band. `by: flows` with a `view`: that view's data flows left to right in step order, placed in the view's own layout only. With a `view`, its anchored notes are put back beside their anchors afterwards. Undoable."
     )]
     async fn layout_tidy(&self, Parameters(a): Parameters<TidyArgs>) -> CallToolResult {
         self.run(AgentCommand::LayoutTidy {
             container: a.container,
             view: a.view,
             by: a.by,
+            direction: a.direction,
+            tiers: a.tiers,
         })
         .await
     }
@@ -1831,7 +1843,7 @@ impl TtgServer {
     // View tools: flows generated from links, notes put back beside their anchors.
 
     #[tool(
-        description = "Generate view content from the model. `kind: data_flow` draws flows between the view's visible resources from their data-carrying links (structural links such as network membership, IAM bindings and encryption produce nothing), labelled by what the link does, never duplicating a pair that already has a flow; the reply lists what was added. `kind: personal_data` builds or refreshes the view \"Where personal data goes\": resources classified personal or payment, what their data reaches one link away, and the flows between them. One undo step."
+        description = "Generate view content from the model. `kind: data_flow` draws flows between the view's visible resources from their data-carrying links (structural links such as network membership, IAM bindings and encryption produce nothing), labelled by what the link does, never duplicating a pair that already has a flow; the reply lists what was added. `kind: personal_data` builds or refreshes the view \"Where personal data goes\": resources classified personal or payment, what their data reaches one link away, and the flows between them. `kind: network` builds or refreshes the view \"Network\": gateways, subnets, route tables, security groups, load balancers, compute, containers and databases, monitoring links hidden, laid out by tiers in the view's own layout. One undo step."
     )]
     async fn view_generate(&self, Parameters(a): Parameters<ViewGenerateArgs>) -> CallToolResult {
         self.run(AgentCommand::ViewGenerate {

@@ -3261,3 +3261,110 @@ fn headless_reach_audit_filters_and_posture() {
     c.call("settings_set", json!({"posture": {"disabled": []}}));
     assert!(rules(&mut c).contains(&"public_kubernetes_api".to_string()));
 }
+
+/// A resource drawn inside a subnet, the tier layout and the "Network" view, over MCP.
+#[test]
+fn headless_subnets_hold_resources_and_tiers_lay_out() {
+    let server = start("three-tier.ttg.json");
+    let mut c = Client::new(&server);
+    c.initialize();
+    let node = |c: &mut Client, id: &str| project_of(c)["nodes"][id].clone();
+
+    // --- The app server moves into its subnet; being inside is its membership.
+    let (err, r) = c.call(
+        "entity_set_parent",
+        json!({"entity": "app server", "parent": "web a"}),
+    );
+    assert!(!err, "{r}");
+    assert_eq!(r["parent"], json!("subnet-9c0d1e2f"), "{r}");
+    assert_eq!(r["implies"], json!(["network_membership"]), "{r}");
+    let (err, r) = c.call(
+        "link_remove",
+        json!({"source": "app server", "target": "web a", "relation": "network_membership"}),
+    );
+    assert!(!err, "{r}");
+    let (err, d) = c.call("diagnostics", json!({}));
+    assert!(!err, "{d}");
+    let text = d.to_string();
+    assert!(
+        !text.contains("needs a 'Attached to subnet'") && !text.contains("cannot be placed inside"),
+        "containment stands in for the link: {d}"
+    );
+    let (err, pre) = c.call("export_preview", json!({}));
+    assert!(!err, "{pre}");
+    let compute = pre["files"]["compute.tf"].as_str().unwrap_or_default();
+    assert!(
+        compute.contains("subnet_id") && compute.contains("= aws_subnet.web_a.id"),
+        "the instance is still in web a: {compute}"
+    );
+    // The subnet is now a box around it.
+    let subnet = node(&mut c, "subnet-9c0d1e2f");
+    let vm = node(&mut c, "vm-7e8f9a0b");
+    let (sx, sy) = (
+        subnet["position"]["x"].as_i64().unwrap(),
+        subnet["position"]["y"].as_i64().unwrap(),
+    );
+    assert!(subnet["size"]["w"].as_i64().unwrap() >= 220, "{subnet}");
+    assert!(
+        vm["position"]["x"].as_i64().unwrap() > sx && vm["position"]["y"].as_i64().unwrap() > sy,
+        "{subnet} {vm}"
+    );
+    // A bucket is no subnet resource, and a subnet goes in no subnet.
+    let (err, r) = c.call(
+        "entity_set_parent",
+        json!({"entity": "assets", "parent": "web a"}),
+    );
+    assert!(err && r.to_string().contains("Subnets"), "{r}");
+    let (err, r) = c.call("entity_set_parent", json!({"entity": "web b", "parent": "web a"}));
+    assert!(err, "{r}");
+
+    // --- Tier layout: public, then app, then data, left to right.
+    let (err, t) = c.call("layout_tidy", json!({"by": "tiers"}));
+    assert!(!err, "{t}");
+    assert!(t["tiers"]["public"].to_string().contains("web lb"), "{t}");
+    assert!(t["tiers"]["data"].to_string().contains("app db"), "{t}");
+    assert!(t["tiers"]["regional"].to_string().contains("app role"), "{t}");
+    let x = |c: &mut Client, id: &str| node(c, id)["position"]["x"].as_i64().unwrap();
+    let y = |c: &mut Client, id: &str| node(c, id)["position"]["y"].as_i64().unwrap();
+    let (lb, db) = ("lb-1e2f3a4b", "db-3c4d5e6f");
+    assert!(
+        x(&mut c, lb) < x(&mut c, db),
+        "load balancer left of the database"
+    );
+    // The app server stayed inside its subnet.
+    assert_eq!(node(&mut c, "vm-7e8f9a0b")["parent"], json!("subnet-9c0d1e2f"));
+    // Top to bottom, and an override moves the bucket to the edge band.
+    let (err, t) = c.call(
+        "layout_tidy",
+        json!({"by": "tiers", "direction": "rows", "tiers": {"assets": "edge"}}),
+    );
+    assert!(!err, "{t}");
+    assert_eq!(t["tiers"]["edge"], json!(["assets"]), "{t}");
+    assert!(y(&mut c, lb) < y(&mut c, db), "rows: public above data");
+    // Determinism: the same call lays out the same.
+    let before = project_of(&mut c)["nodes"].clone();
+    let (err, _) = c.call(
+        "layout_tidy",
+        json!({"by": "tiers", "direction": "rows", "tiers": {"assets": "edge"}}),
+    );
+    assert!(!err);
+    assert_eq!(project_of(&mut c)["nodes"], before);
+    for bad in [
+        json!({"by": "tier"}),
+        json!({"by": "tiers", "direction": "diagonal"}),
+        json!({"by": "tiers", "tiers": {"assets": "cloud"}}),
+        json!({"by": "links", "direction": "rows"}),
+    ] {
+        let (err, r) = c.call("layout_tidy", bad.clone());
+        assert!(err, "{bad} -> {r}");
+    }
+
+    // --- The "Network" view: its own layout, monitoring links hidden.
+    let (err, v) = c.call("view_generate", json!({"kind": "network"}));
+    assert!(!err, "{v}");
+    assert_eq!(v["view"], json!("Network"), "{v}");
+    assert_eq!(v["filter"]["hide_monitoring"], json!(true), "{v}");
+    let (err, got) = c.call("view_get", json!({"name": "Network"}));
+    assert!(!err, "{got}");
+    assert_eq!(got["filter"]["hide_monitoring"], json!(true), "{got}");
+}

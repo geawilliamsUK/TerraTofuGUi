@@ -164,6 +164,17 @@ pub struct TtgApp {
     pub cost: crate::cost_panel::CostUi,
     /// The environment shown, and the last plan (`environments.rs`).
     pub env: crate::environments::EnvUi,
+    /// Draw the region frame around the drawing (and alias-region badges).
+    pub show_region_frame: bool,
+    /// Entities the export creates through another region's provider, with that region;
+    /// refreshed with the diagnostics.
+    pub alias_regions: std::collections::BTreeMap<Id, String>,
+    /// How security-group rules are drawn.
+    pub rule_edges: crate::rule_edges::RuleEdges,
+    /// The rule edge selected on the canvas: (security group, row).
+    pub selected_rule: Option<(Id, usize)>,
+    /// The rule row the inspector should open and scroll to: (security group, row).
+    pub focus_rule: Option<(Id, usize)>,
     /// Built-in MCP server (off until enabled).
     #[cfg(feature = "mcp")]
     pub mcp: crate::mcp::McpState,
@@ -247,6 +258,11 @@ impl TtgApp {
             icons: crate::display::Icons::new(defs_dir.as_ref()),
             cost: Default::default(),
             env: Default::default(),
+            show_region_frame: true,
+            alias_regions: Default::default(),
+            rule_edges: crate::rule_edges::RuleEdges::Groups,
+            selected_rule: None,
+            focus_rule: None,
             #[cfg(feature = "mcp")]
             mcp: crate::mcp::McpState::default(),
         };
@@ -271,6 +287,15 @@ impl TtgApp {
             }
             if storage.get_string("display_mode").as_deref() == Some("concrete") {
                 app.display = crate::display::DisplayMode::Concrete;
+            }
+            if storage.get_string("region_frame").as_deref() == Some("off") {
+                app.show_region_frame = false;
+            }
+            if let Some(m) = storage
+                .get_string("rule_edges")
+                .and_then(|s| crate::rule_edges::RuleEdges::from_key(&s))
+            {
+                app.rule_edges = m;
             }
             #[cfg(feature = "mcp")]
             app.mcp_restore(storage);
@@ -327,6 +352,17 @@ impl TtgApp {
             Ok("curved") => app.edge_style = EdgeStyle::Curved,
             _ => {}
         }
+        match std::env::var("TTG_REGION_FRAME").as_deref() {
+            Ok("off") | Ok("0") => app.show_region_frame = false,
+            Ok(_) => app.show_region_frame = true,
+            _ => {}
+        }
+        if let Some(m) = std::env::var("TTG_RULE_EDGES")
+            .ok()
+            .and_then(|s| crate::rule_edges::RuleEdges::from_key(&s))
+        {
+            app.rule_edges = m;
+        }
         app.ensure_provider_settings();
         if let Some(p) = open {
             match ttg_core::project::load(&p) {
@@ -370,6 +406,11 @@ impl TtgApp {
             self.diagnostics = self.diagnostics_for_shown();
             self.derived_refs = ttg_codegen::refs::derived_references(
                 &self.shown_project(),
+                &self.catalog,
+                &self.project.settings.target_provider,
+            );
+            self.alias_regions = ttg_codegen::canvas::alias_regions(
+                &self.project,
                 &self.catalog,
                 &self.project.settings.target_provider,
             );
@@ -512,22 +553,78 @@ impl TtgApp {
         Some(crate::annotations::to_rect(r))
     }
 
-    /// Deepest container whose rect contains `world`, excluding the given ids.
-    pub fn container_at(&self, world: Pos2, exclude: &BTreeSet<Id>) -> Option<Id> {
-        let mut best: Option<(usize, Id)> = None;
-        for c in self.project.containers.values() {
-            if exclude.contains(&c.id) {
+    /// Everything that could hold something dropped at `world`, deepest first: the
+    /// containers whose rect contains it and the subnets (nodes that may contain others,
+    /// boxes or not yet) under it. Excludes the given ids.
+    pub fn holders_at(&self, world: Pos2, exclude: &BTreeSet<Id>) -> Vec<Id> {
+        let mut found: Vec<(usize, f32, Id)> = Vec::new();
+        let candidates = self.project.containers.keys().chain(
+            self.project
+                .nodes
+                .values()
+                .filter(|n| self.catalog.may_contain(&n.resource_type))
+                .map(|n| &n.id),
+        );
+        for id in candidates {
+            if exclude.contains(id) || !self.is_visible(id) {
                 continue;
             }
-            let r = self.entity_rect(&c.id).unwrap();
+            let Some(r) = self.entity_rect(id) else { continue };
             if r.contains(world) {
-                let depth = self.project.depth_of(&c.id);
-                if best.as_ref().is_none_or(|(d, _)| depth > *d) {
-                    best = Some((depth, c.id.clone()));
-                }
+                found.push((self.project.depth_of(id), r.area(), id.clone()));
             }
         }
-        best.map(|(_, id)| id)
+        // Deepest first; between equals, the smaller box (the one drawn on top).
+        found.sort_by(|a, b| b.0.cmp(&a.0).then(a.1.total_cmp(&b.1)).then(a.2.cmp(&b.2)));
+        found.into_iter().map(|(_, _, id)| id).collect()
+    }
+
+    /// Deepest container (or subnet) whose rect contains `world`, excluding the given ids.
+    pub fn container_at(&self, world: Pos2, exclude: &BTreeSet<Id>) -> Option<Id> {
+        self.holders_at(world, exclude).into_iter().next()
+    }
+
+    /// May an entity of `child_type` be placed inside `parent`? The catalog decides by
+    /// type (`allowed_parents`); a node such as a subnet holds nodes one level deep only.
+    pub fn may_hold(&self, parent: &str, child_type: &str) -> bool {
+        let Some(pe) = self.project.entity(parent) else {
+            return false;
+        };
+        self.catalog.allows_parent(child_type, pe.resource_type)
+            && (pe.is_container || pe.parent.is_none_or(|pp| !self.project.nodes.contains_key(pp)))
+    }
+
+    /// The deepest holder at `world` that may take an entity of `child_type`.
+    pub fn allowed_holder_at(&self, world: Pos2, exclude: &BTreeSet<Id>, child_type: &str) -> Option<Id> {
+        self.holders_at(world, exclude)
+            .into_iter()
+            .find(|h| self.may_hold(h, child_type))
+    }
+
+    /// Refit the subnets among `ids` after resources moved in or out of them: one that
+    /// holds nothing goes back to a plain node, one that just got its first resource
+    /// lays it out inside, the others grow to take in what they hold.
+    pub fn fit_hosts(&mut self, ids: &[Option<Id>]) {
+        let hosts: BTreeSet<Id> = ids
+            .iter()
+            .flatten()
+            .filter(|id| {
+                self.project
+                    .nodes
+                    .get(*id)
+                    .is_some_and(|n| self.catalog.may_contain(&n.resource_type))
+            })
+            .cloned()
+            .collect();
+        if hosts.is_empty() {
+            return;
+        }
+        let opts = ttg_core::layout::TidyOptions::default();
+        self.with_layout(|p| {
+            for h in &hosts {
+                ttg_core::layout::fit_host(p, h, &Self::size_of, &opts);
+            }
+        });
     }
 
     /// Everything the canvas draws, including the active view's annotations, so "zoom
@@ -546,6 +643,9 @@ impl TtgApp {
                     add(er);
                 }
             }
+        }
+        if let Some(fr) = self.region_frame_rect() {
+            add(fr);
         }
         if let Some(v) = self.active_view() {
             for g in &v.groups {
@@ -596,10 +696,7 @@ impl TtgApp {
         let before = self.snapshot();
         let id = self.project.fresh_id(clipboard::prefix(type_id));
         let name = self.unique_name(&def.resource.display_name.to_lowercase());
-        let parent = self.container_at(world, &BTreeSet::new()).filter(|p| {
-            let pt = &self.project.containers[p].container_type;
-            def.resource.allowed_parents.iter().any(|a| a == pt)
-        });
+        let parent = self.allowed_holder_at(world, &BTreeSet::new(), type_id);
         let mut config = ttg_core::Config::new();
         for f in &def.fields {
             if let Some(v) = f.default_value() {
@@ -620,6 +717,7 @@ impl TtgApp {
             x: world.x.round() as i32,
             y: world.y.round() as i32,
         };
+        let holder = parent.clone();
         match def.resource.kind {
             ResourceKind::Node => {
                 self.project.nodes.insert(
@@ -667,6 +765,7 @@ impl TtgApp {
             }
         }
         self.assign_free_subnet_cidr(&id);
+        self.fit_hosts(&[holder]);
         self.finish(before);
         self.reveal_new(&id);
         self.selection.clear();
@@ -742,9 +841,12 @@ impl TtgApp {
             return;
         }
         let before = self.snapshot();
+        let mut parents = Vec::new();
         for id in self.selection.clone() {
+            parents.push(self.project.parent_of(&id).map(str::to_string));
             self.project.remove_entity(&id);
         }
+        self.fit_hosts(&parents);
         self.selection.clear();
         self.finish(before);
     }
@@ -1216,7 +1318,7 @@ impl TtgApp {
     }
 
     /// Node size lookup for the layout helpers (containers report their own size).
-    fn size_of(p: &Project, id: &str) -> Size {
+    pub(crate) fn size_of(p: &Project, id: &str) -> Size {
         if let Some(c) = p.containers.get(id) {
             return c.size;
         }
@@ -1242,6 +1344,40 @@ impl TtgApp {
         self.fit_requested = true;
         self.status = "Tidied layout (Ctrl+Z to undo)".into();
         notes
+    }
+
+    /// Lay the diagram out in tier bands (`ttg_codegen::canvas::tidy_by_tiers`): left to
+    /// right, or top to bottom with `vertical`. One undo step, notes rearranged as tidy
+    /// does; returns how many notes moved.
+    pub fn tidy_tiers(&mut self, vertical: bool) -> usize {
+        self.tidy_tiers_with(vertical, &Default::default())
+    }
+
+    /// [`TtgApp::tidy_tiers`] with tiers set for some entities (the agent's overrides).
+    pub fn tidy_tiers_with(
+        &mut self,
+        vertical: bool,
+        overrides: &std::collections::BTreeMap<Id, ttg_catalog::Tier>,
+    ) -> usize {
+        let before = self.snapshot();
+        let opts = ttg_core::layout::TidyOptions::default();
+        let cat = self.catalog.clone();
+        self.with_layout(|p| {
+            ttg_codegen::canvas::tidy_by_tiers(p, &cat, overrides, &Self::size_of, &opts, vertical)
+        });
+        let notes = self.arrange_view_notes_now();
+        self.finish(before);
+        self.fit_requested = true;
+        self.status = "Laid out by tiers (Ctrl+Z to undo)".into();
+        notes
+    }
+
+    /// The other region a resource is created in, for its badge (region frame on only).
+    pub fn alias_region(&self, id: &str) -> Option<String> {
+        if !self.show_region_frame {
+            return None;
+        }
+        self.alias_regions.get(id).cloned()
     }
 
     pub fn align_selection(&mut self, how: ttg_core::layout::Align) {
@@ -1581,10 +1717,23 @@ impl TtgApp {
             if std::env::var("TTG_REACH").is_ok() {
                 self.reach_mode = true;
             }
-            if std::env::var("TTG_TIDY").is_ok_and(|v| v != "flows") {
-                self.tidy(None);
-                // The layout change marks the project dirty; never block the exit on it.
-                self.allow_close = true;
+            // TTG_TIDY=tiers (or tiers-vertical) lays the diagram out by tiers; any other
+            // value but `flows` runs the plain tidy.
+            match std::env::var("TTG_TIDY").as_deref() {
+                Ok("flows") | Err(_) => {}
+                Ok("tiers") => {
+                    self.tidy_tiers(false);
+                    self.allow_close = true;
+                }
+                Ok("tiers-vertical") => {
+                    self.tidy_tiers(true);
+                    self.allow_close = true;
+                }
+                Ok(_) => {
+                    self.tidy(None);
+                    // The layout change marks the project dirty; never block the exit on it.
+                    self.allow_close = true;
+                }
             }
             if let Ok(v) = std::env::var("TTG_VIEW") {
                 if let Some(i) = self
@@ -1595,6 +1744,11 @@ impl TtgApp {
                 {
                     self.activate_view(Some(i));
                 }
+            }
+            // TTG_HIDE_MONITORING=1: the working filter hides monitoring links (not saved).
+            if std::env::var("TTG_HIDE_MONITORING").is_ok() {
+                self.filter.hide_monitoring = true;
+                self.refresh_visibility();
             }
             // TTG_TIDY=flows lays the view (TTG_VIEW) out by its flows first; TTG_PRESENT=N
             // shows presentation mode at the N-th step.
@@ -1705,7 +1859,16 @@ impl eframe::App for TtgApp {
         self.refresh_diagnostics();
     }
 
+    /// A `--screenshot` run keeps nothing: its environment overrides (edge style, display
+    /// mode, MCP autostart) and the file it opened must not become the user's settings.
+    fn persist_egui_memory(&self) -> bool {
+        self.screenshot.is_none()
+    }
+
     fn save(&mut self, storage: &mut dyn eframe::Storage) {
+        if self.screenshot.is_some() {
+            return;
+        }
         if let Ok(json) = serde_json::to_string(&self.recent) {
             storage.set_string("recent_files", json);
         }
@@ -1735,5 +1898,10 @@ impl eframe::App for TtgApp {
             "avoid_obstacles",
             if self.avoid_obstacles { "on" } else { "off" }.into(),
         );
+        storage.set_string(
+            "region_frame",
+            if self.show_region_frame { "on" } else { "off" }.into(),
+        );
+        storage.set_string("rule_edges", self.rule_edges.key().into());
     }
 }

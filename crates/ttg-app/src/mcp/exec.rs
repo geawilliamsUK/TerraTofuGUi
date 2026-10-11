@@ -634,8 +634,13 @@ impl TtgApp {
                 let pid = parent.map(|p| self.resolve(&p)).transpose()?;
                 self.check_parent_allowed(&id, pid.as_deref())?;
                 let before = self.snapshot();
+                let old = self.project.parent_of(&id).map(str::to_string);
                 if !self.project.set_parent(&id, pid.as_deref()) {
-                    return Err("that would create a containment cycle".into());
+                    return Err(if self.project.hosts_nodes(&id) {
+                        "it holds resources of its own, so it cannot go inside a resource".into()
+                    } else {
+                        "that would create a containment cycle".into()
+                    });
                 }
                 // Move it visually inside the new parent if it is not already there.
                 if let Some(p) = &pid {
@@ -650,9 +655,26 @@ impl TtgApp {
                         self.shift_entities(&ids, dx, dy);
                     }
                 }
+                self.fit_hosts(&[old, pid.clone()]);
                 self.finish(before);
                 self.flash(&id);
-                Ok(json!({"status": "reparented", "id": id, "parent": pid}))
+                // What being inside means: the links containment now stands in for.
+                let implied: Vec<J> = pid
+                    .as_deref()
+                    .and_then(|p| {
+                        let e = self.project.entity(&id)?;
+                        let def = self.catalog.resource(e.resource_type)?;
+                        let pt = self.project.entity(p)?.resource_type.to_string();
+                        Some(
+                            def.relations
+                                .iter()
+                                .filter(|r| r.via_parent && r.targets.contains(&pt))
+                                .map(|r| json!(r.kind))
+                                .collect(),
+                        )
+                    })
+                    .unwrap_or_default();
+                Ok(json!({"status": "reparented", "id": id, "parent": pid, "implies": implied}))
             }
             AgentCommand::EntityDelete { entities } => {
                 let ids: Vec<Id> = entities
@@ -1141,7 +1163,13 @@ impl TtgApp {
                     "views": self.project.views.iter().map(|v| v.name.clone()).collect::<Vec<_>>(),
                 }))
             }
-            AgentCommand::LayoutTidy { container, view, by } => self.agent_layout_tidy(container, view, by),
+            AgentCommand::LayoutTidy {
+                container,
+                view,
+                by,
+                direction,
+                tiers,
+            } => self.agent_layout_tidy(container, view, by, direction, tiers),
             // View tools: flows generated from links, notes put back beside their anchors.
             AgentCommand::ViewGenerate { view, kind, replace } => self.agent_view_generate(view, &kind, replace),
             AgentCommand::ViewArrangeNotes { view } => self.agent_arrange_notes(view),
@@ -1529,26 +1557,44 @@ impl TtgApp {
 
     fn check_parent_allowed(&self, id: &str, parent: Option<&str>) -> Result<(), String> {
         let Some(p) = parent else { return Ok(()) };
-        let Some(c) = self.project.containers.get(p) else {
-            return Err(format!("\"{p}\" is not a container"));
-        };
         let t = self.project.entity(id).unwrap().resource_type.to_string();
+        self.check_holder(p, &t)
+    }
+
+    /// Can `parent` (a container, or a subnet) hold an entity of type `t`?
+    fn check_holder(&self, parent: &str, t: &str) -> Result<(), String> {
+        let Some(pe) = self.project.entity(parent) else {
+            return Err(format!("\"{parent}\" does not exist"));
+        };
+        let pt = pe.resource_type.to_string();
+        if !pe.is_container && !self.catalog.may_contain(&pt) {
+            return Err(format!(
+                "\"{}\" is a {pt}, which holds nothing (not a container)",
+                pe.name
+            ));
+        }
+        if self.may_hold(parent, t) {
+            return Ok(());
+        }
         let allowed = self
             .catalog
-            .resource(&t)
-            .is_some_and(|d| d.resource.allowed_parents.iter().any(|a| a == &c.container_type));
-        if allowed {
-            Ok(())
-        } else {
-            Err(format!(
-                "a {t} cannot be placed inside a {} (allowed parents: {})",
-                c.container_type,
-                self.catalog
-                    .resource(&t)
-                    .map(|d| d.resource.allowed_parents.join(", "))
-                    .unwrap_or_default()
-            ))
-        }
+            .resource(t)
+            .map(|d| d.resource.allowed_parents.join(", "))
+            .unwrap_or_default();
+        Err(
+            if self.catalog.may_contain(&pt) && self.catalog.allows_parent(t, &pt) {
+                format!(
+                    "\"{}\" is inside another resource, so it cannot hold one",
+                    pe.name
+                )
+            } else if self.catalog.may_contain(&pt) {
+                format!(
+                "a {t} cannot be drawn inside a {pt}: only resources that take a link to one (a 'Subnets' link) can (allowed parents of {t}: {allowed})"
+            )
+            } else {
+                format!("a {t} cannot be placed inside a {pt} (allowed parents: {allowed})")
+            },
+        )
     }
 
     /// A position for a new entity: the next free slot in a grid inside the parent, or
@@ -1607,18 +1653,7 @@ impl TtgApp {
             .ok_or_else(|| format!("unknown type \"{type_id}\" (see catalog_types)"))?;
         let pid = parent.map(|p| self.resolve(&p)).transpose()?;
         if let Some(p) = &pid {
-            let ct = &self
-                .project
-                .containers
-                .get(p)
-                .ok_or("parent is not a container")?
-                .container_type;
-            if !def.resource.allowed_parents.iter().any(|a| a == ct) {
-                return Err(format!(
-                    "a {type_id} cannot be placed inside a {ct} (allowed parents: {})",
-                    def.resource.allowed_parents.join(", ")
-                ));
-            }
+            self.check_holder(p, &def.resource.type_id)?;
         }
         let spot = self.free_spot_in(pid.as_deref());
         let pos = ttg_core::Position {
@@ -1655,6 +1690,8 @@ impl TtgApp {
             self.project.set_parent(&id, Some(p));
             // The network is known only now: pick the subnet's range inside it.
             self.assign_free_subnet_cidr(&id);
+            // A subnet holding it becomes (or grows as) a box around it.
+            self.fit_hosts(&[Some(p.clone())]);
         }
         self.finish(before);
         self.flash(&id);
@@ -2319,13 +2356,59 @@ impl TtgApp {
         container: Option<String>,
         view: Option<String>,
         by: Option<String>,
+        direction: Option<String>,
+        tiers: Option<std::collections::BTreeMap<String, String>>,
     ) -> R {
         let by = by.unwrap_or_else(|| "links".into()).to_lowercase();
-        if !matches!(by.as_str(), "links" | "flows") {
-            return Err(format!("unknown `by` \"{by}\" (links | flows)"));
+        if !matches!(by.as_str(), "links" | "flows" | "tiers") {
+            return Err(format!("unknown `by` \"{by}\" (links | flows | tiers)"));
         }
         if by == "flows" && view.is_none() && self.active_view.is_none() {
             return Err("tidying by flows needs a view: pass `view` (or activate one)".into());
+        }
+        if by != "tiers" && (direction.is_some() || tiers.is_some()) {
+            return Err("`direction` and `tiers` go with `by: tiers`".into());
+        }
+        if by == "tiers" {
+            if container.is_some() {
+                return Err(
+                    "`by: tiers` lays out the whole diagram (or a view); leave out `container`".into(),
+                );
+            }
+            let vertical = match direction.as_deref().map(str::to_lowercase).as_deref() {
+                None | Some("columns") | Some("horizontal") | Some("left_to_right") => false,
+                Some("rows") | Some("vertical") | Some("top_to_bottom") => true,
+                Some(d) => return Err(format!("unknown `direction` \"{d}\" (columns | rows)")),
+            };
+            let mut overrides = std::collections::BTreeMap::new();
+            for (k, t) in tiers.unwrap_or_default() {
+                let id = self.resolve(&k)?;
+                let tier = ttg_catalog::Tier::from_key(&t)
+                    .ok_or_else(|| format!("unknown tier \"{t}\" (edge | public | app | data | regional)"))?;
+                overrides.insert(id, tier);
+            }
+            return self.with_view(view, |app| {
+                let notes = app.tidy_tiers_with(vertical, &overrides);
+                let assigned = ttg_codegen::canvas::tiers(&app.project, &app.catalog, &overrides);
+                let mut bands: Map<String, J> = Map::new();
+                for t in ttg_catalog::Tier::ALL {
+                    let names: Vec<String> = assigned
+                        .iter()
+                        .filter(|(id, x)| **x == t && app.project.nodes.contains_key(*id))
+                        .filter_map(|(id, _)| app.project.entity(id).map(|e| e.name.to_string()))
+                        .collect();
+                    if !names.is_empty() {
+                        bands.insert(t.key().into(), json!(names));
+                    }
+                }
+                Ok(json!({
+                    "status": "tidied by tiers",
+                    "direction": if vertical { "rows" } else { "columns" },
+                    "view": app.view_name(),
+                    "tiers": bands,
+                    "notes_rearranged": notes,
+                }))
+            });
         }
         self.with_view(view, |app| {
             if by == "flows" {
@@ -2392,7 +2475,19 @@ impl TtgApp {
                     })).collect::<Vec<_>>(),
                 }))
             }
-            other => Err(format!("unknown kind \"{other}\" (data_flow | personal_data)")),
+            "network" => {
+                let i = self.build_network_view();
+                let shown = self.visible.as_ref().map(|v| v.len());
+                Ok(json!({
+                    "status": "view laid out by tiers",
+                    "view": self.project.views[i].name,
+                    "filter": self.project.views[i].filter,
+                    "shown": shown,
+                }))
+            }
+            other => Err(format!(
+                "unknown kind \"{other}\" (data_flow | personal_data | network)"
+            )),
         }
     }
 

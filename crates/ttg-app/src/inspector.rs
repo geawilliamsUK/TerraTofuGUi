@@ -321,13 +321,14 @@ fn entity_inspector(app: &mut TtgApp, ui: &mut Ui, id: &Id) {
                     if ui.selectable_label(parent.is_none(), "(top level)").clicked() {
                         choice = Some(None);
                     }
+                    // Containers, and subnets for what may be drawn inside one.
                     let containers: Vec<(String, String, String)> = app
                         .project
-                        .containers
-                        .values()
-                        .filter(|c| &c.id != id && !app.project.is_ancestor(id, &c.id))
-                        .filter(|c| def.resource.allowed_parents.iter().any(|a| a == &c.container_type))
-                        .map(|c| (c.id.clone(), c.name.clone(), c.container_type.clone()))
+                        .entities()
+                        .iter()
+                        .filter(|c| c.id != id && !app.project.is_ancestor(id, c.id))
+                        .filter(|c| app.may_hold(c.id, &def.resource.type_id))
+                        .map(|c| (c.id.to_string(), c.name.to_string(), c.resource_type.to_string()))
                         .collect();
                     for (cid, cname, ctype) in containers {
                         if ui
@@ -339,7 +340,10 @@ fn entity_inspector(app: &mut TtgApp, ui: &mut Ui, id: &Id) {
                     }
                     if let Some(c) = choice {
                         let before = app.snapshot();
-                        app.project.set_parent(id, c.as_deref());
+                        let old = app.project.parent_of(id).map(str::to_string);
+                        if app.project.set_parent(id, c.as_deref()) {
+                            app.fit_hosts(&[old, c]);
+                        }
                         app.finish(before);
                     }
                 });
@@ -382,8 +386,8 @@ fn entity_inspector(app: &mut TtgApp, ui: &mut Ui, id: &Id) {
                         w: r.width() as i32,
                         h: r.height() as i32,
                     };
-                    let a = ui.add(egui::DragValue::new(&mut size.w).range(120..=1200).suffix(" w"));
-                    let b = ui.add(egui::DragValue::new(&mut size.h).range(48..=800).suffix(" h"));
+                    let a = ui.add(egui::DragValue::new(&mut size.w).range(120..=4000).suffix(" w"));
+                    let b = ui.add(egui::DragValue::new(&mut size.h).range(48..=4000).suffix(" h"));
                     if a.changed() || b.changed() {
                         let before = app.snapshot();
                         let id = id.clone();
@@ -1101,6 +1105,19 @@ fn struct_list_editor(app: &mut TtgApp, ui: &mut Ui, id: &str, provider: Option<
                         }
                         if ui.small_button("×").on_hover_text("Remove row").clicked() {
                             remove = Some(ri);
+                        }
+                        // The rule picked on the canvas (a security-group rule edge).
+                        let picked = (id.to_string(), ri);
+                        if provider.is_none() && app.selected_rule.as_ref() == Some(&picked) {
+                            let r = ui.label(
+                                RichText::new("◀ selected on the canvas")
+                                    .small()
+                                    .color(Color32::from_rgb(30, 100, 220)),
+                            );
+                            if app.focus_rule.as_ref() == Some(&picked) {
+                                r.scroll_to_me(Some(egui::Align::Center));
+                                app.focus_rule = None;
+                            }
                         }
                         ui.end_row();
                     }

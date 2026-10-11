@@ -514,9 +514,14 @@ pub enum AgentCommand {
         /// Tidy this view (in its own layout) and put its anchored notes back beside
         /// their anchors afterwards.
         view: Option<String>,
-        /// `links` (the default: columns by dependency) or `flows` (the view's data
-        /// flows, left to right in step order; needs a view).
+        /// `links` (the default: columns by dependency), `flows` (the view's data
+        /// flows, left to right in step order; needs a view) or `tiers` (bands edge /
+        /// public / app / data / regional, one row per availability zone).
         by: Option<String>,
+        /// `tiers` only: `columns` (bands left to right, the default) or `rows`.
+        direction: Option<String>,
+        /// `tiers` only: entity (id or name) -> tier, overriding the derived one.
+        tiers: Option<std::collections::BTreeMap<String, String>>,
     },
     // View tools: flows generated from links, notes put back beside their anchors.
     /// Derive flows from the links (`data_flow`) or build "Where personal data goes"

@@ -58,6 +58,13 @@ impl TtgApp {
             && self.is_visible(&e.source)
             && self.is_visible(&e.target)
             && (self.filter.relations.is_empty() || self.filter.relations.contains(&e.relation))
+            && !(self.filter.hide_monitoring
+                && ttg_codegen::canvas::is_monitoring_link(
+                    &self.project,
+                    &self.catalog,
+                    &e.source,
+                    &e.target,
+                ))
     }
 
     /// Number of entities the current filter hides.
@@ -628,6 +635,16 @@ fn filter_menu(app: &mut TtgApp, ui: &mut Ui) {
         {
             let mut f = app.filter.clone();
             f.hide_edges = hide_edges;
+            app.set_filter(f);
+        }
+        let mut hide_monitoring = app.filter.hide_monitoring;
+        if ui
+            .checkbox(&mut hide_monitoring, "Hide monitoring links")
+            .on_hover_text("Draw no links from or to alarms, log groups, audit trails and budgets; the resources stay.")
+            .changed()
+        {
+            let mut f = app.filter.clone();
+            f.hide_monitoring = hide_monitoring;
             app.set_filter(f);
         }
         ui.label(RichText::new("Link kinds").small().color(Color32::from_gray(110)));

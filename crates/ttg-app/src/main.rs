@@ -28,6 +28,8 @@ mod inspector;
 mod mcp;
 mod menu;
 mod palette;
+mod region;
+mod rule_edges;
 mod schema_editor;
 mod view_tools;
 mod views;
