@@ -23,7 +23,7 @@ pub struct Presentation {
 impl TtgApp {
     /// This frame's visibility as an owned predicate, so a copy of the active view can
     /// be edited while it is consulted.
-    fn visible_owned(&self) -> impl Fn(&str) -> bool {
+    pub(crate) fn visible_owned(&self) -> impl Fn(&str) -> bool {
         let vis = self.visible.clone();
         move |id: &str| vis.as_ref().is_none_or(|s| s.contains(id))
     }
@@ -149,8 +149,17 @@ impl TtgApp {
         self.activate_view(Some(i));
         let opts = ttg_core::layout::TidyOptions::default();
         let cat = self.catalog.clone();
+        let visible = self.visible_owned();
         self.with_layout(|p| {
-            ttg_codegen::canvas::tidy_by_tiers(p, &cat, &Default::default(), &Self::size_of, &opts, false)
+            ttg_codegen::canvas::tidy_shown_by_tiers(
+                p,
+                &cat,
+                &Default::default(),
+                &visible,
+                &Self::size_of,
+                &opts,
+                false,
+            )
         });
         self.finish(before);
         self.fit_requested = true;

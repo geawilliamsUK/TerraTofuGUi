@@ -3355,13 +3355,18 @@ fn headless_subnets_hold_resources_and_tiers_lay_out() {
     );
     // The app server stayed inside its subnet.
     assert_eq!(node(&mut c, "vm-7e8f9a0b")["parent"], json!("subnet-9c0d1e2f"));
-    // Top to bottom, and an override moves the bucket to the edge band.
+    // Top to bottom, and an override moves the bucket to the edge band, where the internet
+    // gateway already is.
     let (err, t) = c.call(
         "layout_tidy",
         json!({"by": "tiers", "direction": "rows", "tiers": {"assets": "edge"}}),
     );
     assert!(!err, "{t}");
-    assert_eq!(t["tiers"]["edge"], json!(["assets"]), "{t}");
+    assert_eq!(
+        t["tiers"]["edge"],
+        json!(["igw", "assets"]),
+        "the gateway and the override: {t}"
+    );
     assert!(y(&mut c, lb) < y(&mut c, db), "rows: public above data");
     // Determinism: the same call lays out the same.
     let before = project_of(&mut c)["nodes"].clone();
@@ -3389,6 +3394,21 @@ fn headless_subnets_hold_resources_and_tiers_lay_out() {
     let (err, got) = c.call("view_get", json!({"name": "Network"}));
     assert!(!err, "{got}");
     assert_eq!(got["filter"]["hide_monitoring"], json!(true), "{got}");
+    // Subnets are grouped by the tier their route table gives them — the internet
+    // gateway's tables public, the NAT's private — left to right, one row per zone.
+    let pos = &got["layout"]["positions"];
+    let at = |id: &str, axis: &str| pos[id][axis].as_i64().unwrap_or_else(|| panic!("{id}: {pos}"));
+    let (igw, web_a, web_b) = ("igw-6f7a8b9c", "subnet-9c0d1e2f", "subnet-0d1e2f3a");
+    let (data_a, data_b) = ("subnet-3a4b5c6d", "subnet-4b5c6d7e");
+    assert!(
+        at(igw, "x") < at(web_a, "x") && at(web_a, "x") < at(data_a, "x"),
+        "{pos}"
+    );
+    assert_eq!(at(web_a, "x"), at(web_b, "x"), "{pos}");
+    assert_eq!(at(data_a, "x"), at(data_b, "x"), "{pos}");
+    assert_eq!(at(web_a, "y"), at(data_a, "y"), "zone a lines up: {pos}");
+    assert_eq!(at(web_b, "y"), at(data_b, "y"), "zone b lines up: {pos}");
+    assert!(at(web_a, "y") < at(web_b, "y"), "{pos}");
 }
 
 #[test]

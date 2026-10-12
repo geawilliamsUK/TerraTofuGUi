@@ -6,7 +6,8 @@ use std::collections::BTreeMap;
 use std::path::Path;
 use ttg_catalog::Catalog;
 use ttg_catalog::Tier;
-use ttg_codegen::{canvas, diagnostics, generate, reach};
+use ttg_codegen::canvas::SubnetRoute;
+use ttg_codegen::{canvas, diagnostics, generate, reach, views};
 use ttg_core::{Project, Relation, Tool};
 
 const PROVIDERS: [&str; 3] = ["aws", "azure", "gcp"];
@@ -446,6 +447,137 @@ fn tiers_are_derived_deterministically() {
     let mut v = p.clone();
     canvas::tidy_by_tiers(&mut v, &cat, &Default::default(), &size, &opts, true);
     assert!(y(&v, "lb-shop") < y(&v, "app-web") && y(&v, "app-web") < y(&v, "db-shop"));
+}
+
+/// The containers example with the textbook three routes: the public subnets via the
+/// internet gateway, the app subnets via NAT, and the data subnets in a table of their
+/// own with no default route.
+fn routed_three_ways() -> Project {
+    let mut p = example("containers.ttg.json");
+    p.edges
+        .retain(|e| !(e.source == "rt-private" && e.target.starts_with("sub-db-")));
+    let mut rt = p.nodes["rt-private"].clone();
+    rt.id = "rt-isolated".into();
+    rt.name = "isolated routes".into();
+    p.nodes.insert(rt.id.clone(), rt);
+    for s in ["sub-db-a", "sub-db-b"] {
+        p.add_edge("rt-isolated", s, Relation::Attachment);
+    }
+    p
+}
+
+/// A subnet is public, private or isolated by its route table, and that decides its
+/// tier: public for an internet gateway, else what is in it (apps or data), else app for
+/// NAT and data for no default route; what is in a public subnet goes with it. Without a
+/// route table the name and the public-address flag still say.
+#[test]
+fn subnets_take_their_tier_from_their_route_table() {
+    let cat = Catalog::builtin();
+    let p = routed_three_ways();
+    let route = |q: &Project, id: &str| canvas::subnet_route(q, id);
+    assert_eq!(route(&p, "sub-pub-b"), Some(SubnetRoute::Public));
+    assert_eq!(route(&p, "sub-app-a"), Some(SubnetRoute::Private));
+    assert_eq!(route(&p, "sub-db-b"), Some(SubnetRoute::Isolated));
+    let t = canvas::tiers(&p, &cat, &Default::default());
+    assert_eq!(
+        (t["sub-pub-a"], t["sub-app-a"], t["sub-db-a"]),
+        (Tier::Public, Tier::App, Tier::Data)
+    );
+    // One table shared by apps and data (as in the example) says little: what is in the
+    // subnets tells them apart.
+    let shared = example("containers.ttg.json");
+    assert_eq!(route(&shared, "sub-db-a"), Some(SubnetRoute::Private));
+    let ts = canvas::tiers(&shared, &cat, &Default::default());
+    assert_eq!((ts["sub-app-a"], ts["sub-db-a"]), (Tier::App, Tier::Data));
+    // Empty, they take it from the route alone.
+    let mut empty = p.clone();
+    empty
+        .edges
+        .retain(|e| !(e.relation == Relation::NetworkMembership && e.target.starts_with("sub-")));
+    let te = canvas::tiers(&empty, &cat, &Default::default());
+    assert_eq!(
+        (te["sub-pub-a"], te["sub-app-b"], te["sub-db-b"]),
+        (Tier::Public, Tier::App, Tier::Data)
+    );
+    // The apps in subnets routed to the internet gateway are in the public tier.
+    let mut open = p.clone();
+    open.edges
+        .retain(|e| !(e.source == "rt-private" && e.target.starts_with("sub-app-")));
+    for s in ["sub-app-a", "sub-app-b"] {
+        open.add_edge("rt-public", s, Relation::Attachment);
+    }
+    let to = canvas::tiers(&open, &cat, &Default::default());
+    assert_eq!(
+        (to["sub-app-a"], to["app-web"], to["db-shop"]),
+        (Tier::Public, Tier::Public, Tier::Data)
+    );
+    // The internet gateway is the edge.
+    assert_eq!(t["igw-shop"], Tier::Edge);
+    // No route tables: the name, the flag and what is in the subnet decide, as before.
+    let mut bare = p.clone();
+    bare.nodes.retain(|_, n| n.resource_type != "route_table");
+    let nodes = bare.nodes.clone();
+    bare.edges
+        .retain(|e| nodes.contains_key(&e.source) && nodes.contains_key(&e.target));
+    assert_eq!(route(&bare, "sub-pub-a"), None);
+    let tb = canvas::tiers(&bare, &cat, &Default::default());
+    assert_eq!(
+        (tb["sub-pub-a"], tb["sub-app-a"], tb["sub-db-a"]),
+        (Tier::Public, Tier::App, Tier::Data)
+    );
+}
+
+/// The network view reads left to right — internet gateway, public, private, isolated —
+/// with a row per availability zone across the tiers, the zones' subnets above what spans
+/// them and the security groups last, and lays out only what the view shows.
+#[test]
+fn the_network_view_groups_subnets_by_tier_and_zone() {
+    let cat = Catalog::builtin();
+    let p = routed_three_ways();
+    let visible = views::visible_set(&p, &cat, &canvas::network_view_filter());
+    let shown = |id: &str| visible.as_ref().is_none_or(|v| v.contains(id));
+    assert!(!shown("alm-worker") && shown("lb-shop"));
+    let size = |q: &Project, id: &str| {
+        q.nodes
+            .get(id)
+            .and_then(|n| n.size)
+            .unwrap_or(ttg_core::NODE_SIZE)
+    };
+    let opts = ttg_core::layout::TidyOptions::default();
+    let mut a = p.clone();
+    canvas::tidy_shown_by_tiers(&mut a, &cat, &Default::default(), &shown, &size, &opts, false);
+    let x = |id: &str| a.entity(id).unwrap().position.x;
+    let y = |id: &str| a.entity(id).unwrap().position.y;
+    assert!(x("igw-shop") < x("sub-pub-a"), "the gateway is the edge");
+    assert!(x("sub-pub-a") < x("sub-app-a") && x("sub-app-a") < x("sub-db-a"));
+    assert_eq!(x("sub-pub-a"), x("sub-pub-b"), "a tier is one column");
+    // Rows: the zones line up across the tiers.
+    assert_eq!(y("sub-pub-a"), y("sub-app-a"));
+    assert_eq!(y("sub-app-a"), y("sub-db-a"));
+    assert_eq!(y("sub-pub-b"), y("sub-db-b"));
+    assert!(y("sub-pub-a") < y("sub-pub-b"));
+    // What spans zones is under their subnets, the firewall under that.
+    assert!(y("lb-shop") > y("sub-db-b") && y("rt-public") > y("sub-db-b"));
+    assert!(y("sg-lb") > y("lb-shop"));
+    // The database is with the tier of its subnets, not the gateway's.
+    assert!(x("lb-shop") < x("db-shop"));
+    // Nothing is drawn on top of anything else.
+    let nodes: Vec<&str> = p
+        .nodes
+        .keys()
+        .map(String::as_str)
+        .filter(|id| shown(id) && !a.is_box(id))
+        .collect();
+    for (i, m) in nodes.iter().enumerate() {
+        let r = |id: &str| ttg_core::view::Rect::new(a.entity(id).unwrap().position, size(&a, id));
+        for o in &nodes[i + 1..] {
+            assert!(!r(m).intersects(r(o)), "{m} overlaps {o}");
+        }
+    }
+    // The same layout twice is the same picture.
+    let mut b = p.clone();
+    canvas::tidy_shown_by_tiers(&mut b, &cat, &Default::default(), &shown, &size, &opts, false);
+    assert_eq!(a, b);
 }
 
 /// Security-group rows become edges between groups (or badges for addresses), in the

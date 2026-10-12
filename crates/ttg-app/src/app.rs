@@ -1434,8 +1434,17 @@ impl TtgApp {
         let before = self.snapshot();
         let opts = ttg_core::layout::TidyOptions::default();
         let cat = self.catalog.clone();
+        let visible = self.visible_owned();
         self.with_layout(|p| {
-            ttg_codegen::canvas::tidy_by_tiers(p, &cat, overrides, &Self::size_of, &opts, vertical)
+            ttg_codegen::canvas::tidy_shown_by_tiers(
+                p,
+                &cat,
+                overrides,
+                &visible,
+                &Self::size_of,
+                &opts,
+                vertical,
+            )
         });
         let notes = self.arrange_view_notes_now();
         self.finish(before);

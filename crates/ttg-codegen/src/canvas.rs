@@ -78,12 +78,55 @@ pub fn zone_badge(p: &Project, cat: &Catalog, id: &str) -> Option<String> {
 
 // ------------------------------------------------------------------ tier layout
 
+/// How a subnet reaches the internet, from the route tables applied to it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SubnetRoute {
+    /// A default route via an internet gateway.
+    Public,
+    /// A default route via a NAT gateway: out, but not in.
+    Private,
+    /// A route table with neither.
+    Isolated,
+}
+
+/// The route of a subnet: public when a route table applied to it has a default route
+/// via an internet gateway, else private when one has it via a NAT gateway, else isolated.
+/// `None` for a subnet no route table is applied to.
+pub fn subnet_route(p: &Project, id: &str) -> Option<SubnetRoute> {
+    let tables: Vec<&str> = p
+        .edges_to(id)
+        .filter(|e| e.relation == Relation::Attachment)
+        .map(|e| e.source.as_str())
+        .filter(|t| p.nodes.get(*t).is_some_and(|n| n.resource_type == "route_table"))
+        .collect();
+    let via = |kind: &str| {
+        tables.iter().any(|t| {
+            p.edges_from(t).any(|e| {
+                e.relation == Relation::AttributeReference
+                    && p.nodes.get(&e.target).is_some_and(|n| n.resource_type == kind)
+            })
+        })
+    };
+    if tables.is_empty() {
+        None
+    } else if via("internet_gateway") {
+        Some(SubnetRoute::Public)
+    } else if via("nat_gateway") {
+        Some(SubnetRoute::Private)
+    } else {
+        Some(SubnetRoute::Isolated)
+    }
+}
+
 /// The tier of every entity, deterministic:
 ///
 /// 1. `overrides` (from the agent's `layout_tidy` call) win;
-/// 2. a subnet takes the tier most of what is in it has (drawn inside or linked), else
-///    public when it gives out public addresses or is named so, data when named so,
-///    else app;
+/// 2. a subnet with a route table is public when the table has a default route via an
+///    internet gateway (and what is in it goes with it); otherwise it takes the app or
+///    data tier most of what is in it has (drawn inside or linked), else app for a route
+///    via a NAT gateway and data for none. Without a route table it takes the tier most
+///    of what is in it has, else public when it gives out public addresses or is named
+///    so, data when named so, else app;
 /// 3. a security group takes the tier most of the resources carrying it have, and a
 ///    route table that of the subnets it is attached to;
 /// 4. everything else its type's tier (the definition's `tier`, else its category's);
@@ -111,7 +154,18 @@ pub fn tiers(p: &Project, cat: &Catalog, overrides: &BTreeMap<Id, Tier>) -> BTre
         let best = count.values().copied().max()?;
         count.into_iter().find(|(_, c)| *c == best).map(|(t, _)| t)
     };
-    // Subnets: from what is in them.
+    // What is in a public subnet (one routed to an internet gateway) goes with it.
+    let is_public = |s: &Id| subnet_route(p, s) == Some(SubnetRoute::Public);
+    for n in p.nodes.values() {
+        if n.resource_type == "subnet" || overrides.contains_key(&n.id) {
+            continue;
+        }
+        let subnets = subnets_of(p, cat, &p.entity(&n.id).unwrap());
+        if subnets.iter().filter(|s| is_public(s)).count() * 2 > subnets.len() {
+            out.insert(n.id.clone(), Tier::Public);
+        }
+    }
+    // Subnets: from their route table, then from what is in them.
     let mut members: BTreeMap<Id, Vec<Tier>> = BTreeMap::new();
     for n in p.nodes.values() {
         if n.resource_type == "subnet" {
@@ -126,23 +180,41 @@ pub fn tiers(p: &Project, cat: &Catalog, overrides: &BTreeMap<Id, Tier>) -> BTre
         if overrides.contains_key(&n.id) {
             continue;
         }
-        let t = majority(members.get(&n.id).map(Vec::as_slice).unwrap_or(&[])).unwrap_or_else(|| {
-            let name = n.name.to_lowercase();
-            let public = n
-                .provider_config
-                .values()
-                .any(|c| c.get("map_public_ip").and_then(Value::as_bool) == Some(true));
-            if public || name.contains("public") || name.starts_with("pub") || name.contains("dmz") {
-                Tier::Public
-            } else if ["data", "db", "database", "storage"]
-                .iter()
-                .any(|w| name.contains(w))
-            {
-                Tier::Data
-            } else {
-                Tier::App
+        let held = members.get(&n.id).map(Vec::as_slice).unwrap_or(&[]);
+        let t = match subnet_route(p, &n.id) {
+            Some(SubnetRoute::Public) => Tier::Public,
+            // A route table shared by app and data subnets says little: what is in the
+            // subnet decides, and its route only when it is empty.
+            Some(route) => {
+                let inner: Vec<Tier> = held
+                    .iter()
+                    .copied()
+                    .filter(|t| matches!(t, Tier::App | Tier::Data))
+                    .collect();
+                majority(&inner).unwrap_or(if route == SubnetRoute::Private {
+                    Tier::App
+                } else {
+                    Tier::Data
+                })
             }
-        });
+            None => majority(held).unwrap_or_else(|| {
+                let name = n.name.to_lowercase();
+                let public = n
+                    .provider_config
+                    .values()
+                    .any(|c| c.get("map_public_ip").and_then(Value::as_bool) == Some(true));
+                if public || name.contains("public") || name.starts_with("pub") || name.contains("dmz") {
+                    Tier::Public
+                } else if ["data", "db", "database", "storage"]
+                    .iter()
+                    .any(|w| name.contains(w))
+                {
+                    Tier::Data
+                } else {
+                    Tier::App
+                }
+            }),
+        };
         out.insert(n.id.clone(), t);
     }
     // Security groups and route tables: from what they serve.
@@ -224,8 +296,14 @@ pub fn tier_row(p: &Project, cat: &Catalog, id: &str) -> String {
     }
 }
 
+/// Row of what is in no zone or several, after the zones' own.
+const SHARED_ROW: &str = "~";
+/// Row of the security groups, last: the firewall under everything it protects.
+const FIREWALL_ROW: &str = "~~";
+
 /// Lay the project out by tiers (see [`tiers`] and `ttg_core::layout::tidy_tiers`):
-/// bands left to right, or top to bottom with `vertical`, one row per availability zone.
+/// bands left to right, or top to bottom with `vertical`, one row per availability zone
+/// — the subnets on top, then what is shared by several zones, then the security groups.
 pub fn tidy_by_tiers(
     p: &mut Project,
     cat: &Catalog,
@@ -234,16 +312,40 @@ pub fn tidy_by_tiers(
     opts: &TidyOptions,
     vertical: bool,
 ) {
+    tidy_shown_by_tiers(p, cat, overrides, &|_| true, node_size, opts, vertical);
+}
+
+/// [`tidy_by_tiers`] for what `shown` lets through: the rest stays where it is and takes
+/// no room, so a view that hides most of the diagram is laid out as if it were all there
+/// is.
+pub fn tidy_shown_by_tiers(
+    p: &mut Project,
+    cat: &Catalog,
+    overrides: &BTreeMap<Id, Tier>,
+    shown: &dyn Fn(&str) -> bool,
+    node_size: &dyn Fn(&Project, &str) -> Size,
+    opts: &TidyOptions,
+    vertical: bool,
+) {
     let tier = tiers(p, cat, overrides);
     let rows: BTreeMap<Id, String> = p
         .entities()
         .iter()
-        .map(|e| (e.id.to_string(), tier_row(p, cat, e.id)))
+        .map(|e| {
+            let row = match tier_row(p, cat, e.id) {
+                zone if !zone.is_empty() => zone,
+                _ if e.resource_type == "security_group" => FIREWALL_ROW.into(),
+                _ => SHARED_ROW.into(),
+            };
+            (e.id.to_string(), row)
+        })
         .collect();
     let place = |q: &Project, id: &str| Place {
         band: tier.get(id).copied().unwrap_or(Tier::App).index(),
         row: rows.get(id).cloned().unwrap_or_default(),
         first: q.entity(id).is_some_and(|e| e.resource_type == "subnet"),
+        hidden: !shown(id)
+            || (q.containers.contains_key(id) && !ttg_core::view::has_visible_members(q, id, shown)),
     };
     ttg_core::layout::tidy_tiers(p, &place, node_size, opts, vertical);
 }

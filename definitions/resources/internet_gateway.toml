@@ -16,6 +16,7 @@ description = "Gives a virtual network a route to the internet. Point a Route Ta
 kind = "node"
 allowed_parents = ["virtual_network", "resource_group"]
 icon = "IGW"
+tier = "edge"
 
 [[relations]]
 kind = "network_membership"

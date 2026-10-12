@@ -296,14 +296,16 @@ fn layout_children(
 }
 
 /// Where the tier layout puts an entity among its siblings: the band (`0` = the first,
-/// left-most or top-most) and the row within it — the availability zone it is pinned to,
-/// or `""` for what is not pinned to one zone (shared items come first) — and whether it
-/// leads its cell (a zone's subnet, before what sits beside it), so the rows line up.
+/// left-most or top-most) and the row within it (rows run in the order of their names,
+/// an availability zone's label say), whether it leads its cell (a zone's subnet, before
+/// what sits beside it, so the rows line up), and whether it is `hidden`: left out, it
+/// takes no room and is not placed (what it sits inside may still carry it along).
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
 pub struct Place {
     pub band: usize,
     pub row: String,
     pub first: bool,
+    pub hidden: bool,
 }
 
 /// Most items stacked in one cell of the tier grid before it wraps into another column.
@@ -333,7 +335,20 @@ fn tier_children(
     opts: &TidyOptions,
     vertical: bool,
 ) -> Size {
-    let children = direct_children(p, parent);
+    let mut cells: BTreeMap<(String, usize), Vec<Id>> = BTreeMap::new();
+    let mut first: BTreeSet<Id> = BTreeSet::new();
+    let mut children = Vec::new();
+    for c in direct_children(p, parent) {
+        let pl = place(p, &c);
+        if pl.hidden {
+            continue;
+        }
+        if pl.first {
+            first.insert(c.clone());
+        }
+        cells.entry((pl.row, pl.band)).or_default().push(c.clone());
+        children.push(c);
+    }
     if children.is_empty() {
         return Size { w: 0, h: 0 };
     }
@@ -352,16 +367,7 @@ fn tier_children(
             sizes.insert(c.clone(), node_size(p, c));
         }
     }
-    // Cells of the grid: (row, band) -> items in reading order.
-    let mut cells: BTreeMap<(String, usize), Vec<Id>> = BTreeMap::new();
-    let mut first: BTreeSet<Id> = BTreeSet::new();
-    for c in &children {
-        let pl = place(p, c);
-        if pl.first {
-            first.insert(c.clone());
-        }
-        cells.entry((pl.row, pl.band)).or_default().push(c.clone());
-    }
+    // Cells of the grid (row, band), items in reading order.
     for items in cells.values_mut() {
         items.sort_by_cached_key(|id| {
             let e = p.entity(id).unwrap();
@@ -380,6 +386,7 @@ fn tier_children(
         .collect::<BTreeSet<_>>()
         .into_iter()
         .collect();
+    reduce_crossings(p, parent, &children, &first, &rows, &mut cells);
     let bands: Vec<usize> = cells
         .keys()
         .map(|(_, b)| *b)
@@ -504,6 +511,91 @@ fn tier_children(
         Size {
             w: total_cross,
             h: total_main,
+        }
+    }
+}
+
+/// Sweeps of [`reduce_crossings`].
+const SWEEPS: usize = 4;
+
+/// Where each item of the grid sits along its band, in item slots: a row starts after the
+/// tallest cell of the one before, a cell stacks its items one slot apart and wraps like
+/// the layout does.
+fn slots(cells: &BTreeMap<(String, usize), Vec<Id>>, rows: &[String]) -> BTreeMap<Id, f32> {
+    let mut out = BTreeMap::new();
+    let mut top = 0.0;
+    for r in rows {
+        let row = cells.iter().filter(|((cr, _), _)| cr == r);
+        let height = row
+            .clone()
+            .map(|(_, v)| v.len().min(CELL_STACK))
+            .max()
+            .unwrap_or(0);
+        for (_, items) in row {
+            for (i, id) in items.iter().enumerate() {
+                out.insert(id.clone(), top + (i % CELL_STACK) as f32);
+            }
+        }
+        top += height as f32 + 1.0;
+    }
+    out
+}
+
+/// Fewer crossing links: reorder each cell by the average place of what its items link
+/// to in other cells (barycentre sweeps, as the layered layouts do), a zone's subnet
+/// staying first. Items with no links to other cells keep their place.
+fn reduce_crossings(
+    p: &Project,
+    parent: Option<&str>,
+    children: &[Id],
+    first: &BTreeSet<Id>,
+    rows: &[String],
+    cells: &mut BTreeMap<(String, usize), Vec<Id>>,
+) {
+    let here: BTreeSet<&Id> = children.iter().collect();
+    let mut adj: BTreeMap<Id, BTreeSet<Id>> = BTreeMap::new();
+    for e in &p.edges {
+        let (Some(a), Some(b)) = (
+            representative(p, parent, &e.source),
+            representative(p, parent, &e.target),
+        ) else {
+            continue;
+        };
+        if a != b && here.contains(&a) && here.contains(&b) {
+            adj.entry(a.clone()).or_default().insert(b.clone());
+            adj.entry(b).or_default().insert(a);
+        }
+    }
+    if adj.is_empty() {
+        return;
+    }
+    let keys: Vec<(String, usize)> = cells.keys().cloned().collect();
+    for _ in 0..SWEEPS {
+        for k in &keys {
+            let at = slots(cells, rows);
+            let items = &cells[k];
+            let mut keyed: Vec<(bool, f32, usize)> = items
+                .iter()
+                .enumerate()
+                .map(|(i, id)| {
+                    let far: Vec<f32> = adj
+                        .get(id)
+                        .into_iter()
+                        .flatten()
+                        .filter(|n| !items.contains(n))
+                        .map(|n| at[n])
+                        .collect();
+                    let key = if far.is_empty() {
+                        at[id]
+                    } else {
+                        far.iter().sum::<f32>() / far.len() as f32
+                    };
+                    (!first.contains(id), key, i)
+                })
+                .collect();
+            keyed.sort_by(|a, b| a.0.cmp(&b.0).then(a.1.total_cmp(&b.1)).then(a.2.cmp(&b.2)));
+            let sorted: Vec<Id> = keyed.iter().map(|(_, _, i)| items[*i].clone()).collect();
+            cells.insert(k.clone(), sorted);
         }
     }
 }
@@ -698,6 +790,55 @@ mod tests {
         let cs = p.containers["c"].size;
         assert!(b.x >= c.x && d.x + 100 <= c.x + cs.w, "children inside container");
         assert!(b.y >= c.y + 44);
+    }
+
+    fn tiered(ids: &[&str]) -> Project {
+        let mut p = Project::new("t");
+        for id in ids {
+            p.nodes.insert(id.to_string(), node(id, None));
+        }
+        p
+    }
+
+    /// A hidden entity takes no room and stays where it is.
+    #[test]
+    fn tidy_tiers_leaves_hidden_entities_out() {
+        let mut p = tiered(&["a", "h", "z"]);
+        let at = Position { x: 900, y: 900 };
+        p.nodes.get_mut("h").unwrap().position = at;
+        let place = |_: &Project, id: &str| Place {
+            band: 0,
+            row: String::new(),
+            first: false,
+            hidden: id == "h",
+        };
+        let opts = TidyOptions::default();
+        tidy_tiers(&mut p, &place, &sz, &opts, false);
+        assert_eq!(p.nodes["h"].position, at);
+        assert_eq!(
+            p.nodes["z"].position.y,
+            p.nodes["a"].position.y + 50 + opts.row_gap
+        );
+    }
+
+    /// A cell is ordered by where its links lead, so links between two bands do not cross.
+    #[test]
+    fn tidy_tiers_orders_a_cell_by_its_links() {
+        let mut p = tiered(&["p", "q", "a", "b"]);
+        // Names sort a, b and p, q; p links to b and q to a, so a plain sort would cross.
+        p.add_edge("p", "b", Relation::DependsOn);
+        p.add_edge("q", "a", Relation::DependsOn);
+        let place = |_: &Project, id: &str| Place {
+            band: usize::from(id == "a" || id == "b"),
+            row: String::new(),
+            first: false,
+            hidden: false,
+        };
+        tidy_tiers(&mut p, &place, &sz, &TidyOptions::default(), false);
+        let y = |id: &str| p.nodes[id].position.y;
+        // Each pair sits level: the links run straight across.
+        assert_eq!((y("p"), y("q")), (y("b"), y("a")));
+        assert_ne!(y("p"), y("q"));
     }
 
     #[test]
