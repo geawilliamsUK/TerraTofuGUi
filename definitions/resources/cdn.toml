@@ -6,10 +6,11 @@
 #      origin is a custom origin reached by a name its certificate covers: a DNS Record
 #      that aliases the load balancer (origin.example.com), never the ALB's own dns_name,
 #      which no certificate can cover. Cache and origin-request policies are AWS managed
-#      policies, written as their fixed global IDs (docs.aws.amazon.com/AmazonCloudFront/
-#      latest/DeveloperGuide/using-managed-cache-policies.html, .../using-managed-origin-
-#      request-policies.html) so a plan needs no cloudfront:List*Policies. The linked certificate and Web Application Firewall each
-#      grow a us-east-1 copy of themselves, because that is the only shape CloudFront accepts.
+#      policies, written as their fixed global IDs so a plan needs no
+#      cloudfront:List*Policies (AmazonCloudFront/latest/DeveloperGuide/using-managed-cache-
+#      policies.html and using-managed-origin-request-policies.html on docs.aws.amazon.com).
+#      The linked certificate and Web Application Firewall each grow a us-east-1 copy of
+#      themselves, because that is the only shape CloudFront accepts.
 #      A secret origin header is a generated value the load balancer's listener checks.
 # Azure: Front Door Standard/Premium — profile, endpoint, origin group, origin and route,
 #      one more route per path behaviour, a managed-certificate custom domain, and a rule
