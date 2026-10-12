@@ -218,3 +218,17 @@ needs, which removed four false "blocked" findings on zipOS.
 Open, with the reason: `container_job` repeats most of `container_app`'s mapping (about
 900 lines) because the mapping language has no include; a shared-mapping mechanism would
 remove that.
+
+### zipOS feedback, third pass (2026-10-12)
+
+The zipOS staging design was rebuilt on the 2026-10-11 release binary. The only
+hand-written HCL left is a `no-verify` connection string and four name overrides; the log
+gained TF-032 to TF-043, plus the rest of TF-027 (ECR still needs its own `force_delete`).
+
+| Package | Scope | Items |
+|---|---|---|
+| **WP29 MCP and settings** | `null` deleting a mapped argument is a Warning and `$restore` is in every description that mentions `null`; `settings_set` leaves omitted keys unchanged and treats an explicit `null` as a clear, applies `environments` before checking per-environment keys, drops entries whose environment has gone, and is allowed inside `project_apply`; per-call `verbose` inside a batch; deleting an entity offers what happens to its notes; `plan_run` plans the project as it was when called | TF-032, TF-033, TF-043 (1, 3, 4) |
+| **WP30 Containers** | `container_job` shares `container_app`'s mapping through an include instead of a copy; a `no-verify` TLS mode with a note per driver; a switch for the variables "Uses database" injects, and no manual step when a Secret built from that database is read; "Uses bucket" injects the bucket name; the image is the linked repository's URL plus the tag; the container's health check sets the target group's thresholds; "disposable" sets ECR `force_delete` | TF-027 (rest), TF-035–TF-039 |
+| **WP31 Environments** | a Warning on a hand-set name without the prefix once environments exist; the environment in the database's snapshot identifier and `random_id` keepers; `db_connections_pct` per environment when the class is a variable | TF-041 |
+| **WP32 Edge and cost** | AWS managed CloudFront policies as constant IDs (no `List*Policies` permission needed); public IPv4 addresses priced; usage presets for the estimate; the regional Web ACL rechecked | TF-034, TF-040, TF-009 |
+| **WP33 Views** | the network view groups subnets by route-table tier, laid out left to right; the region frame's label clear of view groups; `view_arrange_notes` places free notes too | TF-042, TF-043 (2, 5) |
