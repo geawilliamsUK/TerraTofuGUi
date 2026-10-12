@@ -154,7 +154,9 @@ All of it affects only what the GUI draws, never what is generated.
 view puts an entity (in a view with its own layout a container is the padded bounding box
 of the members it still shows), which entities and logical nodes a box holds, where an
 anchored note lands (and where a note placed beside its anchor goes: `note_offset_beside`
-/ `arrange_notes`, shared by `view_note_add`, `view_arrange_notes` and tidy), and how
+/ `arrange_notes`, shared by `view_note_add`, `view_arrange_notes` and tidy; free notes
+in the way go to a column beside the content with `arrange_free_notes`, which only
+`view_arrange_notes` calls), and how
 boxes nest. `ttg_core::flow_layout` lays a view out by its flows: a layered drawing
 ranked by the longest path of flows taken in step order (a depth-first walk from the
 earliest steps drops the flows that close a cycle), the view's grouping boxes as
@@ -162,14 +164,18 @@ swimlanes stacked in the order their members first take part, four barycentre sw
 against crossings, and each item aiming for the height of what flows into it; positions
 land in the view's own layout and the boxes are refitted around their members.
 `ttg_core::layout::tidy_tiers` lays a project out in tier bands (edge, public, app, data,
-regional; left to right or top to bottom) crossed by one row per availability zone —
-items in no zone or several share the first row — recursively inside every container and
-every subnet holding resources, each fitted to what it holds; a cell stacks at most six
-items before it wraps. Where each entity goes is `ttg_codegen::canvas`'s business: the
-type's tier (the definition's `tier`, else its category's), a subnet's from what is in
-it or linked to it, a security group's from what carries it, a route table's from its
-subnets, a container's from what it holds, and the row from the zones of the subnets
-it is in. The same module derives what else the canvas shows without storing it:
+regional; left to right or top to bottom) crossed by rows in name order, recursively
+inside every container and every subnet holding resources, each fitted to what it holds;
+a cell stacks at most six items before it wraps and is ordered by where its links lead
+(barycentre sweeps), and what the caller calls hidden takes no room (so a filtered view
+is laid out as if it were all there is). Where each entity goes is
+`ttg_codegen::canvas`'s business: the type's tier (the definition's `tier`, else its
+category's), a subnet's from its route table (`subnet_route`: public by a default route
+via an internet gateway, else app or data by what is in it, else by NAT or no route),
+which also takes what is in a public subnet, else from what is in it or linked to it, a
+security group's from what carries it, a route table's from its subnets, a container's
+from what it holds, and the row from the zones of the subnets it is in: a row per zone,
+then what spans zones, then the security groups. The same module derives what else the canvas shows without storing it:
 security-group rule rows as edges (`rule_edges`: group to group in the direction of the
 traffic, or an `Outside` peer — the internet, a CIDR, an AWS-managed prefix list),
 monitoring links (`is_monitoring_link`, any link from or to the `monitoring` category,

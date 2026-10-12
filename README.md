@@ -208,7 +208,8 @@ OpenTofu installed, so a definition change that produces invalid HCL fails the b
   row marked in the inspector. *View ▸ Security group rules* draws them between the
   groups, between the resources carrying them, or not at all; they follow *Hide
   structural links* and are left out while the filter shows only some link kinds.
-- **Region frame** (View menu): a light frame around the drawing, "AWS · eu-west-2",
+- **Region frame** (View menu): a light frame around the drawing and the view's boxes,
+  "AWS · eu-west-2",
   with any other region the export reaches through an aliased provider named after it
   ("+ us-east-1 for 2 resources") and those resources badged `us-east-1`. Never an
   entity, never exported.
@@ -224,8 +225,11 @@ OpenTofu installed, so a definition change that produces invalid HCL fails the b
   certificates), public (load balancers, gateways, public subnets), application, data
   (databases, caches, buckets, queues), regional services (identity, secrets, logs,
   alarms, topics, budgets) — with one row per availability zone so subnet *a* of every
-  tier lines up, inside every network and subnet too; a subnet's tier comes from what
-  is in it, a security group's from what carries it (or *top to bottom*). Align
+  tier lines up (what spans zones under them, the security groups last), inside every
+  network and subnet too; a subnet's tier comes from its route table (public with a
+  route to an internet gateway, otherwise application or data by what is in it, else
+  by its route via NAT or none) and what is in a public subnet goes with it, a security
+  group's from what carries it (or *top to bottom*). Align
   left/centre/right/top/middle/bottom needs two or more selected items;
   distribute horizontally/vertically needs three. All undoable. The same layouts are
   available headless with `ttg tidy <project> [--by tiers] [--rows] [--out <file>]`.
@@ -569,9 +573,10 @@ back, so a big view is readable however small the window was. `view_generate { k
 builds "Where personal data goes", `{ kind: "network" }` a "Network" view laid out by
 tiers; `layout_tidy { view, by: "flows" }` lays a view out by its flows, `layout_tidy {
 by: "tiers", direction, tiers }` by tiers (with per-entity overrides), and
-`view_arrange_notes` puts its notes back beside their anchors (deleting an entity keeps
-the notes anchored to it where they are drawn, unanchored, and names them, or deletes
-them with `entity_delete { notes: "delete" }`); `entity_set_parent` puts
+`view_arrange_notes` puts its notes back beside their anchors and moves free notes that
+are in the way into a column beside the content (`free_notes: false` leaves those);
+deleting an entity keeps the notes anchored to it where they are drawn, unanchored, and
+names them, or deletes them with `entity_delete { notes: "delete" }`; `entity_set_parent` puts
 a resource inside a subnet;
 `view_export { format: "sequence" }` gives the steps as a sequence diagram; and
 `entity_update` (one entity or a `select`) takes `classification`, `description` and

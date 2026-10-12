@@ -54,9 +54,12 @@ Edit ▸ Arrange ▸ *Tidy by tiers*): `edge`, `public`, `app`, `data` or `regio
 it the category decides: `dns` → edge; `network`, `load_balancer` → public; `database`,
 `storage` → data; `iam`, `secrets`, `monitoring`, `organization` → regional; anything
 else → app. Native types are placed by words in their Terraform type (`aws_lb` public,
-`aws_db_instance` data, `aws_ecs_service` app, `aws_iam_role` regional). Subnets,
-security groups, route tables and containers are placed by what they hold or serve, not
-by their type (`ttg_codegen::canvas::tiers`). The tier changes only the layout.
+`aws_db_instance` data, `aws_ecs_service` app, `aws_iam_role` regional). A subnet
+with a route table is public when the table has a default route via an internet gateway,
+else application or data by what is in it (a NAT route and no route being the defaults
+for an empty one), and what is in a public subnet goes with it; security groups, route
+tables and containers are placed by what they hold or serve, not by their type
+(`ttg_codegen::canvas::tiers`). The tier changes only the layout.
 
 ### 1.1 Abstract fields
 

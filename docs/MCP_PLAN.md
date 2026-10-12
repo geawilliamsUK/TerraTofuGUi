@@ -235,9 +235,11 @@ resources it shows (`ttg_codegen::dataflow`, whose relation → direction table 
 ARCHITECTURE.md §4.1), skipping any pair that already has a flow, with `replace` first
 removing the resource-to-resource flows; the reply lists what was added, and a
 generation that changes nothing records no undo step. `personal_data` builds or
-refreshes "Where personal data goes" and switches to it. `view_arrange_notes { view? }`
+refreshes "Where personal data goes" and switches to it. `view_arrange_notes { view?, free_notes? }`
 puts anchored notes back beside their anchors (`ttg_core::view::arrange_notes`, the same
-placement `view_note_add` uses). `layout_tidy` takes `view` and `by: links | flows |
+placement `view_note_add` uses) and moves the free notes that overlap something into a
+column right of the content, in reading order (`arrange_free_notes`; `free_notes: false`
+leaves them). `layout_tidy` takes `view` and `by: links | flows |
 tiers`: `flows` is `ttg_core::flow_layout`, written into the view's own layout only;
 `tiers` is `ttg_codegen::canvas::tidy_by_tiers` (bands edge / public / app / data /
 regional, one row per availability zone), with `direction: columns | rows` and `tiers: {
