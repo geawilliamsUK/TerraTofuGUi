@@ -60,14 +60,15 @@ impl TtgApp {
                     }
                     if let Some(J::Object(per)) = o.get("environments") {
                         for (env, x) in per {
-                            if !p.settings.environments.contains(env) {
+                            // A value can always be removed, even one whose environment
+                            // has gone.
+                            if x.is_null() {
+                                var.environments.remove(env);
+                            } else if !p.settings.environments.contains(env) {
                                 return Err(format!(
                                     "variable \"{name}\": no environment \"{env}\" (environments: {})",
                                     p.settings.environments.join(", ")
                                 ));
-                            }
-                            if x.is_null() {
-                                var.environments.remove(env);
                             } else {
                                 var.environments.insert(env.clone(), to_value(&name, x)?);
                             }
@@ -103,6 +104,7 @@ impl TtgApp {
             "environments": s.environments,
             "name_prefix": s.name_prefix,
             "variables": s.variables,
+            "disposable_environments": s.disposable_environments,
             "overrides_removed_from": lost,
         }))
     }
@@ -262,36 +264,48 @@ impl TtgApp {
         Ok(json!({"status": "linked", "environments": environments}))
     }
 
-    /// Export for a plan and say what belongs to whom; the server plans off-thread.
+    /// Export for a plan and say what belongs to whom; the server plans off-thread. With
+    /// `at_call` (the call waited for approval) it exports the project as it was then.
     pub(super) fn plan_prepare(
         &mut self,
         dir: Option<String>,
         provider: Option<String>,
         environment: Option<String>,
         tool: Option<ttg_core::Tool>,
+        at_call: Option<Box<(ttg_core::Project, u64)>>,
     ) -> R {
-        let provider = provider.unwrap_or(self.project.settings.target_provider.clone());
-        let tool = tool.unwrap_or(self.project.settings.tool);
+        let (called, revision) = match at_call {
+            Some(b) => {
+                let (p, rev) = *b;
+                (Some(p), rev)
+            }
+            None => (None, self.mcp.revision),
+        };
+        let project = called.as_ref().unwrap_or(&self.project);
+        let provider = provider.unwrap_or(project.settings.target_provider.clone());
+        let tool = tool.unwrap_or(project.settings.tool);
         let dir = dir.unwrap_or_else(|| {
             std::env::temp_dir()
                 .join("terratofu-plan")
-                .join(ttg_core::slugify(&self.project.name))
+                .join(ttg_core::slugify(&project.name))
                 .join(&provider)
                 .to_string_lossy()
                 .to_string()
         });
-        let env = ttg_codegen::plan_run::environment_for(&self.project, environment.as_deref())?;
-        let a = ttg_codegen::plan_run::attribution_for(&self.project, &self.catalog, &provider, tool)
+        let env = ttg_codegen::plan_run::environment_for(project, environment.as_deref())?;
+        let a = ttg_codegen::plan_run::attribution_for(project, &self.catalog, &provider, tool)
             .map_err(|e| gen_error_text(&e))?;
-        let rep = ttg_codegen::export(
-            &self.project,
-            &self.catalog,
-            &provider,
-            tool,
-            std::path::Path::new(&dir),
-        )
-        .map_err(|e| gen_error_text(&e))?;
+        let rep = ttg_codegen::export(project, &self.catalog, &provider, tool, std::path::Path::new(&dir))
+            .map_err(|e| gen_error_text(&e))?;
+        let note = (revision != self.mcp.revision).then(|| {
+            format!(
+                "the project changed while the plan waited for approval (revision {revision} when plan_run was called, {} now): this plans it as it was when called",
+                self.mcp.revision
+            )
+        });
         Ok(json!({
+            "revision": revision,
+            "note": note,
             "provider": provider,
             "tool": tool,
             "dir": rep.out_dir,

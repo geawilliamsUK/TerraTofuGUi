@@ -413,6 +413,9 @@ pub enum AgentCommand {
     },
     EntityDelete {
         entities: Vec<String>,
+        /// Delete the view notes anchored to them too, instead of keeping them, unanchored,
+        /// where they are drawn.
+        delete_notes: bool,
     },
     LinkAdd {
         source: String,
@@ -716,6 +719,10 @@ pub enum AgentCommand {
         provider: Option<String>,
         environment: Option<String>,
         tool: Option<ttg_core::Tool>,
+        /// The project and its revision when `plan_run` was called, taken when the export
+        /// has to wait for approval: the plan is of that, not of whatever the project is
+        /// when the user allows it.
+        at_call: Option<Box<(ttg_core::Project, u64)>>,
     },
     /// What an export of a provider attributes to which entity (for `validate`).
     Attribution {
@@ -805,7 +812,7 @@ impl AgentCommand {
                 "write an export into {} and plan it",
                 dir.as_deref().unwrap_or("a temporary folder")
             )),
-            AgentCommand::EntityDelete { entities } if s.confirm_delete => {
+            AgentCommand::EntityDelete { entities, .. } if s.confirm_delete => {
                 Some(format!("delete {}", entities.join(", ")))
             }
             AgentCommand::LinkRemove { source, target, .. } if s.confirm_delete => {
@@ -875,8 +882,8 @@ impl AgentCommand {
     }
 }
 
-/// The short form of an entity_add / entity_update / link_add reply. A link's id is
-/// `<source> -<relation>-> <target>`.
+/// The short form of an entity_add / entity_update / link_add reply, keeping any
+/// `warning`. A link's id is `<source> -<relation>-> <target>`.
 fn terse_reply(r: &serde_json::Value, changed: bool) -> serde_json::Value {
     let id = r
         .get("id")
@@ -892,7 +899,11 @@ fn terse_reply(r: &serde_json::Value, changed: bool) -> serde_json::Value {
             )))
         })
         .unwrap_or(serde_json::Value::Null);
-    serde_json::json!({"status": r["status"], "id": id, "changed": changed})
+    let mut out = serde_json::json!({"status": r["status"], "id": id, "changed": changed});
+    if let Some(w) = r.get("warning") {
+        out["warning"] = w.clone();
+    }
+    out
 }
 
 /// Events pushed from the UI thread to the server runtime (fan-out to subscribed
@@ -1340,6 +1351,10 @@ impl TtgApp {
             self.mcp.push_log(label, &Err("dropped: caller gone".into()));
             return;
         }
+        let mut cmd = cmd;
+        if let AgentCommand::PlanPrepare { at_call, .. } = &mut cmd {
+            at_call.get_or_insert_with(|| Box::new((self.project.clone(), self.mcp.revision)));
+        }
         // An import that could never load is refused now, not after the user said yes.
         if let AgentCommand::ProjectImport { json, .. } = &cmd {
             if let Err(e) = exec::import_check(json) {
@@ -1481,15 +1496,9 @@ impl TtgApp {
     fn exec_logged(&mut self, cmd: AgentCommand) -> Result<serde_json::Value, String> {
         let label = cmd.label();
         let is_write = cmd.is_write();
-        let terse = cmd.terse(self.mcp.terse_replies);
-        let before = terse.then(|| self.project.clone());
         self.mcp.in_agent = true;
-        let result = self.agent_exec(cmd);
+        let result = self.agent_exec_reply(cmd);
         self.mcp.in_agent = false;
-        let result = match (result, before) {
-            (Ok(r), Some(before)) => Ok(terse_reply(&r, before != self.project)),
-            (other, _) => other,
-        };
         if is_write {
             self.status = match &result {
                 Ok(_) => format!("Agent: {label}"),
@@ -1498,6 +1507,18 @@ impl TtgApp {
         }
         self.mcp.push_log(label, &result);
         result
+    }
+
+    /// Execute one agent command, cutting its reply down to status, id and changed when
+    /// it asks for that (`verbose: false`, or the session default). A batch runs each of
+    /// its commands through here, so a command's own `verbose` holds inside one too.
+    fn agent_exec_reply(&mut self, cmd: AgentCommand) -> Result<serde_json::Value, String> {
+        let before = cmd.terse(self.mcp.terse_replies).then(|| self.project.clone());
+        let result = self.agent_exec(cmd);
+        match (result, before) {
+            (Ok(r), Some(before)) => Ok(terse_reply(&r, before != self.project)),
+            (other, _) => other,
+        }
     }
 
     /// The Allow / Deny prompt for a write that the settings say must be confirmed, and
@@ -1789,12 +1810,14 @@ mod tests {
             &app,
             AgentCommand::EntityDelete {
                 entities: vec!["first".into()],
+                delete_notes: false,
             },
         );
         let mut second_rx = push(
             &app,
             AgentCommand::EntityDelete {
                 entities: vec!["second".into()],
+                delete_notes: false,
             },
         );
         let mut add_rx = push(&app, add("meanwhile"));
@@ -1827,6 +1850,7 @@ mod tests {
         if let Some(p) = app.mcp.pending_confirm.as_mut() {
             p.cmd = AgentCommand::EntityDelete {
                 entities: vec!["meanwhile".into()],
+                delete_notes: false,
             };
         }
         app.resolve_confirm(true);
@@ -1853,6 +1877,7 @@ mod tests {
             &app,
             AgentCommand::EntityDelete {
                 entities: vec!["victim".into()],
+                delete_notes: false,
             },
         );
         app.drain_agent_commands(&ctx);
@@ -1867,6 +1892,41 @@ mod tests {
         // Allowing after the fact does nothing.
         app.resolve_confirm(true);
         assert!(app.project.entities().iter().any(|e| e.name == "victim"));
+    }
+
+    /// A plan that waits for approval exports the project as it was when plan_run was
+    /// called, and says when it has changed since: here the empty project, not the
+    /// instance added meanwhile (whose missing subnet would block the export).
+    #[test]
+    fn a_plan_waiting_for_approval_exports_the_project_as_called() {
+        let ctx = egui::Context::default();
+        let mut app = TtgApp::build(&ctx, None, None, None);
+        app.mcp.settings.confirm_disk = true;
+        let called = app.mcp.revision;
+        let dir = std::env::temp_dir().join(format!("ttg-plan-at-call-{}", std::process::id()));
+        let mut plan_rx = push(
+            &app,
+            AgentCommand::PlanPrepare {
+                dir: Some(dir.to_string_lossy().to_string()),
+                provider: Some("aws".into()),
+                environment: None,
+                tool: None,
+                at_call: None,
+            },
+        );
+        app.drain_agent_commands(&ctx);
+        let ticket = ticket_of(&mut plan_rx);
+        let mut rx = push(&app, add("meanwhile"));
+        app.drain_agent_commands(&ctx);
+        rx.try_recv().unwrap().unwrap();
+
+        app.resolve_confirm(true);
+        let st = app.mcp.approvals.status_json(&ticket).unwrap();
+        let _ = std::fs::remove_dir_all(&dir);
+        assert_eq!(st["status"], "applied", "{st}");
+        assert_eq!(st["result"]["revision"], called, "{st}");
+        assert!(st["result"]["note"].as_str().unwrap().contains("changed"), "{st}");
+        assert!(app.project.entities().iter().any(|e| e.name == "meanwhile"));
     }
 
     /// The server withdraws a call that timed out before the UI started it, and the UI

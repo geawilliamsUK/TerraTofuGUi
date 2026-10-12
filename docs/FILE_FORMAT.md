@@ -192,6 +192,10 @@ of objects. Two special values:
   also a dependency, and an `attr` the schema does not have is an error.
 - `{"$raw": "<expression>"}` is copied into the HCL as it is.
 
+`null` on an argument the mapping sets removes it from the generated block (on a nested
+block, the block), which the diagnostics report as a warning. To go back to the mapping's
+value, delete the key; over MCP, `entity_update` does that for `{"$restore": true}`.
+
 Arguments are checked against the provider schema; for a native resource, `extra` is
 where every argument goes.
 

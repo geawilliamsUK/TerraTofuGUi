@@ -492,12 +492,13 @@ fn null_removes_what_the_mapping_sets() {
         "main",
         json!({"manage_master_user_password": true, "password": null}),
     );
-    let infos = messages(&p, &cat, "aws", Severity::Info);
+    // A Warning, which says how to drop an override instead.
+    let warnings = messages(&p, &cat, "aws", Severity::Warning);
     assert!(
-        infos
+        warnings
             .iter()
-            .any(|m| m.contains("password = null removes the argument")),
-        "{infos:?}"
+            .any(|m| m.contains("password = null removes the argument") && m.contains("$restore")),
+        "{warnings:?}"
     );
     let db = generate(&p, &cat, "aws", Tool::OpenTofu).unwrap().files["database.tf"].clone();
     assert!(

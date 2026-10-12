@@ -3018,6 +3018,18 @@ fn headless_native_data_sources_and_extra_removal() {
             .contains_key("password"),
         "the removal is stored: {upd}"
     );
+    // Said as a warning, in the reply and the diagnostics, with the way to drop an
+    // override instead.
+    let warning = upd["warning"].as_str().unwrap_or_default();
+    assert!(warning.contains("password") && warning.contains("$restore"), "{upd}");
+    assert!(
+        upd["diagnostics"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|d| d.as_str().unwrap().starts_with("Warning: extra argument password = null")),
+        "{upd}"
+    );
     let (_, preview) = c.call("export_preview", json!({}));
     let db = preview["files"]["database.tf"]
         .as_str()
@@ -3430,4 +3442,136 @@ fn headless_outputs_and_modules() {
     let (err, u) = c.call("entity_update", json!({"entity": "app db", "outputs": null}));
     assert!(!err, "{u}");
     assert_eq!(u["entity"]["outputs"], json!(null), "{u}");
+}
+
+/// TF-033: `settings_set` changes only the keys it is given and `null` clears one;
+/// `environments` is applied before the keys that name an environment; entries of an
+/// environment that has gone are dropped, and one left in a file can be cleared; and
+/// settings_set (environment keys included) works inside project_apply as one undo step.
+#[test]
+fn headless_settings_set_changes_only_what_it_is_given() {
+    let server = start("job-pipeline.ttg.json");
+    let mut c = Client::new(&server);
+    c.initialize();
+    let (err, s) = c.call(
+        "settings_set",
+        json!({
+            "backend": {"type": "s3", "bucket": "acme-tfstate", "region": "eu-west-2"},
+            "name_prefix": "jp-${var.environment}",
+            "module_view": "Data flow",
+            "environments": ["staging", "prod"],
+            "disposable_environments": {"staging": true}
+        }),
+    );
+    assert!(!err, "environments first, so staging can be named in the same call: {s}");
+    let (err, s) = c.call("settings_set", json!({"disposable_environments": {"prod": false}}));
+    assert!(!err, "{s}");
+    let settings = |c: &mut Client| {
+        let (_, p) = c.call("project_get", json!({"fields": ["settings"]}));
+        p["settings"].clone()
+    };
+    let st = settings(&mut c);
+    assert_eq!(st["backend"]["args"]["bucket"], json!("acme-tfstate"), "{st}");
+    assert_eq!(st["name_prefix"], json!("jp-${var.environment}"), "{st}");
+    assert_eq!(st["module_view"], json!("Data flow"), "{st}");
+    assert_eq!(st["disposable_environments"], json!({"staging": true, "prod": false}), "{st}");
+
+    // An explicit null clears (module_view is not looked up as a view named "null").
+    let (err, s) = c.call("settings_set", json!({"module_view": null, "name_prefix": null}));
+    assert!(!err, "{s}");
+    let st = settings(&mut c);
+    assert!(st["module_view"].is_null() && st["name_prefix"].is_null(), "{st}");
+    assert_eq!(st["backend"]["args"]["bucket"], json!("acme-tfstate"), "{st}");
+
+    // An environment that goes takes its entries with it.
+    let (err, s) = c.call("settings_set", json!({"environments": ["prod"]}));
+    assert!(!err, "{s}");
+    assert_eq!(settings(&mut c)["disposable_environments"], json!({"prod": false}));
+
+    // A stale entry in a file: null clears it, and so does giving the list again.
+    let mut p = project_of(&mut c);
+    p["settings"]["disposable_environments"] = json!({"prod": false, "gone": true, "old": true});
+    let (err, r) = c.call("project_import", json!({"json": p, "replace": true}));
+    assert!(!err, "{r}");
+    let (err, s) = c.call("settings_set", json!({"disposable_environments": {"gone": null}}));
+    assert!(!err, "{s}");
+    let (err, refused) = c.call("settings_set", json!({"disposable_environments": {"old": false}}));
+    assert!(err, "only an environment can be set: {refused}");
+    let (err, s) = c.call("settings_set", json!({"environments": ["prod"]}));
+    assert!(!err, "{s}");
+    assert_eq!(settings(&mut c)["disposable_environments"], json!({"prod": false}));
+
+    // Inside project_apply, environment keys and others together, as one undo step; a
+    // call's own verbose: false holds there too.
+    let (err, r) = c.call(
+        "project_apply",
+        json!({"commands": [
+            {"tool": "settings_set", "args": {"environments": ["qa", "prod"], "disposable_environments": {"qa": true}, "name_prefix": "jp"}},
+            {"tool": "entity_add", "args": {"type_id": "object_storage", "name": "batch bucket", "verbose": false}},
+            {"tool": "entity_add", "args": {"type_id": "object_storage", "name": "full bucket"}}
+        ]}),
+    );
+    assert!(!err, "{r}");
+    let terse = &r["results"][1]["result"];
+    assert_eq!(terse.as_object().unwrap().len(), 3, "{terse}");
+    assert_eq!(terse["changed"], json!(true), "{terse}");
+    assert!(r["results"][2]["result"].get("entity").is_some(), "{r}");
+    let st = settings(&mut c);
+    assert_eq!(st["environments"], json!(["qa", "prod"]), "{st}");
+    assert_eq!(st["disposable_environments"], json!({"qa": true, "prod": false}), "{st}");
+    let (err, _) = c.call("undo", json!({}));
+    assert!(!err);
+    let st = settings(&mut c);
+    assert_eq!(st["environments"], json!(["prod"]), "one undo takes the whole batch back: {st}");
+    assert!(st["name_prefix"].is_null(), "{st}");
+    let p = project_of(&mut c);
+    assert!(
+        !p["nodes"].to_string().contains("batch bucket"),
+        "the batch's entities went with it"
+    );
+}
+
+/// TF-043: deleting an entity keeps the notes anchored to it where they are drawn,
+/// unanchored, and says so; `notes: "delete"` deletes them with it.
+#[test]
+fn headless_deleting_an_entity_keeps_or_deletes_its_notes() {
+    let server = start("job-pipeline.ttg.json");
+    let mut c = Client::new(&server);
+    c.initialize();
+    let note = |c: &mut Client, id: &str| {
+        let (_, v) = c.call("view_get", json!({"name": "Data flow"}));
+        v["notes"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|n| n["id"] == id)
+            .cloned()
+    };
+    let before = note(&mut c, "note-queue").unwrap();
+    assert!(before["offset"].is_object(), "{before}");
+    let (err, d) = c.call("entity_delete", json!({"entities": ["q-jobs"]}));
+    assert!(!err, "{d}");
+    assert_eq!(d["notes"][0]["id"], json!("note-queue"), "{d}");
+    assert_eq!(d["notes"][0]["view"], json!("Data flow"), "{d}");
+    assert!(d["warning"].as_str().unwrap().contains("unanchored"), "{d}");
+    let after = note(&mut c, "note-queue").unwrap();
+    assert!(after["anchor"].is_null() && after["offset"].is_null(), "{after}");
+    assert_eq!(after["position"], before["position"], "kept where it was drawn");
+
+    // Re-anchor it to another entity, then delete that one with its notes.
+    let (err, u) = c.call(
+        "view_note_update",
+        json!({"view": "Data flow", "note": "note-queue", "anchor": "app a"}),
+    );
+    assert!(!err, "{u}");
+    let (err, bad) = c.call("entity_delete", json!({"entities": ["app a"], "notes": "drop"}));
+    assert!(err, "{bad}");
+    let (err, d) = c.call("entity_delete", json!({"entities": ["app a"], "notes": "delete"}));
+    assert!(!err, "{d}");
+    assert_eq!(d["notes"][0]["id"], json!("note-queue"), "{d}");
+    assert!(note(&mut c, "note-queue").is_none(), "the note went with it");
+    // Nothing anchored: a plain reply.
+    let (err, d) = c.call("entity_delete", json!({"entities": ["app b"]}));
+    assert!(!err, "{d}");
+    assert!(d.get("notes").is_none() && d.get("warning").is_none(), "{d}");
 }

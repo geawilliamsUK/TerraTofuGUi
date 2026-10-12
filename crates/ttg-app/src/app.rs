@@ -848,14 +848,77 @@ impl TtgApp {
             return;
         }
         let before = self.snapshot();
-        let mut parents = Vec::new();
-        for id in self.selection.clone() {
-            parents.push(self.project.parent_of(&id).map(str::to_string));
-            self.project.remove_entity(&id);
-        }
+        let ids: Vec<Id> = self.selection.iter().cloned().collect();
+        let parents: Vec<_> = ids
+            .iter()
+            .map(|id| self.project.parent_of(id).map(str::to_string))
+            .collect();
+        let notes = self.remove_entities(&ids, false);
         self.fit_hosts(&parents);
         self.selection.clear();
         self.finish(before);
+        if !notes.is_empty() {
+            self.status = format!(
+                "{} view note(s) lost their anchor and stay where they were drawn",
+                notes.len()
+            );
+        }
+    }
+
+    /// Remove entities, and decide what happens to the view notes anchored to one of
+    /// them or to a flow that goes with them: deleted with `delete_notes`, otherwise
+    /// kept, unanchored, where they are drawn now (an anchored note stores an offset,
+    /// which on its own would put it somewhere else). Returns the notes affected, as
+    /// (view, note id, title).
+    pub fn remove_entities(&mut self, ids: &[Id], delete_notes: bool) -> Vec<(String, Id, String)> {
+        let goes = |v: &ttg_core::View, a: &ttg_core::NoteAnchor| match a {
+            ttg_core::NoteAnchor::End(ttg_core::FlowEnd::Entity { entity }) => ids.contains(entity),
+            ttg_core::NoteAnchor::Flow { flow } => v.flow(flow).is_some_and(|f| {
+                [&f.from, &f.to]
+                    .iter()
+                    .any(|e| matches!(e, ttg_core::FlowEnd::Entity { entity } if ids.contains(entity)))
+            }),
+            _ => false,
+        };
+        // Where each affected note is drawn, before its anchor goes.
+        let mut affected: Vec<(usize, Id, String, Position)> = Vec::new();
+        for (i, v) in self.project.views.iter().enumerate() {
+            let own = (self.active_view != Some(i))
+                .then(|| ttg_codegen::views::visible_set(&self.project, &self.catalog, &v.filter));
+            let visible = |id: &str| match &own {
+                Some(set) => set.as_ref().is_none_or(|s| s.contains(id)),
+                None => self.is_visible(id),
+            };
+            for n in &v.notes {
+                if n.anchor.as_ref().is_some_and(|a| goes(v, a)) {
+                    let r = ttg_core::view::note_rect(&self.project, v, n, &visible);
+                    let at = Position {
+                        x: r.x.round() as i32,
+                        y: r.y.round() as i32,
+                    };
+                    affected.push((i, n.id.clone(), n.title.clone(), at));
+                }
+            }
+        }
+        for id in ids {
+            self.project.remove_entity(id);
+        }
+        for (i, nid, _, at) in &affected {
+            let v = &mut self.project.views[*i];
+            if delete_notes {
+                v.notes.retain(|n| &n.id != nid);
+            } else if let Some(n) = v.note_mut(nid) {
+                n.anchor = None;
+                n.position = *at;
+            }
+        }
+        if delete_notes && !affected.is_empty() {
+            self.selected_annotation = None;
+        }
+        affected
+            .into_iter()
+            .map(|(i, nid, title, _)| (self.project.views[i].name.clone(), nid, title))
+            .collect()
     }
 
     pub fn select_all(&mut self) {

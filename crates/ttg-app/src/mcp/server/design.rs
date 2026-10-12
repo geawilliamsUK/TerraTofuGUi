@@ -151,7 +151,7 @@ impl TtgServer {
     }
 
     #[tool(
-        description = "Import hand edits made to a directory TerraTofu exported: each generated block's changed arguments become extra overrides on its entity (literals, $ref for references, $raw for expressions, null for deleted arguments), blocks TerraTofu does not generate (including hand-written files such as data.tf) become native entities, generated blocks missing from the directory are reported (never deleted), and what cannot be imported is listed. Without apply it changes nothing and returns the report plus the architecture diff as Markdown to show the user; with apply: true it applies the same as one undo step."
+        description = "Import hand edits made to a directory TerraTofu exported: each generated block's changed arguments become extra overrides on its entity (literals, $ref for references, $raw for expressions, null for deleted arguments; entity_update { extra: { <arg>: {\"$restore\": true} } } puts the mapping's value back), blocks TerraTofu does not generate (including hand-written files such as data.tf) become native entities, generated blocks missing from the directory are reported (never deleted), and what cannot be imported is listed. Without apply it changes nothing and returns the report plus the architecture diff as Markdown to show the user; with apply: true it applies the same as one undo step."
     )]
     async fn project_import_dir(&self, Parameters(a): Parameters<ImportDirArgs>) -> CallToolResult {
         self.run(AgentCommand::ProjectImportDir {

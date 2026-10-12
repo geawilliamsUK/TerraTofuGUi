@@ -647,9 +647,26 @@ mod tests {
             p.rename_environment("pilot", "Pilot").is_err(),
             "names are lowercase"
         );
+        // Everything else keyed by environment goes with it: disposable entries, link
+        // tags and variable values.
+        p.settings.disposable_environments = [("production".to_string(), true), ("pilot".to_string(), false)].into();
+        p.nodes.insert("rt".into(), node("rt", "route_table"));
+        p.add_edge("rt", "db", crate::Relation::DependsOn);
+        p.edges[0].environments = vec!["production".into()];
+        p.settings.variables.insert(
+            "tasks".into(),
+            ProjectVariable {
+                value: Value::Int(1),
+                description: String::new(),
+                environments: [("production".to_string(), Value::Int(3))].into(),
+            },
+        );
         let lost = p.set_environments(vec!["pilot".into()]).unwrap();
         assert_eq!(lost, vec!["db".to_string()]);
         assert!(p.nodes["db"].overrides.is_empty());
+        assert_eq!(p.settings.disposable_environments, [("pilot".to_string(), false)].into());
+        assert!(p.edges[0].environments.is_empty());
+        assert!(p.settings.variables["tasks"].environments.is_empty());
         assert!(p.set_environments(vec!["a".into(), "a".into()]).is_err());
         assert!(check_variable_name("environment").is_err() && check_variable_name("db_class").is_ok());
     }

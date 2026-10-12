@@ -512,11 +512,15 @@ impl TtgApp {
                     } else {
                         format!("{}{}", ttg_schema::DATA_PREFIX, bdef.resource)
                     };
+                    let mut deleted = Vec::new();
                     if let Some(map) = self.project.extra_args_mut(&id, &prov, &block) {
                         for (k, v) in extra {
                             if restore(&v) || (v.is_null() && !mapping_sets(&k)) {
                                 map.remove(&k);
                             } else {
+                                if v.is_null() {
+                                    deleted.push(k.clone());
+                                }
                                 // Stored in the form the schema declares: `30` for a
                                 // string argument is kept as "30".
                                 let v = ttg_codegen::diagnostics::canonical_extra(&prov, &resource, &k, v);
@@ -534,9 +538,18 @@ impl TtgApp {
                         .filter(|d| d.entity.as_deref() == Some(id.as_str()))
                         .map(|d| format!("{:?}: {}", d.severity, d.message))
                         .collect();
-                    return Ok(
-                        json!({"status": "updated", "entity": self.entity_json(&id), "diagnostics": mine}),
-                    );
+                    let mut out =
+                        json!({"status": "updated", "entity": self.entity_json(&id), "diagnostics": mine});
+                    // Said in the reply too (a terse one keeps it): `null` is easily
+                    // meant as "drop my override".
+                    if !deleted.is_empty() {
+                        out["warning"] = json!(format!(
+                            "null deletes {} from the generated {} block; to drop an override instead, send {{\"$restore\": true}}",
+                            deleted.join(", "),
+                            resource
+                        ));
+                    }
+                    return Ok(out);
                 }
                 if let Some(tags) = providers {
                     let id = self.resolve(&entity)?;
@@ -704,19 +717,34 @@ impl TtgApp {
                     .unwrap_or_default();
                 Ok(json!({"status": "reparented", "id": id, "parent": pid, "implies": implied}))
             }
-            AgentCommand::EntityDelete { entities } => {
+            AgentCommand::EntityDelete { entities, delete_notes } => {
                 let ids: Vec<Id> = entities
                     .iter()
                     .map(|e| self.resolve(e))
                     .collect::<Result<_, _>>()?;
                 let before = self.snapshot();
+                let notes = self.remove_entities(&ids, delete_notes);
                 for id in &ids {
-                    self.project.remove_entity(id);
                     self.selection.remove(id);
                 }
                 self.selected_edge = None;
                 self.finish(before);
-                Ok(json!({"status": "deleted", "ids": ids}))
+                let mut out = json!({"status": "deleted", "ids": ids});
+                if !notes.is_empty() {
+                    out["notes"] = json!(notes
+                        .iter()
+                        .map(|(view, id, title)| json!({"view": view, "id": id, "title": title}))
+                        .collect::<Vec<_>>());
+                    out["warning"] = json!(if delete_notes {
+                        format!("{} view note(s) anchored to what was deleted were deleted too", notes.len())
+                    } else {
+                        format!(
+                            "{} view note(s) were anchored to what was deleted: they are kept, unanchored, where they were drawn (view_note_update {{ anchor }} re-anchors one; entity_delete {{ notes: \"delete\" }} deletes them with the entity)",
+                            notes.len()
+                        )
+                    });
+                }
+                Ok(out)
             }
             AgentCommand::LinkAdd {
                 source,
@@ -1371,13 +1399,15 @@ impl TtgApp {
                 }
                 let mut per_env: Vec<(String, Option<bool>)> = Vec::new();
                 for (env, v) in disposable_environments.unwrap_or_default() {
-                    if !self.project.settings.environments.contains(&env) {
-                        return Err(format!(
-                            "disposable_environments: \"{env}\" is not an environment of the project (settings_set environments lists them)"
-                        ));
-                    }
                     match v {
+                        // Always allowed, so an entry left by an environment that has
+                        // gone can be cleared.
                         J::Null => per_env.push((env, None)),
+                        J::Bool(_) if !self.project.settings.environments.contains(&env) => {
+                            return Err(format!(
+                                "disposable_environments: \"{env}\" is not an environment of the project (settings_set environments lists them)"
+                            ))
+                        }
                         J::Bool(b) => per_env.push((env, Some(b))),
                         _ => return Err(format!("disposable_environments.{env} must be true, false or null")),
                     }
@@ -1701,7 +1731,8 @@ impl TtgApp {
                 provider,
                 environment,
                 tool,
-            } => self.plan_prepare(dir, provider, environment, tool),
+                at_call,
+            } => self.plan_prepare(dir, provider, environment, tool, at_call),
             AgentCommand::Attribution { provider } => self.attribution_json(provider),
             AgentCommand::PlanShow { report } => self.plan_show(report),
             AgentCommand::ExportDiff { dir, provider, k8s } => {

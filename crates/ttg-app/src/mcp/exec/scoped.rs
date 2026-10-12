@@ -118,6 +118,8 @@ struct Memo {
     filter: ttg_core::ViewFilter,
     status: String,
     flashes: usize,
+    /// `settings_set { verbose }` is session state, not the project's.
+    terse_replies: bool,
 }
 
 impl Memo {
@@ -131,6 +133,7 @@ impl Memo {
             filter: app.filter.clone(),
             status: app.status.clone(),
             flashes: app.mcp.flash.len(),
+            terse_replies: app.mcp.terse_replies,
         }
     }
 
@@ -143,6 +146,7 @@ impl Memo {
         app.filter = self.filter;
         app.status = self.status;
         app.mcp.flash.truncate(self.flashes);
+        app.mcp.terse_replies = self.terse_replies;
     }
 }
 
@@ -151,7 +155,9 @@ impl TtgApp {
 
     /// Run a batch's commands against the current project. On any failure — or a command
     /// a batch may not contain — the project goes back to `before`, the undo history to
-    /// `start` steps, and the error says which command failed.
+    /// `start` steps, and the error says which command failed. A batch inside it (what
+    /// `settings_set` sends for environment and other keys together) is played as part of
+    /// it.
     pub(super) fn run_batch(
         &mut self,
         cmds: Vec<AgentCommand>,
@@ -162,8 +168,7 @@ impl TtgApp {
         for (i, c) in cmds.into_iter().enumerate() {
             if matches!(
                 c,
-                AgentCommand::Batch(_)
-                    | AgentCommand::DryRun(_)
+                AgentCommand::DryRun(_)
                     | AgentCommand::Undo
                     | AgentCommand::Redo
                     | AgentCommand::ProjectOpen { .. }
@@ -178,7 +183,7 @@ impl TtgApp {
                 ));
             }
             let label = c.label();
-            match self.agent_exec(c) {
+            match self.agent_exec_reply(c) {
                 Ok(v) => results.push(json!({ "tool": label, "result": v })),
                 Err(e) => {
                     self.roll_back_batch(before, start);

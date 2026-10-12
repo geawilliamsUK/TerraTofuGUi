@@ -2199,10 +2199,12 @@ fn extra_checks(p: &Project, cat: &Catalog, provider: &str, out: &mut Vec<Diagno
                                 ),
                             )
                         } else {
+                            // A Warning: `null` reads like "drop my override", which is
+                            // `{"$restore": true}`.
                             (
-                                Severity::Info,
+                                Severity::Warning,
                                 format!(
-                                    "extra argument {k} = null removes the argument the {} mapping sets",
+                                    "extra argument {k} = null removes the argument the {} mapping sets from the generated block (to drop an override instead, use {{\"$restore\": true}})",
                                     b.resource
                                 ),
                             )

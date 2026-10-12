@@ -147,10 +147,7 @@ pub fn command_from_json(tool: &str, args: serde_json::Value) -> Result<AgentCom
                 parent: a.parent,
             }
         }
-        "entity_delete" => {
-            let a: EntitiesArgs = parse(args)?;
-            AgentCommand::EntityDelete { entities: a.entities }
-        }
+        "entity_delete" => parse::<EntityDeleteArgs>(args)?.into_command()?,
         "link_add" => parse::<LinkAddArgs>(args)?.into_command()?,
         "link_remove" => {
             let a: LinkRemoveArgs = parse(args)?;
@@ -398,7 +395,7 @@ pub struct EntityUpdateArgs {
     #[schemars(description = "Provider layers this entity belongs to; [] = every provider")]
     pub providers: Option<Vec<String>>,
     #[schemars(
-        description = "Extra provider arguments merged into the generated block, keyed by argument name (see schema_show). Values: JSON scalars/lists/objects, {\"$ref\": {\"entity\": \"<id or name>\", \"attr\": \"id\"}} for a reference to the target's primary block (add \"block\": \"<key>\" to address one of its secondary blocks, e.g. object_storage's \"versioning\" block on AWS, and \"key\": \"<row key>\" to pick one instance of a repeated block, e.g. {\"entity\": \"ecr\", \"block\": \"repo\", \"key\": \"zipos-web\", \"attr\": \"repository_url\"}; a native data source is referenced the same way), {\"$raw\": \"<hcl>\"} for raw HCL, whose addresses are checked against what the export generates (add \"refs\": {\"name\": {\"$ref\": …}} and write @name@ in the HCL to splice a reference in). null on an argument the mapping sets removes it from the generated block (on a nested block, the block); null on anything else removes the extra argument; {\"$restore\": true} drops an override or removal and brings the mapping's own value back. For native resources and data sources this is where every argument goes"
+        description = "Extra provider arguments merged into the generated block, keyed by argument name (see schema_show). To drop an override set earlier, send {\"$restore\": true} for it, not null: {\"$restore\": true} deletes the override (or removal) and brings the mapping's own value back, while null on an argument the mapping sets DELETES that argument from the generated block (on a nested block, the block) and raises a Warning; null on an argument the mapping does not set removes the extra argument. Values: JSON scalars/lists/objects, {\"$ref\": {\"entity\": \"<id or name>\", \"attr\": \"id\"}} for a reference to the target's primary block (add \"block\": \"<key>\" to address one of its secondary blocks, e.g. object_storage's \"versioning\" block on AWS, and \"key\": \"<row key>\" to pick one instance of a repeated block, e.g. {\"entity\": \"ecr\", \"block\": \"repo\", \"key\": \"zipos-web\", \"attr\": \"repository_url\"}; a native data source is referenced the same way), {\"$raw\": \"<hcl>\"} for raw HCL, whose addresses are checked against what the export generates (add \"refs\": {\"name\": {\"$ref\": …}} and write @name@ in the HCL to splice a reference in). For native resources and data sources this is where every argument goes"
     )]
     pub extra: Option<serde_json::Map<String, serde_json::Value>>,
     #[schemars(description = "Provider the extra arguments are for; defaults to the target provider")]
@@ -420,8 +417,8 @@ pub struct EntityUpdateArgs {
     #[schemars(
         description = "Outputs the export writes for it when settings.outputs is \"marked\" (the default for new projects), by the output names of its type's mappings (catalog_type lists them; e.g. [\"endpoint\", \"address\"]). [] writes none; null goes back to the outputs the mapping marks primary. With settings.outputs = \"all\" every output is written whatever this says"
     )]
-    #[serde(default, deserialize_with = "present")]
-    pub outputs: Option<serde_json::Value>,
+    #[serde(default)]
+    pub outputs: Patch<Vec<String>>,
     #[schemars(
         description = "false: reply with only status, id and changed instead of the whole entity (settings_set { verbose } sets the default for the session)"
     )]
@@ -494,7 +491,7 @@ impl EntityUpdateArgs {
                 || self.classification.is_some()
                 || self.description.is_some()
                 || self.owner.is_some()
-                || self.outputs.is_some();
+                || self.outputs.is_given();
             if others {
                 return Err("with `environment`, entity_update takes only config, provider_config and present (names, flags, extra arguments and metadata are the same in every environment)".into());
             }
@@ -510,24 +507,7 @@ impl EntityUpdateArgs {
         if self.present.is_some() {
             return Err("`present` is per environment: give `environment` too".into());
         }
-        let outputs = match self.outputs {
-            None => None,
-            Some(serde_json::Value::Null) => Some(None),
-            Some(serde_json::Value::Array(items)) => Some(Some(
-                items
-                    .into_iter()
-                    .map(|v| match v {
-                        serde_json::Value::String(s) => Ok(s),
-                        other => Err(format!("`outputs` lists output names; {other} is not one")),
-                    })
-                    .collect::<Result<Vec<_>, _>>()?,
-            )),
-            Some(other) => {
-                return Err(format!(
-                    "`outputs` is a list of output names, [] for none or null for the mapping's primary ones, not {other}"
-                ))
-            }
-        };
+        let outputs = self.outputs.into_option();
         let meta = super::EntityMeta {
             classification: self.classification,
             description: self.description,
@@ -661,6 +641,30 @@ pub struct SetParentArgs {
 pub struct EntitiesArgs {
     #[schemars(description = "Entity ids or names")]
     pub entities: Vec<String>,
+}
+
+#[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
+pub struct EntityDeleteArgs {
+    #[schemars(description = "Entity ids or names")]
+    pub entities: Vec<String>,
+    #[schemars(
+        description = "What happens to view notes anchored to a deleted entity (or to a flow that goes with it): \"keep\" (default) keeps them, unanchored, where they are drawn; \"delete\" deletes them too. The reply lists the notes affected"
+    )]
+    pub notes: Option<String>,
+}
+
+impl EntityDeleteArgs {
+    fn into_command(self) -> Result<AgentCommand, String> {
+        let delete_notes = match self.notes.as_deref() {
+            None | Some("keep") => false,
+            Some("delete") => true,
+            Some(other) => return Err(format!("notes must be \"keep\" or \"delete\", not \"{other}\"")),
+        };
+        Ok(AgentCommand::EntityDelete {
+            entities: self.entities,
+            delete_notes,
+        })
+    }
 }
 
 #[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
@@ -871,13 +875,13 @@ pub struct NoteUpdateArgs {
     #[schemars(
         description = "Resource, group, logical node or flow it explains (id, name or label); null removes the anchor and leaves the note where it is drawn. A new anchor with no x / y puts the note beside it"
     )]
-    #[serde(default, deserialize_with = "present")]
-    pub anchor: Option<serde_json::Value>,
+    #[serde(default)]
+    pub anchor: Patch<String>,
     #[schemars(
         description = "neutral, info, warning, danger, success or #rrggbb; null for the plain colour"
     )]
-    #[serde(default, deserialize_with = "present")]
-    pub color: Option<serde_json::Value>,
+    #[serde(default)]
+    pub color: Patch<String>,
     #[schemars(description = "Top-left canvas position where the note is drawn (anchored or not)")]
     pub x: Option<i32>,
     pub y: Option<i32>,
@@ -889,17 +893,9 @@ pub struct NoteUpdateArgs {
 
 impl NoteUpdateArgs {
     pub fn into_command(self) -> Result<AgentCommand, String> {
-        let opt = |v: Option<serde_json::Value>, what: &str| -> Result<Option<Option<String>>, String> {
-            match v {
-                None => Ok(None),
-                Some(serde_json::Value::Null) => Ok(Some(None)),
-                Some(serde_json::Value::String(s)) => Ok(Some(Some(s))),
-                Some(_) => Err(format!("{what} must be a string or null")),
-            }
-        };
         Ok(AgentCommand::NoteUpdate {
-            anchor: opt(self.anchor, "anchor")?,
-            color: opt(self.color, "color")?,
+            anchor: self.anchor.into_option(),
+            color: self.color.into_option(),
             view: self.view,
             note: self.note,
             title: self.title,
@@ -1025,8 +1021,8 @@ pub struct SettingsArgs {
     #[schemars(
         description = "Where the state lives; null for local state. {\"type\": \"s3\", \"bucket\": \"acme-tfstate\", \"region\": \"eu-west-2\"} (optional key_prefix or key, kms_key_id; locking by S3 lock file), {\"type\": \"azurerm\", \"resource_group_name\": …, \"storage_account_name\": …, \"container_name\": …} (optional key_prefix or key), {\"type\": \"gcs\", \"bucket\": …} (optional key_prefix), {\"type\": \"local\"} (optional path). The state key is <key_prefix>/terraform.tfstate, key_prefix defaulting to the project name. The export adds a bootstrap/ root that creates the bucket. Replaces the whole backend"
     )]
-    #[serde(default, deserialize_with = "present")]
-    pub backend: Option<serde_json::Value>,
+    #[serde(default)]
+    pub backend: Patch<serde_json::Map<String, serde_json::Value>>,
     #[schemars(
         description = "Encrypt the state and plans (OpenTofu only; with Terraform it only produces a warning)"
     )]
@@ -1034,8 +1030,8 @@ pub struct SettingsArgs {
     #[schemars(
         description = "Id or name of the Encryption Key entity whose key encrypts the state (aws_kms on AWS, gcp_kms on Google Cloud; Azure uses a passphrase). The export moves that key to the bootstrap/ root. null clears it (passphrase encryption)"
     )]
-    #[serde(default, deserialize_with = "present")]
-    pub state_encryption_key: Option<serde_json::Value>,
+    #[serde(default)]
+    pub state_encryption_key: Patch<String>,
     #[schemars(
         description = "Provider version constraints for required_providers: { \"aws\": \"~> 6.0\" }. Merged into the existing pins; null or \"\" removes a pin (back to the definition's default)"
     )]
@@ -1059,14 +1055,14 @@ pub struct SettingsArgs {
     #[schemars(
         description = "With layout \"modules\": the saved view whose groups become modules (by name), before the containers; null or \"\" for containers only"
     )]
-    #[serde(default, deserialize_with = "present")]
-    pub module_view: Option<serde_json::Value>,
+    #[serde(default)]
+    pub module_view: Patch<String>,
     #[schemars(
         description = "Session default for entity_add / entity_update / link_add replies: false returns only status, id and changed (a call's own verbose wins). Not saved with the project"
     )]
     pub verbose: Option<bool>,
     #[schemars(
-        description = "Named environments, in order, e.g. [\"staging\", \"prod\"]: replaces the list; overrides and variable values of an environment no longer listed go with it (the reply names the entities that lost some). [] removes environments altogether. Each environment gets environments/<env>.tfvars and its own state key in the export"
+        description = "Named environments, in order, e.g. [\"staging\", \"prod\"]: replaces the list, and is applied before the other keys of the call, so disposable_environments and variables can name an environment the same call creates. Everything kept per environment for one no longer listed goes with it: entity overrides (the reply names the entities that lost some), link environment tags, variable values and disposable_environments entries; giving the list again unchanged clears such entries left behind in a file. [] removes environments altogether. Each environment gets environments/<env>.tfvars and its own state key in the export"
     )]
     pub environments: Option<Vec<String>>,
     #[schemars(
@@ -1076,10 +1072,10 @@ pub struct SettingsArgs {
     #[schemars(
         description = "Put in front of every generated resource name, e.g. \"zipos-${var.environment}\" (staging and prod can then share an account); null or \"\" clears it"
     )]
-    #[serde(default, deserialize_with = "present")]
-    pub name_prefix: Option<serde_json::Value>,
+    #[serde(default)]
+    pub name_prefix: Patch<String>,
     #[schemars(
-        description = "Project variables, merged: { \"db_class\": { \"value\": \"db.t4g.small\", \"environments\": { \"prod\": \"db.r6g.large\" }, \"description\": \"…\" } } (a bare value sets the base value; null removes one). Use them in any field as \"${var.db_class}\"; ${var.environment} and ${var.name_prefix} are built in"
+        description = "Project variables, merged: { \"db_class\": { \"value\": \"db.t4g.small\", \"environments\": { \"prod\": \"db.r6g.large\" }, \"description\": \"…\" } } (a bare value sets the base value; null removes a variable, or under \"environments\" one environment's value). Use them in any field as \"${var.db_class}\"; ${var.environment} and ${var.name_prefix} are built in"
     )]
     pub variables: Option<serde_json::Map<String, serde_json::Value>>,
     #[schemars(
@@ -1087,7 +1083,7 @@ pub struct SettingsArgs {
     )]
     pub disposable: Option<bool>,
     #[schemars(
-        description = "Per environment, where it differs from `disposable`: { \"staging\": true, \"prod\": false }. Merged; null removes an entry"
+        description = "Per environment, where it differs from `disposable`: { \"staging\": true, \"prod\": false }. Merged; null removes an entry (also one whose environment has gone)"
     )]
     pub disposable_environments: Option<serde_json::Map<String, serde_json::Value>>,
     /// Anything else the caller sent: refused with the list of valid keys.
@@ -1096,10 +1092,63 @@ pub struct SettingsArgs {
     pub unknown: std::collections::BTreeMap<String, serde_json::Value>,
 }
 
-/// `Some(value)` for a key that is present, `null` included, so `"backend": null` (clear
-/// it) differs from leaving `backend` out (keep it).
-fn present<'de, D: serde::Deserializer<'de>>(d: D) -> Result<Option<serde_json::Value>, D::Error> {
-    <serde_json::Value as serde::Deserialize>::deserialize(d).map(Some)
+/// A key that can be left out (keep what is there), given a value (set it) or given
+/// `null` (clear it), so `"backend": null` differs from leaving `backend` out. Its
+/// schema is the value's type or null, with no `default`: a client that fills in
+/// defaults would otherwise send `null` for every key it was not given, and one that
+/// reads an untyped `null` as text would send `"null"`.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub enum Patch<T> {
+    #[default]
+    Keep,
+    Clear,
+    Set(T),
+}
+
+impl<T> Patch<T> {
+    /// Was the key given at all (`null` included)?
+    pub fn is_given(&self) -> bool {
+        !matches!(self, Patch::Keep)
+    }
+
+    /// `None` to keep, `Some(None)` to clear, `Some(Some(v))` to set.
+    pub fn into_option(self) -> Option<Option<T>> {
+        match self {
+            Patch::Keep => None,
+            Patch::Clear => Some(None),
+            Patch::Set(v) => Some(Some(v)),
+        }
+    }
+}
+
+impl<T: Into<serde_json::Value>> Patch<T> {
+    /// `None` to keep, `Some(null)` to clear, `Some(value)` to set.
+    pub fn into_json(self) -> Option<serde_json::Value> {
+        self.into_option().map(|v| v.map(Into::into).unwrap_or_default())
+    }
+}
+
+impl<'de, T: serde::Deserialize<'de>> serde::Deserialize<'de> for Patch<T> {
+    fn deserialize<D: serde::Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
+        Ok(match Option::<T>::deserialize(d)? {
+            None => Patch::Clear,
+            Some(v) => Patch::Set(v),
+        })
+    }
+}
+
+impl<T: schemars::JsonSchema> schemars::JsonSchema for Patch<T> {
+    fn inline_schema() -> bool {
+        true
+    }
+
+    fn schema_name() -> std::borrow::Cow<'static, str> {
+        <Option<T>>::schema_name()
+    }
+
+    fn json_schema(generator: &mut schemars::SchemaGenerator) -> schemars::Schema {
+        <Option<T>>::json_schema(generator)
+    }
 }
 
 /// The keys `settings_set` takes, for the message that refuses any other.
@@ -1148,16 +1197,16 @@ impl SettingsArgs {
         }
         let env_keys = self.environments.is_some()
             || self.rename_environment.is_some()
-            || self.name_prefix.is_some()
+            || self.name_prefix.is_given()
             || self.variables.is_some();
         let other_keys = self.tool.is_some()
             || self.provider.is_some()
             || self.provider_settings.is_some()
             || self.tags.is_some()
             || self.kubernetes_manifests.is_some()
-            || self.backend.is_some()
+            || self.backend.is_given()
             || self.state_encryption.is_some()
-            || self.state_encryption_key.is_some()
+            || self.state_encryption_key.is_given()
             || self.provider_versions.is_some()
             || self.name.is_some()
             || self.verbose.is_some()
@@ -1165,11 +1214,11 @@ impl SettingsArgs {
             || self.disposable_environments.is_some()
             || self.outputs.is_some()
             || self.layout.is_some()
-            || self.module_view.is_some();
+            || self.module_view.is_given();
         let env = AgentCommand::EnvSettings {
             environments: self.environments,
             rename: self.rename_environment.map(|r| (r.from, r.to)),
-            name_prefix: self.name_prefix,
+            name_prefix: self.name_prefix.into_json(),
             variables: self.variables,
         };
         let settings = AgentCommand::SettingsSet {
@@ -1178,21 +1227,23 @@ impl SettingsArgs {
             provider_settings: self.provider_settings,
             tags: self.tags,
             kubernetes_manifests: self.kubernetes_manifests,
-            backend: self.backend,
+            backend: self.backend.into_json(),
             state_encryption: self.state_encryption,
-            state_encryption_key: self.state_encryption_key,
+            state_encryption_key: self.state_encryption_key.into_json(),
             provider_versions: self.provider_versions,
             posture: self.posture,
             name: self.name,
             outputs: self.outputs,
             layout: self.layout,
-            module_view: self.module_view,
+            module_view: self.module_view.into_json(),
             verbose: self.verbose,
             disposable: self.disposable,
             disposable_environments: self.disposable_environments,
         };
+        // The environments first, so `disposable_environments` can name one this same
+        // call creates; one undo step, inside project_apply too.
         Ok(match (env_keys, other_keys) {
-            (true, true) => AgentCommand::Batch(vec![settings, env]),
+            (true, true) => AgentCommand::Batch(vec![env, settings]),
             (true, false) => env,
             _ => settings,
         })
@@ -1420,6 +1471,10 @@ impl TtgServer {
         let _ = self.exec(AgentCommand::PlanShow { report: json.clone() }).await;
         let mut out = json;
         out["environment"] = prep["environment"].clone();
+        out["revision"] = prep["revision"].clone();
+        if prep["note"].is_string() {
+            out["note"] = prep["note"].clone();
+        }
         Ok(out)
     }
 }
@@ -1767,7 +1822,7 @@ impl TtgServer {
     }
 
     #[tool(
-        description = "Rename, set abstract/provider field values (checked against the definition), the external flag, or what the resource is for: `classification` (public | internal | confidential | personal | payment), `description` and `owner` (emitted as tags / labels and an HCL comment). Pass `entity` for one, or `select` ({ types, name_glob, ids }, every criterion given must match) to apply the same values to every match as ONE undo step; a bulk update is all-or-nothing, cannot rename, refuses an empty or non-matching selection, and lists what changed."
+        description = "Rename, set abstract/provider field values (checked against the definition), the external flag, or what the resource is for: `classification` (public | internal | confidential | personal | payment), `description` and `owner` (emitted as tags / labels and an HCL comment). `extra` adds or overrides provider arguments: {\"$restore\": true} on one drops its override; null deletes an argument the mapping sets from the generated block. Pass `entity` for one, or `select` ({ types, name_glob, ids }, every criterion given must match) to apply the same values to every match as ONE undo step; a bulk update is all-or-nothing, cannot rename, refuses an empty or non-matching selection, and lists what changed."
     )]
     async fn entity_update(&self, Parameters(a): Parameters<EntityUpdateArgs>) -> CallToolResult {
         match a.into_command() {
@@ -1814,11 +1869,13 @@ impl TtgServer {
     }
 
     #[tool(
-        description = "Delete entities and their links. Children of a deleted container move up one level."
+        description = "Delete entities and their links. Children of a deleted container move up one level. View notes anchored to a deleted entity are kept where they are drawn, unanchored, or deleted with `notes: \"delete\"`; the reply lists them under `notes` with a warning."
     )]
-    async fn entity_delete(&self, Parameters(a): Parameters<EntitiesArgs>) -> CallToolResult {
-        self.run(AgentCommand::EntityDelete { entities: a.entities })
-            .await
+    async fn entity_delete(&self, Parameters(a): Parameters<EntityDeleteArgs>) -> CallToolResult {
+        match a.into_command() {
+            Ok(c) => self.run(c).await,
+            Err(e) => fail(e),
+        }
     }
 
     #[tool(
@@ -2059,7 +2116,7 @@ impl TtgServer {
     }
 
     #[tool(
-        description = "Change the tool, target provider, provider variables, project-wide default tags, whether Kubernetes manifests are exported, the state backend, state encryption (and the key it uses), provider version pins, or the named environments, the name prefix and project variables. Unknown keys are refused, listing the valid ones. project_get shows the result under `settings`; per-environment field values are set with entity_update { environment }."
+        description = "Change the tool, target provider, provider variables, project-wide default tags, whether Kubernetes manifests are exported, the state backend, state encryption (and the key it uses), provider version pins, or the named environments, the name prefix and project variables. Only the keys given change: a key left out keeps its value, and an explicit null clears a key that can be cleared (backend, state_encryption_key, module_view, name_prefix). Environment keys are applied first, so one call can create environments and set values for them. Unknown keys are refused, listing the valid ones. Allowed inside project_apply. project_get shows the result under `settings`; per-environment field values are set with entity_update { environment }."
     )]
     async fn settings_set(&self, Parameters(a): Parameters<SettingsArgs>) -> CallToolResult {
         match a.into_command() {
@@ -2141,7 +2198,7 @@ impl TtgServer {
     }
 
     #[tool(
-        description = "Export, then `init` and `plan` the result, and return the planned changes per entity: { status: planned | no_credentials | failed | binary_not_found, summary, create/update/delete/replace totals, entities: [{ entity, name, create, update, delete, replace, read, no_op, addresses: [{ address, actions, change }] }], diagnostics: [{ severity, summary, detail, file, line, entity, entity_name, definition }] }. A project with environments plans one of them (`environment`, default the first) with its environments/<env>.tfvars. Without `real_backend` it plans in a scratch copy with local state (what applying would create from nothing; the real state is never touched). A plan reads the cloud account, so it needs the provider's credentials; missing ones come back as status no_credentials. `vars` supplies variables the files leave unset (a database password). Runs in the background (a minute or more) and puts +, ~, −, ± badges on the canvas."
+        description = "Export, then `init` and `plan` the result, and return the planned changes per entity: { status: planned | no_credentials | failed | binary_not_found, summary, create/update/delete/replace totals, entities: [{ entity, name, create, update, delete, replace, read, no_op, addresses: [{ address, actions, change }] }], diagnostics: [{ severity, summary, detail, file, line, entity, entity_name, definition }] }. A project with environments plans one of them (`environment`, default the first) with its environments/<env>.tfvars. Without `real_backend` it plans in a scratch copy with local state (what applying would create from nothing; the real state is never touched). A plan reads the cloud account, so it needs the provider's credentials; missing ones come back as status no_credentials. `vars` supplies variables the files leave unset (a database password). Runs in the background (a minute or more) and puts +, ~, −, ± badges on the canvas. It plans the project as it is when called, also when the export waits for the user's approval; the reply carries that `revision`, and a `note` when the project changed meanwhile."
     )]
     async fn plan_run(&self, Parameters(a): Parameters<PlanArgs>) -> CallToolResult {
         let tool = match a.tool.as_deref() {
@@ -2156,6 +2213,7 @@ impl TtgServer {
                 provider: a.provider,
                 environment: a.environment,
                 tool,
+                at_call: None,
             })
             .await
         {
@@ -2198,7 +2256,7 @@ impl TtgServer {
             });
             let mut out = prep;
             out["plan"] = serde_json::json!(
-                "runs once the export is approved; approval_status { ticket } reports it as result.plan"
+                "runs once the export is approved, on the project as it is now (later edits are not planned); approval_status { ticket } reports it as result.plan"
             );
             return ok_json(out);
         }
@@ -2425,7 +2483,7 @@ impl ServerHandler for TtgServer {
              you make it and every write is one undo step. Start with project_summary and \
              catalog_types. Entities can be addressed by id or by display name. Never call \
              project_save without the user asking. Prefer entity_set_parent over explicit \
-             network_membership links to containers: containment implies membership. One              diagram serves every provider: tag an entity or link with `providers` to keep it              out of the other provider's export (provider-only types are tagged automatically).              Curated types cover the portable concepts; for anything else use schema_search and add              a native resource (`native:<provider>:<type>`), setting its arguments via              entity_update.extra. Extra arguments on curated types add or override provider              arguments and are validated against the schema. Use project_apply to make several              writes as one undo step, project_changes (or a subscription to ttg://project) to notice              the user's own edits, and export_diff before export_run to show what would change. \
+             network_membership links to containers: containment implies membership. One              diagram serves every provider: tag an entity or link with `providers` to keep it              out of the other provider's export (provider-only types are tagged automatically).              Curated types cover the portable concepts; for anything else use schema_search and add              a native resource (`native:<provider>:<type>`), setting its arguments via              entity_update.extra ({\"$restore\": true} on one drops an override; null deletes an argument the mapping sets). Extra arguments on curated types add or override provider              arguments and are validated against the schema. Use project_apply to make several              writes as one undo step, project_changes (or a subscription to ttg://project) to notice              the user's own edits, and export_diff before export_run to show what would change. \
              Writes that need the user's approval (saving, opening, a new project, exporting, \
              importing over unsaved work, deleting when the user asked for that) answer within \
              seconds with {status: \"pending_approval\", ticket, what, applied: false}: nothing has \
@@ -2805,5 +2863,33 @@ mod tests {
         assert!(host_allowed(&host("TTG.example.com:443"), &public));
         assert!(host_allowed(&host("127.0.0.1:9337"), &public));
         assert!(!host_allowed(&host("other.example.com"), &public));
+    }
+
+    /// A key left out keeps its value and `null` clears it, and the schema says so
+    /// without a `default`: a client filling in `"default": null` cleared every one of
+    /// these keys on each call, and an untyped one arrived as the text "null".
+    #[test]
+    fn a_key_left_out_keeps_and_null_clears() {
+        let a: SettingsArgs =
+            serde_json::from_value(serde_json::json!({"module_view": null, "name_prefix": "z"})).unwrap();
+        assert_eq!(a.module_view, Patch::Clear);
+        assert_eq!(a.name_prefix, Patch::Set("z".to_string()));
+        assert_eq!(a.backend, Patch::Keep);
+        assert_eq!(a.state_encryption_key.into_json(), None);
+        assert_eq!(a.module_view.into_json(), Some(serde_json::Value::Null));
+        for schema in [
+            rmcp::handler::server::tool::schema_for_type::<SettingsArgs>(),
+            rmcp::handler::server::tool::schema_for_type::<EntityUpdateArgs>(),
+            rmcp::handler::server::tool::schema_for_type::<NoteUpdateArgs>(),
+        ] {
+            let text = serde_json::to_string(&*schema).unwrap();
+            assert!(!text.contains("\"default\""), "{text}");
+        }
+        let s = rmcp::handler::server::tool::schema_for_type::<SettingsArgs>();
+        assert_eq!(
+            s["properties"]["module_view"]["type"],
+            serde_json::json!(["string", "null"])
+        );
+        assert_eq!(s["properties"]["backend"]["type"], serde_json::json!(["object", "null"]));
     }
 }

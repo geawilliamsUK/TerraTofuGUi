@@ -1014,8 +1014,10 @@ name that disagree are errors.
 **`null`.** An extra argument whose value is `null` on an argument the mapping sets
 removes that argument from the generated block, and on a nested block the mapping emits
 removes the block: `manage_master_user_password = true` with `password = null` on an AWS
-database. Removing an argument the provider schema requires is an error. `null` on
-anything the mapping does not set has nothing to remove (info). Over MCP, `entity_update`
+database. Removing an argument the provider schema requires is an error, and removing
+any other argument the mapping sets is a warning (`null` is easily meant as "drop my
+override", which is `$restore` below). `null` on anything the mapping does not set has
+nothing to remove (info). Over MCP, `entity_update`
 stores `null` only for an argument the mapping sets (elsewhere `null` deletes the extra
 argument, as before), and `{"$restore": true}` deletes an override or removal so the
 mapping's own value comes back.

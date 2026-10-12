@@ -414,8 +414,10 @@ OpenTofu installed, so a definition change that produces invalid HCL fails the b
   a list in the window — with every error attached to the resource whose blocks it is
   about. By default it plans in a scratch copy with local state (what applying would
   create from nothing; the real state is never touched); a plan reads the cloud account,
-  so the provider needs credentials, and their absence is reported as such. *Run
-  validate* attributes its errors the same way.
+  so the provider needs credentials, and their absence is reported as such. An agent's
+  `plan_run` plans the project as it was when it asked, even when the export waits for
+  your approval, and says so if you changed it meanwhile. *Run validate* attributes its
+  errors the same way.
 
 - **Compare and checkpoints** (File ▸ Compare with… / Checkpoints…, `ttg diff-project
   old.ttg.json new.ttg.json`, the agent's `project_diff` and `checkpoint_*`). What
@@ -478,7 +480,8 @@ source, about 1.3 MB compressed) and uses it in these ways:
   for a repeated block such as one ECR repository of several, `"key": "worker"` pick
   which block), or use `{"$raw": "<hcl>"}` for an expression (`"refs"` splices `$ref`s
   into it at `@name@`). A value of `null` on an argument the mapping sets leaves it out
-  of the block (∅ in the editor).
+  of the block (∅ in the editor), with a warning; to drop an override and get the
+  mapping's value back, an agent sends `{"$restore": true}` for it instead.
 - **Native data sources.** The same search lists every data source
   (`native:aws:data.aws_ec2_managed_prefix_list`): a lookup of something that already
   exists, drawn with a dashed outline and a *data* badge, emitted as `data "<type>"
@@ -543,7 +546,10 @@ reparent/delete entities, links, selection, views, tidy/align/distribute, settin
 save/open/new, `project_import` of a `.ttg.json` given as JSON, export with optional
 validate, undo/redo) and, for environments,
 `settings_set { environments, name_prefix, variables }`, `entity_update { environment }`
-and `plan_run`, which returns the planned changes grouped by resource. For reviewing
+and `plan_run`, which returns the planned changes grouped by resource. `settings_set`
+changes only the keys it is given (an explicit `null` clears one), applies `environments`
+before the keys that name an environment, and drops everything kept for an environment
+that goes. For reviewing
 and reshaping a design there are `project_diff { against: "saved" | checkpoint | path }`
 (JSON and pull-request Markdown), `checkpoint_create` / `checkpoint_list` /
 `checkpoint_restore` (worth one before a large `project_apply`), `pattern_list` /
@@ -563,7 +569,9 @@ back, so a big view is readable however small the window was. `view_generate { k
 builds "Where personal data goes", `{ kind: "network" }` a "Network" view laid out by
 tiers; `layout_tidy { view, by: "flows" }` lays a view out by its flows, `layout_tidy {
 by: "tiers", direction, tiers }` by tiers (with per-entity overrides), and
-`view_arrange_notes` puts its notes back beside their anchors; `entity_set_parent` puts
+`view_arrange_notes` puts its notes back beside their anchors (deleting an entity keeps
+the notes anchored to it where they are drawn, unanchored, and names them, or deletes
+them with `entity_delete { notes: "delete" }`); `entity_set_parent` puts
 a resource inside a subnet;
 `view_export { format: "sequence" }` gives the steps as a sequence diagram; and
 `entity_update` (one entity or a `select`) takes `classification`, `description` and
@@ -574,7 +582,8 @@ entities }`) and writes widened: `entity_update` and `link_add` take a `select` 
 instructions quote the TerraTofu version and a catalog hash, so a client knows when to
 refresh its cached tool list. `project_apply` runs a list of diagram writes as **one**
 undo step and rolls all of them back if any fails (with `dry_run: true` it plays the batch,
-reports which diagnostics it would add or clear, and keeps nothing); `project_changes` (or a subscription
+reports which diagnostics it would add or clear, and keeps nothing); `settings_set` can be
+one of them, and each command's own `verbose: false` holds inside it; `project_changes` (or a subscription
 to the `ttg://project` resource) tells the agent when *you* changed something. The
 project, its summary, diagnostics, the catalog and the docs are also exposed as MCP
 resources (`ttg://project`, `ttg://catalog/<type>`, `ttg://docs/mapping-format`, …).
