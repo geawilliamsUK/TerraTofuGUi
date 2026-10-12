@@ -232,3 +232,41 @@ gained TF-032 to TF-043, plus the rest of TF-027 (ECR still needs its own `force
 | **WP31 Environments** | a Warning on a hand-set name without the prefix once environments exist; the environment in the database's snapshot identifier and `random_id` keepers; `db_connections_pct` per environment when the class is a variable | TF-041 |
 | **WP32 Edge and cost** | AWS managed CloudFront policies as constant IDs (no `List*Policies` permission needed); public IPv4 addresses priced; usage presets for the estimate; the regional Web ACL rechecked | TF-034, TF-040, TF-009 |
 | **WP33 Views** | the network view groups subnets by route-table tier, laid out left to right; the region frame's label clear of view groups; `view_arrange_notes` places free notes too | TF-042, TF-043 (2, 5) |
+
+### Status (2026-10-12)
+
+All five packages are merged on `master` (`3735236`) and verified together: both clippy
+configurations, the strict catalog check, schema drift, and the full suite with `tofu
+validate` and `fmt -check`, with AWS credentials hidden. The release binaries are rebuilt
+from this commit.
+
+- WP30's `include` (fragment files in `definitions/fragments/`) closes the open item of
+  2026-10-11: `container_app` and `container_job` now share one definition of the
+  container settings, and every example exports byte for byte as before.
+- WP29 found the cause of TF-033's wiped settings in the tool schema, not the server: the
+  clearable keys were published with `"default": null`, which a client fills in for every
+  key it leaves out. They are now `Patch` values with no default.
+- WP33's network view comes to 35 crossings on zipOS, against 37 for the old tier layout
+  and 33 for the hand-made view.
+
+Acceptance, on both designs as saved:
+
+- **zipOS staging**: 0 errors on AWS and GCP. The AWS export validates with one manual
+  step, and the reachability audit has no findings. Azure reports the same seven
+  requirements as before.
+- **CallScope**: unchanged. The same eight design findings hold back the AWS export;
+  Azure and GCP have 0 errors.
+
+Seen during verification: `every_example_validates` failed twice, each time on a
+different run of consecutive examples, then passed twice on unchanged code. That is
+intermittent, most likely `init` reaching the provider registry, and not caused by any of
+these packages.
+
+Left open, with the reason:
+
+- `${entity.attr}` references in container env values (TF-037): project variables are
+  substituted as text before codegen, and `extra`'s `$ref` already covers it.
+- A Warning for display names that carry an environment's name.
+- `ttg check` on base values still errors when a variable's base instance class is not in
+  the connection-limit table, even though every environment resolves. Fixing it changes
+  what base-value diagnostics mean.
