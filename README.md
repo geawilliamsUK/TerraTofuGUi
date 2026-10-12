@@ -363,7 +363,10 @@ OpenTofu installed, so a definition change that produces invalid HCL fails the b
   group, for any provider and its region, from price lists bundled with the app and the
   usage assumptions you set in the window (GB stored per bucket, node-hours a day of a GPU
   pool that scales to zero, requests, log volume — project-wide or per resource, saved
-  with the project). A `budget` resource whose limit the estimate exceeds gets a
+  with the project; a *small / medium / large* usage level, a tenth of / the default /
+  ten times the volumes, sets them all at once: `--usage` on `ttg cost`, `usage` on the
+  tool). Public IPv4 addresses are counted: NAT gateways, load balancer zones, each
+  Fargate task that has a public IP, instances in an auto-assigning subnet. A `budget` resource whose limit the estimate exceeds gets a
   warning. **It is an estimate, not a quote:** the prices are on-demand list prices in US
   dollars as of the date shown in the window (no free tier, discounts, reservations,
   support or tax), some items are left out and say why, and usage is whatever you

@@ -227,6 +227,17 @@
       "description": "Usage assumptions behind the cost estimate, keyed by assumption name\n(`bucket_gb`, `pool_node_hours_per_day`, …; `ttg_codegen::cost::ASSUMPTIONS` lists\nthem with their defaults). A key that is absent takes the estimator's default, so an\nempty value is the common case and is not written to the file.",
       "type": "object",
       "properties": {
+        "preset": {
+          "description": "The usage level the defaults are taken at; absent means `medium`. Values below win\nover it.",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/UsagePreset"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
         "values": {
           "description": "Project-wide values, e.g. `{ \"bucket_gb\": 200, \"log_ingest_gb\": 2 }`.",
           "type": "object",
@@ -247,6 +258,15 @@
           }
         }
       }
+    },
+    "UsagePreset": {
+      "description": "How much traffic and data the estimate assumes before any single figure is overridden.\n`Medium` is the estimator's defaults; `Small` and `Large` scale the volume assumptions\n(data, requests, messages, log GB) down and up by ten (`ttg_codegen::cost`).",
+      "type": "string",
+      "enum": [
+        "small",
+        "medium",
+        "large"
+      ]
     },
     "DisplayCurrency": {
       "description": "Show estimates in another currency too. Prices are bundled in US dollars; this is a\nfixed rate the user sets and dates, never fetched.",

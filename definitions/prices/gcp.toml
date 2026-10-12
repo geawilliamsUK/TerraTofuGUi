@@ -186,6 +186,15 @@ checked = "2026-09-29: the text of cloud.google.com/nat/pricing ($0.0014 per VM-
 vm   = { "*" = 0.0014 }
 data = { unit = "GB", "*" = 0.045 }
 
+[tables.external_ip]
+unit = "hour"
+description = "External IPv4 address in use on a standard VM"
+source = "Virtual Private Cloud pricing, external IP addresses (cloud.google.com/vpc/network-pricing; announcement at cloud.google.com/vpc/pricing-announce-external-ips)"
+checked = "2026-10-12: the price-change announcement's SKU table (External IP Charge on a Standard VM, $0.004 to $0.005 from 2024-02-01); the same in every region. Spot VMs pay $0.0025, which is not modelled"
+
+[tables.external_ip.rows]
+address = { "*" = 0.005 }
+
 [tables.load_balancing]
 unit = "hour"
 description = "Cloud Load Balancing: forwarding rule (first five per hour), data processed"

@@ -9,6 +9,7 @@ use crate::app::TtgApp;
 use serde_json::{json, Map, Value as J};
 use std::collections::{BTreeMap, BTreeSet};
 use ttg_codegen::cost::{self, Line, Status, ASSUMPTIONS};
+use ttg_core::UsagePreset;
 
 /// The tool's arguments.
 pub(super) struct CostQuery {
@@ -18,6 +19,7 @@ pub(super) struct CostQuery {
     pub group_by: Option<String>,
     pub assumptions: Option<Map<String, J>>,
     pub region: Option<String>,
+    pub usage: Option<String>,
 }
 
 fn line_json(l: &Line) -> J {
@@ -74,6 +76,11 @@ impl TtgApp {
             region: q.region.clone(),
             ..Default::default()
         };
+        if let Some(u) = &q.usage {
+            opts.preset = Some(UsagePreset::parse(u).ok_or_else(|| {
+                format!("usage must be small, medium or large, not \"{u}\"")
+            })?);
+        }
         for (k, v) in q.assumptions.unwrap_or_default() {
             if cost::assumption(&k).is_none() {
                 return Err(format!(
@@ -214,6 +221,7 @@ impl TtgApp {
             "free": free.into_iter().map(|(t, (why, names))| json!({ "type": t, "why": why, "entities": names })).collect::<Vec<_>>(),
             "not_estimated": not_estimated,
             "views": est.views.iter().map(|v| json!({ "view": v.view, "monthly": v.monthly, "entities": v.entities })).collect::<Vec<_>>(),
+            "usage": est.usage,
             "assumptions": est.assumptions,
             "notes": notes,
             "caveat": est.caveat,

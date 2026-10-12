@@ -6,7 +6,7 @@ use crate::app::TtgApp;
 use egui::{Color32, RichText, Ui};
 use std::collections::BTreeMap;
 use ttg_codegen::cost::{self, Estimate, Source, Status, ASSUMPTIONS};
-use ttg_core::{DisplayCurrency, Project};
+use ttg_core::{DisplayCurrency, Project, UsagePreset};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 enum Mode {
@@ -69,6 +69,16 @@ impl TtgApp {
                 self.finish(before);
             }
         }
+    }
+
+    /// Set the usage level the default assumptions are taken at (one undo step); medium
+    /// is the defaults and is not written to the file.
+    fn write_usage_preset(&mut self, preset: UsagePreset) {
+        let before = self.snapshot();
+        self.project.settings.cost_assumptions.preset = (preset != UsagePreset::Medium).then_some(preset);
+        self.dirty = true;
+        self.diag_dirty = true;
+        self.finish(before);
     }
 
     /// Set one assumption (project-wide when `entity` is `None`); `None` clears the
@@ -331,6 +341,18 @@ fn drag_speed(v: f64) -> f64 {
 }
 
 fn assumptions_ui(app: &mut TtgApp, ui: &mut Ui, est: &Estimate) {
+    ui.horizontal(|ui| {
+        ui.label("Usage");
+        for p in UsagePreset::ALL {
+            if ui.selectable_label(est.usage == p, p.as_str()).clicked() && est.usage != p {
+                app.write_usage_preset(p);
+            }
+        }
+    })
+    .response
+    .on_hover_text(
+        "Medium is the default figures; small is a tenth of the volumes (a development or staging project), large ten times. Values set below win.",
+    );
     ui.label(
         RichText::new(
             "Project-wide values; a resource can override one in its row above. Saved with the project.",

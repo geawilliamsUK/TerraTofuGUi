@@ -664,7 +664,11 @@ its own can estimate that. Three parts, maintained apart:
   log GB a month, node-hours a day of a pool that scales to zero, requests, …), with
   defaults in code, project values in `settings.cost_assumptions.values`, per-entity
   overrides in `settings.cost_assumptions.entities[<id>]` and, for one MCP call, the
-  tool's `assumptions`. A pool with `min_nodes = 0` is priced at the node-hours-a-day
+  tool's `assumptions`. A usage preset (`settings.cost_assumptions.preset`, or `usage` on
+  one call / `ttg cost --usage`) sits between the defaults and those: *medium* is the
+  defaults, *small* and *large* divide and multiply every volume by ten and leave what
+  describes the design (hours in a month, a pool's node-hours a day, the spot fraction,
+  zones, a function's duration, NAT VMs, alarm series) alone. A pool with `min_nodes = 0` is priced at the node-hours-a-day
   assumption instead of around the clock. `settings.cost_currency` adds a display
   currency at a fixed, dated rate; prices stay USD.
 

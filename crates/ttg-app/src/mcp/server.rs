@@ -1504,6 +1504,10 @@ pub struct CostArgs {
     pub assumptions: Option<serde_json::Map<String, serde_json::Value>>,
     #[schemars(description = "Price for this region instead of the project's, e.g. `us-east-1`")]
     pub region: Option<String>,
+    #[schemars(
+        description = "Usage level the default assumptions are taken at: `small` (a tenth of the volumes: a development or staging project), `medium` (the defaults) or `large` (ten times). Default: the project's setting, else medium. `assumptions` and the project's own values win over it. Nothing is saved"
+    )]
+    pub usage: Option<String>,
 }
 
 #[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
@@ -1680,7 +1684,7 @@ impl TtgServer {
     }
 
     #[tool(
-        description = "Estimated monthly cost of the provider's layer, from bundled list prices (USD, dated; on-demand, no free tier or discounts) and editable usage assumptions (GB stored, node-hours a day of a pool that scales to zero, requests...). Per entity: the charges (quantity x unit price), the assumptions used and why anything is free or not estimated; totals per type, per saved view and per view group; the price date and a caveat to repeat to the user. Never writes anything."
+        description = "Estimated monthly cost of the provider's layer, from bundled list prices (USD, dated; on-demand, no free tier or discounts) and editable usage assumptions (GB stored, node-hours a day of a pool that scales to zero, requests...; `usage` picks small / medium / large defaults). It counts public IPv4 addresses ($0.005 an hour each: NAT, load balancer zones, Fargate tasks and instances with a public IP). Per entity: the charges (quantity x unit price), the assumptions used and why anything is free or not estimated; totals per type, per saved view and per view group; the price date and a caveat to repeat to the user. Never writes anything."
     )]
     async fn cost_estimate(&self, Parameters(a): Parameters<CostArgs>) -> CallToolResult {
         self.run(AgentCommand::CostEstimate {
@@ -1690,6 +1694,7 @@ impl TtgServer {
             group_by: a.group_by,
             assumptions: a.assumptions,
             region: a.region,
+            usage: a.usage,
         })
         .await
     }

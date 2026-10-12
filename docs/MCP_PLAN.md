@@ -57,7 +57,7 @@ named environments add, each finding with its `environment` and a `[env]` prefix
 Posture diagnostics (R3.9, `Code::Posture`) carry `rule`, the id `settings_set {
 posture: { disabled: [...] } }` turns off; an unknown id is refused with the list.
 
-`cost_estimate { provider?, environment?, view?, group_by?, assumptions?, region? }`
+`cost_estimate { provider?, environment?, view?, group_by?, assumptions?, region?, usage? }`
 (round 3, R3.12; `exec/cost.rs` over `ttg_codegen::cost::estimate_with`) answers the
 monthly estimate of the provider's layer: `monthly` (and `converted` when the project
 sets a display currency), `prices_retrieved`, `region` / `price_region`, the `caveat`
@@ -67,7 +67,10 @@ source, and notes), `types` or `groups` (the labelled boxes of `view`, or of eve
 view). Free entities come back summarised per type with the reason, unpriced ones in
 `not_estimated` with why; `views` has every saved view's total and `assumptions` every
 assumption at its project value. `view` narrows the lines and the total to what that view
-shows. `assumptions` are for the call only (`source: "call"`); unknown keys, a non-number,
+shows. `usage` (`small` / `medium` / `large`) picks the level the default assumptions are
+taken at for the call (default: the project's `cost_assumptions.preset`, else medium; the
+reply's `usage` says which); a value the preset moved has `source: "preset"`.
+`assumptions` are for the call only (`source: "call"`); unknown keys, a non-number,
 an unknown view, `group_by` or provider are refused with what would have worked.
 `environment` prices that named environment (`Project::for_environment`: overrides,
 absent entities and variables applied); without it, the environment the canvas shows, or

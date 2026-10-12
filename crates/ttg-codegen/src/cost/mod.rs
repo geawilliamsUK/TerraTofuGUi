@@ -14,7 +14,8 @@
 //!   none of the three places.
 //! * **Assumptions** ([`ASSUMPTIONS`]): usage the diagram does not say (GB in a bucket,
 //!   node-hours a day of a GPU pool that scales to zero). Defaults here, overridden per
-//!   project and per entity in `settings.cost_assumptions`.
+//!   project and per entity in `settings.cost_assumptions`; a usage preset (small, medium,
+//!   large) moves the volumes before any of those.
 //!
 //! [`estimate`] prices the provider's layer of a project — the same entities its export
 //! would create. It takes a `&Project`, so a caller that has resolved a named environment
@@ -38,7 +39,7 @@ use model::{Ctx, Model};
 use serde::Serialize;
 use std::collections::{BTreeMap, BTreeSet};
 use ttg_catalog::{Catalog, MappingStatus};
-use ttg_core::{Id, Project};
+use ttg_core::{Id, Project, UsagePreset};
 
 /// Whether a line has a figure.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
@@ -140,6 +141,8 @@ pub struct Estimate {
     pub by_type: Vec<Subtotal>,
     /// Totals per saved view, with the view's groups.
     pub views: Vec<ViewTotal>,
+    /// The usage level the defaults were taken at.
+    pub usage: UsagePreset,
     /// Every assumption at its project-wide value.
     pub assumptions: Vec<Used>,
     /// Estimate-wide notes: fallback region, entities left out of this provider's layer,
@@ -156,6 +159,8 @@ pub struct Options {
     pub region: Option<String>,
     /// Assumption values for this estimate only, on top of the project's.
     pub assumptions: BTreeMap<String, f64>,
+    /// Usage level for this estimate only; the project's applies without one.
+    pub preset: Option<UsagePreset>,
 }
 
 /// Estimate one provider's monthly cost at the project's region (or `region`).
@@ -238,7 +243,7 @@ fn build(
         ));
         book.fallback_region.clone()
     };
-    let asm = Resolver::new(&project.settings, &opts.assumptions);
+    let asm = Resolver::new(&project.settings, &opts.assumptions, opts.preset);
     for k in asm.unknown_keys() {
         notes.push(format!(
             "assumption \"{k}\" is not one the estimate reads; it is ignored"
@@ -305,6 +310,7 @@ fn build(
         lines,
         by_type,
         views,
+        usage: asm.preset(),
         assumptions,
         notes,
         caveat: format!(

@@ -1,11 +1,12 @@
 //! Usage assumptions: the figures a price list cannot know (how much a bucket holds, how
-//! many hours a GPU pool that scales to zero actually runs). Each has a default here; a
-//! project overrides it in `settings.cost_assumptions.values`, one entity in
+//! many hours a GPU pool that scales to zero actually runs). Each has a default here (the
+//! "medium" usage level); the small and large presets scale the volumes; a project
+//! overrides one in `settings.cost_assumptions.values`, one entity in
 //! `settings.cost_assumptions.entities`, and a single `cost_estimate` call on top of both.
 
 use serde::Serialize;
 use std::collections::BTreeMap;
-use ttg_core::Settings;
+use ttg_core::{Settings, UsagePreset};
 
 /// One assumption the models may read.
 #[derive(Debug, Clone, Copy, Serialize)]
@@ -216,6 +217,40 @@ pub const ASSUMPTIONS: &[Assumption] = &[
     ),
 ];
 
+/// Assumptions that describe the design or the month, not how busy the project is: the
+/// usage presets leave them at their defaults. Every other one is a volume.
+const NOT_VOLUME: &[&str] = &[
+    "hours_per_month",
+    "pool_node_hours_per_day",
+    "spot_price_fraction",
+    "zones_per_region",
+    "function_duration_ms",
+    "job_run_minutes",
+    "nat_vms",
+    "alarm_time_series",
+];
+
+/// What the small and large presets multiply a volume by: the default is "medium", a
+/// tenth of it is a development or staging project, ten times it a busy production one.
+const PRESET_FACTOR: f64 = 10.0;
+
+impl Assumption {
+    /// Does a usage preset move this assumption?
+    pub fn is_volume(&self) -> bool {
+        !NOT_VOLUME.contains(&self.key)
+    }
+
+    /// The value at a usage level (`Medium` is the default).
+    pub fn at(&self, preset: UsagePreset) -> f64 {
+        match preset {
+            UsagePreset::Medium => self.default,
+            _ if !self.is_volume() => self.default,
+            UsagePreset::Small => self.default / PRESET_FACTOR,
+            UsagePreset::Large => self.default * PRESET_FACTOR,
+        }
+    }
+}
+
 /// The definition of an assumption by key.
 pub fn assumption(key: &str) -> Option<&'static Assumption> {
     ASSUMPTIONS.iter().find(|a| a.key == key)
@@ -226,6 +261,8 @@ pub fn assumption(key: &str) -> Option<&'static Assumption> {
 #[serde(rename_all = "snake_case")]
 pub enum Source {
     Default,
+    /// The small or large usage preset scaled the default.
+    Preset,
     /// `settings.cost_assumptions.values`.
     Project,
     /// `settings.cost_assumptions.entities[<id>]`.
@@ -243,21 +280,29 @@ pub struct Used {
     pub source: Source,
 }
 
-/// Assumption values layered: default < project < entity < this call.
+/// Assumption values layered: default < usage preset < project < entity < this call.
 #[derive(Debug, Clone, Default)]
 pub struct Resolver {
+    preset: UsagePreset,
     project: BTreeMap<String, f64>,
     entities: BTreeMap<String, BTreeMap<String, f64>>,
     call: BTreeMap<String, f64>,
 }
 
 impl Resolver {
-    pub fn new(settings: &Settings, call: &BTreeMap<String, f64>) -> Self {
+    /// `preset` is this call's usage level; without one the project's applies.
+    pub fn new(settings: &Settings, call: &BTreeMap<String, f64>, preset: Option<UsagePreset>) -> Self {
         Resolver {
+            preset: preset.or(settings.cost_assumptions.preset).unwrap_or_default(),
             project: settings.cost_assumptions.values.clone(),
             entities: settings.cost_assumptions.entities.clone(),
             call: call.clone(),
         }
+    }
+
+    /// The usage level in force.
+    pub fn preset(&self) -> UsagePreset {
+        self.preset
     }
 
     /// The value for one entity, and where it came from. Unknown keys are 0 (the models
@@ -271,7 +316,9 @@ impl Resolver {
         } else if let Some(v) = self.project.get(key) {
             (*v, Source::Project)
         } else {
-            (def.map(|d| d.default).unwrap_or(0.0), Source::Default)
+            let v = def.map(|d| d.at(self.preset)).unwrap_or(0.0);
+            let moved = def.is_some_and(|d| v != d.default);
+            (v, if moved { Source::Preset } else { Source::Default })
         };
         Used {
             key: key.to_string(),

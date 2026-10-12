@@ -66,6 +66,10 @@ fn vms(c: &mut Ctx, machine: Option<String>, count: f64) {
 fn compute_instance(c: &mut Ctx) {
     let m = c.sku("main", "machine_type");
     vms(c, m, 1.0);
+    if matches!(c.pfield("public_ip"), Some(Value::Bool(true))) {
+        let hours = c.hours();
+        c.charge("external IPv4 address", "external_ip", "address", hours);
+    }
 }
 
 fn autoscaling_group(c: &mut Ctx) {

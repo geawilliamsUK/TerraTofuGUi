@@ -4,6 +4,7 @@ use anyhow::{bail, Result};
 use std::path::Path;
 use ttg_catalog::Catalog;
 use ttg_codegen::cost::{self, Estimate, Status};
+use ttg_core::UsagePreset;
 
 /// How the table groups the lines.
 #[derive(Clone, Copy, clap::ValueEnum)]
@@ -22,6 +23,8 @@ pub struct Args<'a> {
     pub by: By,
     /// Also print every charge of every line.
     pub detail: bool,
+    /// `small`, `medium` or `large`; the project's own level when `None`.
+    pub usage: Option<String>,
     /// Price this named environment's values (`Project::for_environment`).
     pub environment: Option<String>,
 }
@@ -39,7 +42,12 @@ pub fn run(cat: &mut Catalog, a: Args) -> Result<()> {
     let p = raw.resolved(a.environment.as_deref()).into_owned();
     cat.ensure_native_types(&p);
     let provider = a.provider.unwrap_or(p.settings.target_provider.clone());
-    let est = match cost::estimate(&p, cat, &provider, a.region.as_deref()) {
+    let opts = cost::Options {
+        region: a.region.clone(),
+        preset: a.usage.as_deref().and_then(UsagePreset::parse),
+        ..Default::default()
+    };
+    let est = match cost::estimate_with(&p, cat, &provider, &opts) {
         Ok(e) => e,
         Err(e) => bail!(e),
     };
@@ -57,8 +65,13 @@ fn money(x: f64) -> String {
 
 fn print_table(name: &str, est: &Estimate, by: By, detail: bool) {
     println!(
-        "{name}: {} {} (prices for {}, retrieved {}, {})",
-        est.provider, est.region, est.price_region, est.prices_retrieved, est.currency
+        "{name}: {} {} (prices for {}, retrieved {}, {}; {} usage)",
+        est.provider,
+        est.region,
+        est.price_region,
+        est.prices_retrieved,
+        est.currency,
+        est.usage.as_str()
     );
     println!();
     match by {

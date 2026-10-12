@@ -221,6 +221,9 @@ enum Cmd {
         /// The whole estimate as JSON.
         #[arg(long)]
         json: bool,
+        /// Usage level the default assumptions are taken at (default: the project's, else medium).
+        #[arg(long, value_parser = ["small", "medium", "large"])]
+        usage: Option<String>,
         /// Price one named environment's values (default: the base values).
         #[arg(long)]
         environment: Option<String>,
@@ -690,6 +693,7 @@ fn main() -> Result<()> {
             by,
             detail,
             json,
+            usage,
             environment,
         } => cost::run(
             &mut cat,
@@ -700,6 +704,7 @@ fn main() -> Result<()> {
                 json,
                 by,
                 detail,
+                usage,
                 environment,
             },
         )?,

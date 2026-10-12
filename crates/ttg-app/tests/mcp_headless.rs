@@ -2191,6 +2191,16 @@ fn headless_cost_estimate() {
         .clone();
     assert_eq!(a["source"], json!("call"), "{a}");
 
+    // A usage level scales the default volumes for the call; medium is the default.
+    let (err, small) = c.call("cost_estimate", json!({"usage": "small"}));
+    assert!(!err, "{small}");
+    assert_eq!(small["usage"], json!("small"));
+    assert!(small["monthly"].as_f64().unwrap() < total, "{small}");
+    let (_, medium) = c.call("cost_estimate", json!({"usage": "medium"}));
+    assert_eq!(medium["monthly"].as_f64().unwrap(), total);
+    let (err, bad) = c.call("cost_estimate", json!({"usage": "huge"}));
+    assert!(err && bad.as_str().unwrap().contains("small, medium or large"), "{bad}");
+
     // An environment the project does not have is refused naming why (headless_environments
     // prices real ones); a region is priced as asked.
     let (err, env) = c.call(

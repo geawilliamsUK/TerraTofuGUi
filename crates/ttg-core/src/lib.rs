@@ -22,7 +22,7 @@ pub mod validate;
 pub mod value;
 pub mod view;
 
-pub use cost::{CostAssumptions, DisplayCurrency};
+pub use cost::{CostAssumptions, DisplayCurrency, UsagePreset};
 pub use environment::{EnvOverride, Overrides, ProjectVariable};
 pub use ir::*;
 pub use value::{Record, Value};

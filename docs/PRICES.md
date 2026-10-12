@@ -20,7 +20,15 @@ are, where they come from, what was checked, and how to refresh them.
   estimate says so.
 - **Usage is assumed**, not known: GB stored, requests, log volume, node-hours a day of a
   pool that scales to zero, and so on (`cost::ASSUMPTIONS`, editable per project and per
-  resource). Change them before trusting a total.
+  resource). Change them before trusting a total. The defaults are the *medium* usage
+  level; *small* (a tenth of every volume: a development or staging project) and *large*
+  (ten times) are one choice in the Cost window, `ttg cost --usage` and the tool's `usage`.
+  The factor is a round number, not a measurement.
+- **Public IPv4 addresses** are priced at the hourly in-use rate wherever the design
+  creates one: a NAT gateway's, a load balancer's (one per zone), each Fargate task or
+  instance a public IP is assigned to (a container app's public ingress or 'Public IP for
+  outbound', a job's while it runs, a subnet that auto-assigns them), a Google Cloud VM
+  with an external address. Cloud NAT's own addresses are not modelled.
 - Some things are **left out on purpose** and say why: data transfer to the internet,
   backups beyond the free allowance, throughput modes, anything priced per API call the
   diagram cannot know. Types that cost nothing, or that the estimate does not price, are
@@ -128,4 +136,6 @@ more; the model uses twice.
   `[not_estimated]` with the reason. `no_mapped_type_is_silently_left_out` fails until one
   of the three is done for every provider that maps the type.
 - **A usage assumption**: add it to `cost::ASSUMPTIONS` with a default, unit and label; the
-  Cost window lists it automatically and the MCP tool accepts it.
+  Cost window lists it automatically and the MCP tool accepts it. The usage presets scale
+  it by ten each way unless it describes the design rather than a volume; then list its
+  key in `NOT_VOLUME` (`cost/assumptions.rs`).

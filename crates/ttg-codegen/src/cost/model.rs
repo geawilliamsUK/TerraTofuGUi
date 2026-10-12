@@ -209,6 +209,19 @@ impl<'a> Ctx<'a> {
         relation_targets_of_type(self.p, self.cat, &self.e, rel, target_type)
     }
 
+    /// Does a subnet this entity sits in hand out public IPv4 addresses (AWS
+    /// `map_public_ip`)?
+    pub fn in_public_subnet(&self) -> bool {
+        self.targets(Relation::NetworkMembership, Some("subnet"))
+            .iter()
+            .filter_map(|id| self.p.entity(id))
+            .any(|s| {
+                field_or_default(self.cat, self.provider, &s, "map_public_ip", true)
+                    .and_then(|v| v.as_bool())
+                    .unwrap_or(false)
+            })
+    }
+
     // ------------------------------------------------------------ charges
 
     /// Add `quantity` of a price-list row to the line. A row the list does not have is

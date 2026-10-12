@@ -1665,6 +1665,7 @@ impl TtgApp {
                 group_by,
                 assumptions,
                 region,
+                usage,
             } => self.cost_estimate_json(cost::CostQuery {
                 provider,
                 environment,
@@ -1672,6 +1673,7 @@ impl TtgApp {
                 group_by,
                 assumptions,
                 region,
+                usage,
             }),
             // Environments and plans; their bodies live in `exec/environments.rs`.
             AgentCommand::EnvSettings {

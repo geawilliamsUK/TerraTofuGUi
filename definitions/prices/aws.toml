@@ -262,9 +262,9 @@ data = { unit = "GB", us-east-1 = 0.045, eu-west-1 = 0.048, eu-west-2 = 0.050 }
 
 [tables.public_ipv4]
 unit = "hour"
-description = "Public IPv4 address in use (an Elastic IP on a NAT gateway, one per load balancer zone)"
+description = "Public IPv4 address in use (an Elastic IP on a NAT gateway, one per load balancer zone, one per Fargate task or instance a public IP is assigned to)"
 source = "Amazon VPC pricing, public IPv4 address section"
-checked = "2026-09-29: b0.p.awsstatic.com meteredUnitMaps vpc/vpc.json 'Hourly charge for In use Public IPv4 Addresses'; $0.005 in all three regions"
+checked = "2026-09-29: b0.p.awsstatic.com meteredUnitMaps vpc/vpc.json 'Hourly charge for In use Public IPv4 Addresses'; $0.005 in all three regions. 2026-10-12: aws.amazon.com/vpc/pricing/ states it for any public IPv4 address on a resource in a VPC, ECS tasks and EC2 instances included"
 
 [tables.public_ipv4.rows]
 address = { "*" = 0.005 }

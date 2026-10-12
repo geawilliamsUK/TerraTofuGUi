@@ -59,9 +59,24 @@ fn ec2_hours(c: &mut Ctx, sku: Option<String>, count: f64, what: &str) {
     );
 }
 
+/// The public IPv4 addresses a public subnet auto-assigns to `count` instances (or node
+/// hours): AWS bills each one for every hour it is in use, attached to anything or not.
+fn subnet_public_ipv4(c: &mut Ctx, count: f64, what: &str) {
+    if c.in_public_subnet() {
+        c.charge(
+            format!("{what}: public IPv4 address (the subnet auto-assigns one)"),
+            "public_ipv4",
+            "address",
+            count,
+        );
+    }
+}
+
 fn compute_instance(c: &mut Ctx) {
     let sku = c.sku("main", "instance_type");
     ec2_hours(c, sku, 1.0, "instance");
+    let hours = c.hours();
+    subnet_public_ipv4(c, hours, "instance");
 }
 
 fn autoscaling_group(c: &mut Ctx) {
@@ -69,6 +84,8 @@ fn autoscaling_group(c: &mut Ctx) {
     let n = c.num("desired_instances", 1.0).max(c.num("min_instances", 0.0));
     c.note("priced at the desired instance count around the clock");
     ec2_hours(c, sku, n, "instances");
+    let hours = c.hours();
+    subnet_public_ipv4(c, n * hours, &format!("{n} instances"));
 }
 
 /// Node-group instances plus their root volumes, for `node_hours` in the month.
@@ -100,6 +117,7 @@ fn eks_nodes(c: &mut Ctx, sku: Option<String>, node_hours: f64, disk_gb: f64, sp
         "gp3",
         avg * disk_gb,
     );
+    subnet_public_ipv4(c, node_hours, what);
 }
 
 fn kubernetes_cluster(c: &mut Ctx) {
@@ -162,6 +180,16 @@ fn container_app(c: &mut Ctx) {
         gb,
         mem * hours,
     );
+    // 'Public IP for outbound' or public ingress: every running task holds an address.
+    let public = c.arg("main", "network_configuration.assign_public_ip");
+    if public.and_then(|v| v.as_bool()) == Some(true) {
+        c.charge(
+            format!("{replicas} task(s) x public IPv4 address"),
+            "public_ipv4",
+            "address",
+            hours,
+        );
+    }
 }
 
 /// A task definition costs nothing; each run is billed for the seconds it runs.
@@ -184,6 +212,14 @@ fn container_job(c: &mut Ctx) {
         gb,
         mem * hours,
     );
+    if c.flag("outbound_public_ip") {
+        c.charge(
+            format!("{} run(s) x {minutes} min x public IPv4 address", fmt(runs)),
+            "public_ipv4",
+            "address",
+            hours,
+        );
+    }
     c.note("Fargate bills a run per second with a one-minute minimum");
 }
 

@@ -671,6 +671,7 @@ pub enum AgentCommand {
         group_by: Option<String>,
         assumptions: Option<serde_json::Map<String, serde_json::Value>>,
         region: Option<String>,
+        usage: Option<String>,
     },
 
     // ---- File interchange (`exec/import.rs`).
