@@ -6,6 +6,7 @@
 //! directory can be loaded at runtime to test contributions without rebuilding.
 
 pub mod fields;
+pub mod include;
 pub mod load;
 pub mod names;
 pub mod schema;

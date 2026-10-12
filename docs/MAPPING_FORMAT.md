@@ -1,6 +1,7 @@
 # Resource Mapping File Format (schema_version 1)
 
-This is the contract for `definitions/resources/*.toml` and `definitions/providers/*.toml`.
+This is the contract for `definitions/resources/*.toml`, `definitions/providers/*.toml`
+and the fragments resource files share, `definitions/fragments/*.toml` (§1.3).
 You do not need to know Rust to write one. Every file is validated when the catalog loads;
 a mistake is reported with the file, the provider section and the argument name, and the
 catalog refuses to load until it is fixed. Run `ttg catalog --definitions ./definitions`
@@ -158,6 +159,69 @@ once**, one entry per group of target types — a DNS Record's `attribute_refere
 have disjoint `targets`; each then owns only links to its own targets, so cardinality,
 `via_parent` and the "not a declared target" warning are judged per declaration. Mappings
 tell them apart with `target_type` (§2.6).
+
+### 1.3 Shared fragments (`include`)
+
+Two types that are mostly the same thing — a Container App and a Container Job run one
+container with the same settings, links and grants — keep what they share in a
+*fragment file*, `definitions/fragments/<file>.toml`, instead of a copy each. A fragment
+file is a table of named TOML values: a field, a list of fields, a block, a list of
+blocks, an argument source, a check.
+
+```toml
+# definitions/fragments/container.toml
+[[env_fields]]                       # a list: the fields `env` and `secrets`
+name = "env"
+…
+
+[ecs_logs]                           # an argument source
+if = { relation = "logs_to" }
+then = { object = { …, "awslogs-stream-prefix" = { value = "{{noun}}" } } }
+```
+
+A resource file takes one with a table whose `include` key names it,
+`"<file>.<name>"`, anywhere a value goes:
+
+```toml
+[[fields]]
+include = "container.env_fields"     # a list in a list: its entries are spliced in
+
+[[fields]]
+include = "container.image_field"    # a table: replaced, then the other keys laid over it
+default = "public.ecr.aws/nginx/nginx:latest"
+
+[providers.aws.blocks.args]
+include = "container.ecs_task_args"  # the shared arguments, then this file's own
+tags    = { object = { Name = { field = "name" } } }
+
+[providers.aws.blocks.args.container_definitions.args.list.object]
+logConfiguration = { include = "container.ecs_logs", with = { noun = "job" } }
+```
+
+- A **table** fragment replaces the `include` table. The table's other keys are laid
+  over it: a table merges into the fragment's table of the same name, any other value
+  replaces the fragment's (in its place, so the argument order stays), and a new key is
+  added after the fragment's own. That is how a type changes one thing — a default, a
+  `when` — and keeps the rest.
+- A **list** fragment included as an entry of a list (`[[fields]]`, `[[…blocks]]`,
+  `[[…nested]]`, `[[…checks]]`) is spliced into it at that place, so a type's own entries
+  can come before, between and after shared ones. Nothing may be laid over a list.
+- **`with = { noun = "job" }`** fills `{{noun}}` in the fragment's strings — a message, a
+  description, a literal value. A fragment the fragment includes sees the same values.
+  A `{{…}}` left without a value is an error, so a fragment that uses one cannot be
+  taken without it. (`{name}` and the other single-brace template placeholders are left
+  alone: they are filled at export time, per entity.)
+- Fragments may include fragments; one that ends up including itself is an error, as
+  are an unknown file or name.
+
+The includes are expanded when the catalog loads, before anything else reads the file:
+the validator, the export and `ttg catalog` see the expanded type exactly as if it had
+been written out, so every rule in this document applies to it unchanged and a mistake
+inside a fragment is reported against the type that took it. Fragment files are part of
+the catalog fingerprint. A definitions directory (`--definitions`) may have a
+`fragments/` folder of its own; the embedded catalog lists them in
+`BUILTIN_FRAGMENTS` (`crates/ttg-catalog/src/load.rs`). A file that includes nothing is
+read as before.
 
 ---
 
@@ -1132,7 +1196,9 @@ entity_arg = "tags"                    # Owner / Description on each resource
 
 ## 5. Checklist for a new definition
 
-1. Copy the closest existing file in `definitions/resources/`.
+1. Copy the closest existing file in `definitions/resources/`. When the new type is a
+   variant of an existing one, include what they share from a fragment (§1.3) rather
+   than copying it.
 2. Fill `[resource]`, abstract `[[fields]]`, `[[relations]]`.
 3. For each provider: pick `status`, add provider `fields` for anything that cannot be
    expressed abstractly, write `blocks`, `outputs`, and `manual_steps` for gaps.

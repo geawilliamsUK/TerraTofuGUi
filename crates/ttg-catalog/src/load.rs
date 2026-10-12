@@ -183,6 +183,12 @@ const BUILTIN_RESOURCES: &[(&str, &str)] = &[
     ),
 ];
 
+/// Fragments the resource definitions share (`include`, MAPPING_FORMAT.md §1.3).
+const BUILTIN_FRAGMENTS: &[(&str, &str)] = &[(
+    "fragments/container.toml",
+    include_str!("../../../definitions/fragments/container.toml"),
+)];
+
 const BUILTIN_PROVIDERS: &[(&str, &str)] = &[
     (
         "providers/aws.toml",
@@ -234,18 +240,23 @@ impl Catalog {
     /// The compiled-in catalog. Panics only if the embedded files are invalid, which the
     /// test-suite guards against.
     pub fn builtin() -> Catalog {
-        Self::from_sources(
+        Self::from_parts(
             BUILTIN_RESOURCES.iter().copied(),
             BUILTIN_PROVIDERS.iter().copied(),
+            BUILTIN_FRAGMENTS.iter().copied(),
         )
         .expect("embedded definitions are valid")
     }
 
-    /// Load `<dir>/resources/*.toml` and `<dir>/providers/*.toml`.
+    /// Load `<dir>/resources/*.toml`, `<dir>/providers/*.toml` and, when the directory
+    /// has them, `<dir>/fragments/*.toml`.
     pub fn load_dir(dir: &Path) -> Result<Catalog, CatalogError> {
         let read_all = |sub: &str| -> Result<Vec<(String, String)>, CatalogError> {
             let d = dir.join(sub);
             let mut out = Vec::new();
+            if sub == "fragments" && !d.is_dir() {
+                return Ok(out);
+            }
             let entries = std::fs::read_dir(&d).map_err(|e| CatalogError::Io {
                 path: d.display().to_string(),
                 source: e,
@@ -266,9 +277,11 @@ impl Catalog {
         };
         let res = read_all("resources")?;
         let prov = read_all("providers")?;
-        Self::from_sources(
+        let frags = read_all("fragments")?;
+        Self::from_parts(
             res.iter().map(|(a, b)| (a.as_str(), b.as_str())),
             prov.iter().map(|(a, b)| (a.as_str(), b.as_str())),
+            frags.iter().map(|(a, b)| (a.as_str(), b.as_str())),
         )
     }
 
@@ -277,8 +290,21 @@ impl Catalog {
         resources: impl Iterator<Item = (&'a str, &'a str)>,
         providers: impl Iterator<Item = (&'a str, &'a str)>,
     ) -> Result<Catalog, CatalogError> {
+        Self::from_parts(resources, providers, std::iter::empty())
+    }
+
+    /// [`Catalog::from_sources`] with fragment files the resource definitions include.
+    pub fn from_parts<'a>(
+        resources: impl Iterator<Item = (&'a str, &'a str)>,
+        providers: impl Iterator<Item = (&'a str, &'a str)>,
+        fragments: impl Iterator<Item = (&'a str, &'a str)>,
+    ) -> Result<Catalog, CatalogError> {
         let mut cat = Catalog::default();
         let mut texts: Vec<&'a str> = Vec::new();
+        let fragments: Vec<(&str, &str)> = fragments.collect();
+        texts.extend(fragments.iter().map(|(_, t)| *t));
+        let frags = crate::include::parse(fragments.into_iter())
+            .map_err(|(path, message)| CatalogError::Parse { path, message })?;
         for (path, text) in providers {
             texts.push(text);
             let def: ProviderDef = toml::from_str(text).map_err(|e| CatalogError::Parse {
@@ -289,10 +315,19 @@ impl Catalog {
         }
         for (path, text) in resources {
             texts.push(text);
-            let def: ResourceDef = toml::from_str(text).map_err(|e| CatalogError::Parse {
+            let parse_err = |message: String| CatalogError::Parse {
                 path: path.to_string(),
-                message: e.to_string(),
-            })?;
+                message,
+            };
+            let mut doc: toml::Table = toml::from_str(text).map_err(|e| parse_err(e.to_string()))?;
+            let def: ResourceDef = if crate::include::uses_fragments(&doc) {
+                crate::include::expand(&mut doc, &frags).map_err(parse_err)?;
+                toml::Value::Table(doc)
+                    .try_into()
+                    .map_err(|e: toml::de::Error| parse_err(format!("with its includes: {e}")))?
+            } else {
+                toml::from_str(text).map_err(|e| parse_err(e.to_string()))?
+            };
             let id = def.resource.type_id.clone();
             if cat.resources.contains_key(&id) {
                 return Err(CatalogError::Parse {
@@ -629,6 +664,46 @@ mod tests {
         assert_ne!(fingerprint_of(["a", "b"]), fingerprint_of(["a", "c"]));
         // A definition edit changes it; so does splitting one text in two.
         assert_ne!(fingerprint_of(["ab"]), fingerprint_of(["a", "b"]));
+    }
+
+    /// The definitions directory, fragments and all, is the embedded catalog.
+    #[test]
+    fn the_definitions_directory_loads_like_the_builtin_catalog() {
+        let dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../definitions");
+        let c = Catalog::load_dir(&dir).expect("loads");
+        assert_eq!(c.fingerprint, Catalog::builtin().fingerprint);
+        let job = c.resource("container_job").unwrap();
+        assert!(
+            job.fields.iter().any(|f| f.name == "secrets"),
+            "fields from a fragment"
+        );
+        assert!(job.resource.description.contains("run to completion"));
+    }
+
+    #[test]
+    fn a_mistake_in_an_include_names_the_type_that_took_it() {
+        let aws = "schema_version = 1\n[provider]\nid = \"aws\"\ndisplay_name = \"AWS\"\nsource_namespace = \"hashicorp\"\nsource_name = \"aws\"\nversion_constraint = \"~> 6.0\"\n";
+        let frag = "[[tags]]\nname = \"tag\"\ntype = \"string\"\ndescription = \"A tag for the {{noun}}.\"\n";
+        let thing = |include: &str| {
+            format!("schema_version = 2\n[resource]\ntype = \"thing\"\ncategory = \"compute\"\ndisplay_name = \"Thing\"\n[[fields]]\n{include}\n")
+        };
+        let load = |t: &str| {
+            Catalog::from_parts(
+                [("resources/thing.toml", t)].into_iter(),
+                [("providers/aws.toml", aws)].into_iter(),
+                [("fragments/shared.toml", frag)].into_iter(),
+            )
+        };
+        let c = load(&thing("include = \"shared.tags\"\nwith = { noun = \"thing\" }")).expect("loads");
+        assert_eq!(
+            c.resource("thing").unwrap().fields[0].description,
+            "A tag for the thing."
+        );
+        let err = load(&thing("include = \"shared.tags\"")).unwrap_err().to_string();
+        assert!(
+            err.starts_with("resources/thing.toml: {{noun}} has no value"),
+            "{err}"
+        );
     }
 
     #[test]
