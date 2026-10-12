@@ -74,8 +74,8 @@ fn scan_cond(c: &Condition, set: &mut HashSet<String>) {
 fn scan(src: &ArgSource, set: &mut HashSet<String>) {
     match src {
         ArgSource::Relation(r) => {
-            if let Some(fb) = &r.fallback {
-                scan(fb, set);
+            for s in r.key.iter().chain(&r.fallback) {
+                scan(s, set);
             }
         }
         ArgSource::Field(f) => {

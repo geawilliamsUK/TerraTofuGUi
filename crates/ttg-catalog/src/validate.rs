@@ -712,6 +712,16 @@ fn check_condition(ctx: &mut SourceCtx, c: &Condition, errs: &mut Vec<String>) {
                 ctx.v2 = true;
                 check_where(ctx, r.target_type.as_deref(), w, errs);
             }
+            if let Some(x) = &r.except {
+                ctx.v2 = true;
+                if x.absent || x.min_count.is_some() {
+                    errs.push(format!(
+                        "{}when: except names what another relation reaches, so absent and min_count do not apply to it",
+                        ctx.what
+                    ));
+                }
+                check_condition(ctx, &Condition::Relation((**x).clone()), errs);
+            }
             if r.incoming {
                 // The relation belongs to whoever links *here*, so it is not one of this
                 // type's own declarations: only the kind and the other end's type exist
@@ -1530,6 +1540,31 @@ fn check_source(ctx: &mut SourceCtx, at: &str, src: &ArgSource, errs: &mut Vec<S
                 if !r.incoming {
                     check_limit_declared(ctx, at, &r.relation, r.target_type.as_deref(), limit, errs);
                 }
+            }
+            if let Some(k) = &r.key {
+                ctx.v2 = true;
+                if r.field.is_some() || r.connection.is_some() || r.limit.is_some() {
+                    errs.push(e(
+                        "key picks an instance of the target's block, so it cannot be combined with field, connection or limit"
+                            .into(),
+                    ));
+                }
+                // Some mapping of the target type must repeat the block it names.
+                match (&r.block, &r.target_type) {
+                    (None, _) => errs.push(e("key needs block, the target's repeated block".into())),
+                    (Some(b), Some(tt)) => {
+                        let repeated = ctx.cat.resources.get(tt).is_some_and(|d| {
+                            d.providers
+                                .values()
+                                .any(|m| m.blocks.iter().any(|x| &x.key == b && x.repeated()))
+                        });
+                        if !repeated {
+                            errs.push(e(format!("key: no mapping of '{tt}' has a repeated block '{b}'")));
+                        }
+                    }
+                    (Some(_), None) => {}
+                }
+                check_source(ctx, &format!("{at}.key"), k, errs);
             }
             check_no_map_wrap(ctx, at, r.wrap, errs);
             if let Some(anc) = &r.ancestor {

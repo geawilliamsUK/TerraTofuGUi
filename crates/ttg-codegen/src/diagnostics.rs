@@ -945,6 +945,51 @@ pub fn relation_sources_of_type(
         .collect()
 }
 
+/// The entities a relation condition counts: its targets (or sources, `incoming`), after
+/// the `hop`, that pass its `where` and `target_field` / `target_provider_field` tests.
+fn relation_matches(
+    p: &Project,
+    cat: &Catalog,
+    provider: &str,
+    e: &EntityRef,
+    r: &ttg_catalog::CondRelation,
+) -> Vec<Id> {
+    let targets = Relation::from_key(&r.relation)
+        .map(|k| {
+            if r.incoming {
+                relation_sources_of_type(p, e, k, r.target_type.as_deref())
+            } else {
+                relation_targets_of_type(p, cat, e, k, r.target_type.as_deref())
+            }
+        })
+        .unwrap_or_default();
+    let targets = match &r.hop {
+        Some(h) => crate::edge::hop(p, cat, &targets, h),
+        None => targets,
+    };
+    targets
+        .into_iter()
+        .filter(|t| {
+            let Some(te) = p.entity(t) else { return false };
+            // `where` asks the entity at the other end a question of its own.
+            if r.where_
+                .as_ref()
+                .is_some_and(|w| !condition_holds(p, cat, provider, &te, w, None))
+            {
+                return false;
+            }
+            let v = if let Some(f) = &r.target_field {
+                field_or_default(cat, provider, &te, f, false)
+            } else if let Some(f) = &r.target_provider_field {
+                field_or_default(cat, provider, &te, f, true)
+            } else {
+                return true;
+            };
+            cond_value(v.as_ref(), &r.equals, &r.not_equals)
+        })
+        .collect()
+}
+
 /// Evaluate a definition condition for an entity. `item` is the current row of a
 /// repeated block (record and index), when there is one.
 pub fn condition_holds(
@@ -971,41 +1016,13 @@ pub fn condition_holds_for(
 ) -> bool {
     match c {
         Condition::Relation(r) => {
-            let targets = Relation::from_key(&r.relation)
-                .map(|k| {
-                    if r.incoming {
-                        relation_sources_of_type(p, e, k, r.target_type.as_deref())
-                    } else {
-                        relation_targets_of_type(p, cat, e, k, r.target_type.as_deref())
-                    }
-                })
-                .unwrap_or_default();
-            let targets = match &r.hop {
-                Some(h) => crate::edge::hop(p, cat, &targets, h),
-                None => targets,
-            };
-            let matching = targets
-                .iter()
-                .filter(|t| {
-                    let Some(te) = p.entity(t) else { return false };
-                    // `where` asks the entity at the other end a question of its own.
-                    if r.where_
-                        .as_ref()
-                        .is_some_and(|w| !condition_holds(p, cat, provider, &te, w, None))
-                    {
-                        return false;
-                    }
-                    let v = if let Some(f) = &r.target_field {
-                        field_or_default(cat, provider, &te, f, false)
-                    } else if let Some(f) = &r.target_provider_field {
-                        field_or_default(cat, provider, &te, f, true)
-                    } else {
-                        return true;
-                    };
-                    cond_value(v.as_ref(), &r.equals, &r.not_equals)
-                })
-                .count();
-            (matching >= r.min_count.unwrap_or(1)) != r.absent
+            let mut matching = relation_matches(p, cat, provider, e, r);
+            // `except`: what another path from this entity reaches does not count.
+            if let Some(x) = &r.except {
+                let gone = relation_matches(p, cat, provider, e, x);
+                matching.retain(|t| !gone.contains(t));
+            }
+            (matching.len() >= r.min_count.unwrap_or(1)) != r.absent
         }
         Condition::Target(t) => {
             // Without `relation` the subject is the current for_each_relation row; with

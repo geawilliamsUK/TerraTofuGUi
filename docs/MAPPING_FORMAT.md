@@ -393,9 +393,9 @@ left is written as itself, so joining a table's rows to a few fixed entries does
   environments, an environment) built to be destroyed and deployed again
   (`settings.disposable`, `settings.disposable_environments`); the mappings use it to
   leave nothing behind that would stop the next `apply` — no final database snapshot,
-  `recovery_window_in_days = 0`, `force_destroy` on buckets, the shortest Key Vault
-  soft-delete period, a Cloud SQL instance name drawn per create (a `random_id` suffix,
-  because Cloud SQL keeps a deleted name for a week).
+  `recovery_window_in_days = 0`, `force_destroy` on buckets, `force_delete` on ECR
+  repositories, the shortest Key Vault soft-delete period, a Cloud SQL instance name drawn
+  per create (a `random_id` suffix, because Cloud SQL keeps a deleted name for a week).
 - `{ field = "parameters", has_row = { name = "rds.force_ssl", value = ["1", "on"] } }`
   (v2) — the table field has a row whose items match every key: a value or a list of
   accepted values, compared as text without regard to case; `*` accepts any value that is
@@ -623,6 +623,17 @@ says *more than one*: a Log Group with two incoming clusters cannot be named aft
 `log_group.toml` reports it as an error. `min_count = 0` is rejected — `absent = true` is
 what "none" means.
 
+**All but what another path reaches: `except`.** `except = <relation condition>` on a
+relation condition leaves out the entities that other condition reaches from the same
+entity — its `hop`, `where` and `target_field` applied, its `absent` and `min_count` not
+(the loader refuses them there). The rest are counted as usual. A Container App's "Database
+access is not an IAM grant" step holds for a database it uses that no Secret it reads is
+built from:
+
+```toml
+when = { relation = "attribute_reference", target_type = "relational_database", target_field = "iam_authentication", not_equals = "true", except = { relation = "reads", target_type = "secret", hop = { relation = "reads", target_type = "relational_database" } } }
+```
+
 **A link read at the other end.** When the mapping of an edge's *target* reads it with
 `incoming` (a source or a condition naming the relation and the source's type), the link
 is expressed there: a Load Balancer turns Cloud CDN on when a CDN points at it. The source
@@ -730,13 +741,31 @@ Azure and `<region>-docker.pkg.dev/<project>/<repository>` on Google Cloud, so o
 builds an image reference on every provider:
 
 ```toml
-image = { func = "format", args = [ { value = "%s/%s:%s" }, { relation = "attachment", target_type = "container_registry", connection = "REGISTRY" }, … ] }
+image = { raw = "\"${@registry@}/${@repository@}:${@tag@}\"", refs = { registry = { relation = "attachment", target_type = "container_registry", connection = "REGISTRY" }, … } }
 ```
 
 It cannot be combined with `attr`, `field` or `block`. A target that is manual or
 unmapped becomes an input variable named after the key, as with any reference. The key
 must be declared by some provider mapping of the target type (`target_type`, or every type
 the relation's declarations allow); the loader checks it.
+
+**One instance of a target's repeated block: `key`.** A relation source naming a
+repeated block of the target (`block = "repo"`, one ECR repository per entry of the
+registry's `repositories`) references its first instance. `key = <source>`
+picks the instance whose row key (§2.6, matched as written or slugified, like a `$ref`'s
+`key`) is that source's value, resolved on *this* entity — so a Container App's image is
+the URL of the one repository it runs from, and its task depends on that repository
+alone:
+
+```toml
+url = { relation = "attachment", target_type = "container_registry", block = "repo", key = { field = "repository", optional = true }, attr = "repository_url", fallback = { … } }
+```
+
+A key no instance has resolves to nothing, so the source's `fallback` applies (the
+registry's host and the name, for a repository it does not list); a key source that
+resolves to nothing (the field is unset) picks the first instance. The value must be text.
+`key` needs `block`, cannot be combined with `field`, `connection` or `limit`, and with
+`target_type` the loader checks that some mapping of that type repeats the block.
 
 **Rows and links.** `{ item = "secret", linked = "reads" }` holds when the row's
 `entity_ref` item points at one of the entity's own targets of that relation — a check that
@@ -756,6 +785,12 @@ used; a ref that resolves to nothing omits the whole argument.
 for_each = { raw = "{ for o in @options@ : o.domain_name => o }", refs = { options = { self_block = "main", attr = "domain_validation_options" } } }
 name     = { raw = "each.value.resource_record_name" }
 ```
+
+Inside a quoted template, `${@name@}` takes a ref that is a string — a literal or another
+quoted template — as its text rather than as an interpolation of it, so a string can be
+assembled without `format` and still read naturally: `"${@url@}:${@tag@}"` with a tag of
+`1.4.2` is `"${aws_ecr_repository.images_repo_shop_web.repository_url}:1.4.2"`, and with an
+unset tag `"${…repository_url}:${var.web_image_tag}"`.
 
 `for_each`, `count`, `provider` and `lifecycle` are meta-arguments: the schema check accepts
 them on any block. `lifecycle` may also be written as a nested block, with `ignore_changes`,

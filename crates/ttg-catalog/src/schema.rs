@@ -771,6 +771,12 @@ pub struct CondRelation {
     /// relations the condition may name.
     #[serde(default, rename = "where")]
     pub where_: Option<Box<Condition>>,
+    /// Leave out the targets this other relation condition reaches from the same entity,
+    /// its own filters applied (v2): "a used database no Secret this app reads is built
+    /// from" is `except = { relation = "reads", target_type = "secret", hop = { relation =
+    /// "reads", target_type = "relational_database" } }`.
+    #[serde(default)]
+    pub except: Option<Box<CondRelation>>,
 }
 #[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -1217,6 +1223,12 @@ pub struct SrcRelation {
     /// `connection`; a target whose limit is unknown contributes nothing.
     #[serde(default)]
     pub limit: Option<String>,
+    /// With `block` naming a repeated block of the target: the instance whose row key is
+    /// this source's value, resolved on *this* entity (v2) — the repository of a registry
+    /// an app runs its image from. A value no instance has resolves to nothing (so
+    /// `fallback` applies); a source that resolves to nothing picks the first instance.
+    #[serde(default)]
+    pub key: Option<Box<ArgSource>>,
 }
 #[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -1381,7 +1393,7 @@ impl ArgSource {
         match self {
             ArgSource::Field(x) => x.fallback.iter().for_each(|s| sub(s)),
             ArgSource::ProviderField(x) => x.fallback.iter().for_each(|s| sub(s)),
-            ArgSource::Relation(x) => x.fallback.iter().for_each(|s| sub(s)),
+            ArgSource::Relation(x) => x.key.iter().chain(&x.fallback).for_each(|s| sub(s)),
             ArgSource::Object(x) => x.object.values().for_each(sub),
             ArgSource::List(x) => x.list.iter().for_each(sub),
             ArgSource::Func(x) => x.args.iter().for_each(sub),

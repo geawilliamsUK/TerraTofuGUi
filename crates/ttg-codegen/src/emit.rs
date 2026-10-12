@@ -2174,6 +2174,19 @@ impl<'a> Emitter<'a> {
                             continue;
                         };
                         exprs.push(value_expr(&transformed(&v, r.transform)));
+                    } else if let Some(k) = &r.key {
+                        // `key`: the instance of the target's repeated block this entity
+                        // names (or the first, when it names none).
+                        let sel = match self.resolve(e, m, k, &format!("{at}.key"), item)? {
+                            Some(Expression::String(s)) => Some(KeySel::Key(s)),
+                            Some(_) => return Err(err("key must resolve to text".into())),
+                            None => None,
+                        };
+                        if let Some(x) =
+                            self.keyed_reference(&subject, r.block.as_deref(), sel.as_ref(), &r.attr, at)?
+                        {
+                            exprs.push(x);
+                        }
                     } else if let Some(x) = self.reference(&subject, r.block.as_deref(), &r.attr, at)? {
                         exprs.push(x);
                     }
@@ -2303,7 +2316,15 @@ impl<'a> Emitter<'a> {
                     let Some(x) = self.resolve(e, m, sub, &format!("{at}.refs.{name}"), item)? else {
                         return Ok(None);
                     };
-                    text = text.replace(&format!("@{name}@"), &x.to_string());
+                    let rendered = x.to_string();
+                    // Interpolated into a template, a string (or another template) is
+                    // written as its text: `"${@url@}:${@tag@}"` -> `"${…repository_url}:1.4"`.
+                    let quoted = matches!(&x, Expression::String(_))
+                        || matches!(&x, Expression::TemplateExpr(t) if matches!(**t, hcl::expr::TemplateExpr::QuotedString(_)));
+                    if quoted && rendered.len() >= 2 {
+                        text = text.replace(&format!("${{@{name}@}}"), &rendered[1..rendered.len() - 1]);
+                    }
+                    text = text.replace(&format!("@{name}@"), &rendered);
                 }
                 Some(raw_expr(&text))
             }
@@ -2359,6 +2380,29 @@ impl<'a> Emitter<'a> {
         at: &str,
     ) -> Result<Option<Expression>, GenError> {
         self.reference_to(target, block, None, attr, at)
+    }
+
+    /// [`Emitter::reference_to`] for a mapping's `key`: an instance the block does not
+    /// have is nothing, for the source's `fallback` to stand in for.
+    fn keyed_reference(
+        &mut self,
+        target: &str,
+        block: Option<&str>,
+        key: Option<&KeySel>,
+        attr: &str,
+        at: &str,
+    ) -> Result<Option<Expression>, GenError> {
+        if let (Some(k), Some(b)) = (key, block) {
+            let missing = self
+                .plan
+                .blocks
+                .get(&(target.to_string(), b.to_string()))
+                .is_some_and(|pl| pl.find(k).is_none());
+            if missing {
+                return Ok(None);
+            }
+        }
+        self.reference_to(target, block, key, attr, at)
     }
 
     /// [`Emitter::reference`] to one instance of a repeated block, picked by its key or
