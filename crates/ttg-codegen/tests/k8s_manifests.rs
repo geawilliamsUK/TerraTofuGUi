@@ -286,7 +286,7 @@ fn azure_and_gcp_manifests_carry_their_identity_conventions() {
         assert!(asr.contains(want), "missing {want:?} in\n{asr}");
     }
     assert!(gcp.files["outputs.tf"].contains(
-        "value       = format(\"%s-docker.pkg.dev/%s/%s\", google_artifact_registry_repository.images.location, google_artifact_registry_repository.images.project, google_artifact_registry_repository.images.repository_id)"
+        "value       = \"${google_artifact_registry_repository.images.location}-docker.pkg.dev/${google_artifact_registry_repository.images.project}/${google_artifact_registry_repository.images.repository_id}\""
     ));
 }
 

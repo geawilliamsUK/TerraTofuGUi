@@ -319,6 +319,32 @@ fn auto_tls_says_when_it_cannot_see_the_parameter_group() {
     assert!(!warns.iter().any(|m| m.contains("'auto' TLS mode")), "{warns:?}");
 }
 
+/// TF-035: node-postgres reads `require` as `verify-full`; `no-verify` encrypts without
+/// checking the certificate, and MySQL's REQUIRED already does.
+#[test]
+fn no_verify_encrypts_without_checking_the_certificate() {
+    let mut p = with_db_url();
+    set(&mut p, "sec-dburl", "sslmode", json!("no-verify"));
+    for provider in ["aws", "azure", "gcp"] {
+        let v = secret_value(&p, provider);
+        assert!(v.ends_with("\"?sslmode=no-verify\")"), "{provider}: {v}");
+    }
+    set(&mut p, "db-shop", "engine", json!("mysql"));
+    for provider in ["aws", "azure", "gcp"] {
+        let v = secret_value(&p, provider);
+        assert!(v.ends_with("\"?ssl-mode=REQUIRED\")"), "{provider}: {v}");
+    }
+    // 'auto' on a server that forces TLS stays `require`, which every libpq client takes.
+    let mut p = with_db_url();
+    set(
+        &mut p,
+        "db-shop",
+        "parameters",
+        json!([{"name": "rds.force_ssl", "value": "1"}]),
+    );
+    assert!(secret_value(&p, "aws").ends_with("\"?sslmode=require\")"));
+}
+
 // ------------------------------------------------------------------ disposable
 
 #[test]
@@ -349,6 +375,10 @@ fn a_disposable_project_leaves_nothing_behind_that_stops_the_next_apply() {
     assert!(!all.contains("final_snapshot_identifier"));
     assert!(!all.contains("random_id"));
     assert!(all.contains("recovery_window_in_days = 0"));
+    // Every ECR repository goes, images and all (TF-027).
+    let c = squash(&g.files["container.tf"]);
+    assert_eq!(c.matches("force_delete = true").count(), 3, "{c}");
+    assert!(!c.contains("force_delete = false"), "{c}");
     assert!(
         squash(&g.files["storage.tf"]).contains("bucket = \"shop-uploads-x7q2\" force_destroy = true"),
         "{}",
@@ -413,6 +443,8 @@ fn disposable_is_chosen_per_environment() {
     let prod = squash(&g.files["environments/prod.tfvars"]);
     assert!(staging.contains("recovery_window_in_days = 0"), "{staging}");
     assert!(prod.contains("recovery_window_in_days = 7"), "{prod}");
+    assert!(staging.contains("force_delete = true"), "{staging}");
+    assert!(prod.contains("force_delete = false"), "{prod}");
     // An environment the project does not have is reported.
     p.settings.disposable_environments.insert("qa".into(), true);
     let warns = messages(&p, &cat, "aws", Severity::Warning);

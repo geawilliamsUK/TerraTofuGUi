@@ -200,9 +200,16 @@ deregistration_delay = { if = { relation = "attachment", target_type = "containe
 block = "health_check"
 when = { relation = "attachment", target_type = "container_app", target_field = "health_check_path" }
 
+# The container's own health check says how often and how patiently to ask: as many
+# failures in a row as it allows before a restart take the task out of service. It has no
+# count of successes (ECS calls a container healthy on its first), so a task takes
+# traffic after the fewest the target group accepts, two, rather than AWS's five.
 [providers.aws.blocks.nested.args]
-path     = { relation = "attachment", target_type = "container_app", field = "health_check_path" }
-interval = { relation = "attachment", target_type = "container_app", field = "health_check_interval" }
+path                = { relation = "attachment", target_type = "container_app", field = "health_check_path" }
+interval            = { relation = "attachment", target_type = "container_app", field = "health_check_interval" }
+timeout             = { relation = "attachment", target_type = "container_app", field = "health_check_timeout" }
+healthy_threshold   = { value = 2 }
+unhealthy_threshold = { relation = "attachment", target_type = "container_app", field = "health_check_retries" }
 
 [[providers.aws.blocks]]
 key = "listener"

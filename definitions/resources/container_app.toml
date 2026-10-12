@@ -80,6 +80,7 @@ description = "No ingress at all: no port mapping, no load balancer, nothing cal
 
 [[fields]]
 include = "container.env_fields"
+with = { noun = "app" }
 
 [[fields]]
 name = "health_check_path"
@@ -100,19 +101,21 @@ name = "health_check_interval"
 label = "Health check interval (s)"
 type = "int"
 default = 30
+description = "Seconds between checks, the container's own and a load balancer's (AWS target group: 5-300)."
 
 [[fields]]
 name = "health_check_timeout"
 label = "Health check timeout (s)"
 type = "int"
 default = 5
+description = "Seconds a check may take before it counts as failed (AWS target group: less than the interval)."
 
 [[fields]]
 name = "health_check_retries"
 label = "Health check retries"
 type = "int"
 default = 3
-description = "Consecutive failures before the container is restarted."
+description = "Consecutive failures before the container is restarted, and before a load balancer forwarding to it stops sending it traffic (AWS: the target group's unhealthy threshold, 2-10; the target group sends traffic after 2 successes)."
 
 [[fields]]
 name = "health_check_start_period"
@@ -154,6 +157,18 @@ when = { all = [ { field = "background_worker" }, { relation = "attachment", inc
 severity = "error"
 message = "\"{name}\" is a background worker, so a load balancer cannot forward to it; clear 'Background worker' or remove the link"
 
+# A load balancer's target group takes the health check's retries and timing (see
+# load_balancer.toml), within narrower limits than ECS's own.
+[[providers.aws.checks]]
+when = { all = [ { field = "health_check_path" }, { relation = "attachment", incoming = true, target_type = "load_balancer" }, { any = [ { field = "health_check_retries", less_than = 2 }, { field = "health_check_retries", greater_than = 10 } ] } ] }
+severity = "error"
+message = "\"{name}\" allows {field.health_check_retries} failed health checks, but the target group of the load balancer forwarding to it takes 2 to 10 before it stops sending traffic; set Health check retries in that range"
+
+[[providers.aws.checks]]
+when = { all = [ { field = "health_check_path" }, { relation = "attachment", incoming = true, target_type = "load_balancer" }, { field = "health_check_timeout", at_least = { field = "health_check_interval" } } ] }
+severity = "error"
+message = "\"{name}\" has a health check timeout of {field.health_check_timeout} s, but the target group of the load balancer forwarding to it needs one shorter than the interval ({field.health_check_interval} s)"
+
 [[providers.aws.checks]]
 include = "container.secret_checks"
 with = { noun = "app" }
@@ -178,7 +193,7 @@ func = "jsonencode"
 [[providers.aws.blocks.args.container_definitions.args.list]]
 [providers.aws.blocks.args.container_definitions.args.list.object]
 name         = { field = "name", transform = "kebab" }
-image        = { include = "container.image", with = { noun = "app" } }
+image        = { include = "container.ecs_image", with = { noun = "app" } }
 essential    = { value = true }
 portMappings = { if = { field = "background_worker", not_equals = "true" }, then = { list = [ { object = { containerPort = { field = "port", fallback = { value = 80 } }, protocol = { value = "tcp" } } } ] } }
 environment  = { include = "container.ecs_environment" }
@@ -264,7 +279,7 @@ policy, or as a statement on the execution role.
 
 [[providers.aws.manual_steps]]
 title = "Database access is not an IAM grant"
-when = { relation = "attribute_reference", target_type = "relational_database", target_field = "iam_authentication", not_equals = "true" }
+when = { relation = "attribute_reference", target_type = "relational_database", target_field = "iam_authentication", not_equals = "true", except = { relation = "reads", target_type = "secret", hop = { relation = "reads", target_type = "relational_database" } } }
 body = """
 No policy statement is generated for the linked database: RDS wants a user name and a
 password unless IAM database authentication is on. Put the connection string in a Secret,
@@ -412,7 +427,7 @@ for each, and name it in the row's **Secret** column.
 
 [[providers.azure.manual_steps]]
 title = "Database access is not a role assignment"
-when = { relation = "attribute_reference", target_type = "relational_database", target_field = "iam_authentication", not_equals = "true" }
+when = { relation = "attribute_reference", target_type = "relational_database", target_field = "iam_authentication", not_equals = "true", except = { relation = "reads", target_type = "secret", hop = { relation = "reads", target_type = "relational_database" } } }
 body = """
 No role assignment is generated for the linked database: a flexible server is reached with
 a login and password unless directory authentication is on. Inject the connection string
@@ -485,7 +500,7 @@ max_instance_count = { field = "replicas" }
 block = "containers"
 
 [providers.gcp.blocks.nested.nested.args]
-image = { include = "container.image", with = { noun = "app" } }
+image = { include = "container.registry_image", with = { noun = "app" } }
 
 [[providers.gcp.blocks.nested.nested.nested]]
 block = "ports"
@@ -554,7 +569,7 @@ secret. Store one secret per value, draw a Secret for each, and name it in the r
 
 [[providers.gcp.manual_steps]]
 title = "Database access is not an IAM grant"
-when = { relation = "attribute_reference", target_type = "relational_database" }
+when = { relation = "attribute_reference", target_type = "relational_database", except = { relation = "reads", target_type = "secret", hop = { relation = "reads", target_type = "relational_database" } } }
 body = """
 No IAM member is generated for the linked database. Cloud SQL accepts the service account
 through the Cloud SQL Auth Proxy (or the Cloud SQL connection Cloud Run mounts) with

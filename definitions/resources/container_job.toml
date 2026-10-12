@@ -55,6 +55,7 @@ description = "Give the task a public IP so it can call out to the internet (ima
 
 [[fields]]
 include = "container.env_fields"
+with = { noun = "job" }
 
 [[fields]]
 include = "container.access_fields"
@@ -109,7 +110,7 @@ func = "jsonencode"
 [[providers.aws.blocks.args.container_definitions.args.list]]
 [providers.aws.blocks.args.container_definitions.args.list.object]
 name         = { field = "name", transform = "kebab" }
-image        = { include = "container.image", with = { noun = "job" } }
+image        = { include = "container.ecs_image", with = { noun = "job" } }
 essential    = { value = true }
 environment  = { include = "container.ecs_environment" }
 secrets      = { include = "container.ecs_secrets" }
@@ -173,7 +174,7 @@ secrets and also needs `kms:Decrypt` on that key.
 
 [[providers.aws.manual_steps]]
 title = "Database access is not an IAM grant"
-when = { relation = "attribute_reference", target_type = "relational_database", target_field = "iam_authentication", not_equals = "true" }
+when = { relation = "attribute_reference", target_type = "relational_database", target_field = "iam_authentication", not_equals = "true", except = { relation = "reads", target_type = "secret", hop = { relation = "reads", target_type = "relational_database" } } }
 body = """
 No policy statement is generated for the linked database: RDS wants a user name and a
 password unless IAM database authentication is on. Inject the connection string from a
@@ -315,7 +316,7 @@ max_retries     = { field = "retries", optional = true }
 block = "containers"
 
 [providers.gcp.blocks.nested.nested.nested.args]
-image = { include = "container.image", with = { noun = "job" } }
+image = { include = "container.registry_image", with = { noun = "job" } }
 
 [[providers.gcp.blocks.nested.nested.nested.nested]]
 block = "resources"

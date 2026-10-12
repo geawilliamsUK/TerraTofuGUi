@@ -843,7 +843,10 @@ index for another major, after which the same diagnostics name what would break 
 ### 6.7a Containers: environments, apps and jobs
 
 Three types share one vocabulary (`container_environment.toml`, `container_app.toml`,
-`container_job.toml`):
+`container_job.toml`). An app and a job take what they have in common — the container's
+fields, links, environment, image and grants — from one fragment file,
+`definitions/fragments/container.toml` (MAPPING_FORMAT.md §1.3), so a change to the
+container's settings is made once:
 
 - **Container Environment** is a container: an `aws_ecs_cluster` (with Container
   Insights on or off) or an `azurerm_container_app_environment` (with its infrastructure
@@ -855,15 +858,23 @@ Three types share one vocabulary (`container_environment.toml`, `container_app.t
   cluster block to its environment through a relation source's `ancestor`.
 - **Configuration that travels**: `env` and `secrets` rows, health check (command or HTTP
   path, interval, timeout, retries, start period), stop timeout, CPU architecture, and an
-  image built from a linked Container Registry's `REGISTRY` connection value plus
-  `repository` and `image_tag` (an input variable while unset). ECS gets them in its
+  image from a linked Container Registry at `image_tag` (an input variable while unset):
+  on AWS the URL of the repository the app names (`repository`, else the registry's
+  first) — `"${aws_ecr_repository.<registry>_repo_<repository>.repository_url}:<tag>"`, a
+  relation source's `key` picking that instance of the repeated block, so a task depends
+  on its own repository only; on Azure and Google Cloud the registry's `REGISTRY`
+  connection value and the repository as a path. ECS gets them in its
   container definition (`secrets[].valueFrom = "<arn>:<key>::"`, `healthCheck`,
   `stopTimeout`, `runtime_platform`), Container Apps as env blocks, Key Vault secret
   references, a liveness probe and the termination grace period, Cloud Run as env blocks
   with `secret_key_ref` and a liveness probe. What a provider cannot express (a command
   probe off AWS, a JSON key in a Key Vault or Secret Manager secret, arm64, Cloud Run's
-  fixed ten-second stop) is a warning or a manual step. Links to a database or cache add
-  `DB_*` / `CACHE_*` variables from their connection values.
+  fixed ten-second stop) is a warning or a manual step. Links add variables from the
+  target's connection values: `DB_*` for a database (unless *Database variables* is
+  cleared), `CACHE_*` for a cache, `BUCKET_NAME` and `BUCKET_REGION` for a 'Uses' bucket
+  (`BUCKET_ACCOUNT` / `BUCKET_CONTAINER` on Azure). The "Database access is not an IAM
+  grant" step drops out once the container reads a Secret built from that database
+  (a relation condition's `except`).
 - **Two roles**: 'Task role' (`iam_binding`) is what the code runs as and gets the
   least-privilege policy built from 'Uses' / 'Reads' / 'Sends to'; 'Execution role'
   (`attribute_reference` to an `iam_role`) starts the task — the ECS execution role,
@@ -874,7 +885,9 @@ Three types share one vocabulary (`container_environment.toml`, `container_app.t
   asks the app whether it has an execution role of its own; the app adds an inline
   `secretsmanager:GetSecretValue` policy for the secrets it injects. Identical grants
   from several apps sharing an identity are written once (`emit::dedupe_grants`).
-- **Load balancer → app**: an `ip` target group with the app's port, health-check path and
+- **Load balancer → app**: an `ip` target group with the app's port, its health check
+  (path, interval, timeout, its retries as the unhealthy threshold, and the healthy
+  threshold at its minimum of 2, since the container's own check counts no successes),
   stop timeout as deregistration delay, and the ECS service's `load_balancer` block plus
   `depends_on` the listener; on Google Cloud a serverless NEG as the backend of the
   global HTTPS load balancer (no health check, port name or timeout on that backend

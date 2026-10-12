@@ -91,6 +91,13 @@ label = "JSON key"
 type = "string"
 description = "AWS: read this key of a JSON secret (valueFrom <arn>:<key>::). Empty reads the whole value. Key Vault and Secret Manager secrets hold one value each, so there the whole secret is read."
 
+[[env_fields]]
+name = "database_env"
+label = "Database variables"
+type = "bool"
+default = true
+description = "Set DB_HOST, DB_PORT and DB_NAME for the database linked with 'Uses'. Clear it when the {{noun}} needs none of them, for instance because it reads the whole connection string from a Secret built from the database ('Value from database')."
+
 [[access_fields]]
 name = "delete_objects"
 label = "May delete objects"
@@ -179,10 +186,29 @@ when = { all = [ { item = "secret" }, { item = "secret", linked = "reads", absen
 severity = "error"
 message = "\"{name}\": secret variable {item.name} names a Secret the {{noun}} is not linked to; link it with 'Reads secrets' so the {{noun}} may read it"
 
-# The image: a repository of the linked registry at a tag, or the Image field.
-[image]
+# The image is a repository of the linked registry at a tag, or the Image field. The tag
+# is the Image tag field, or an input variable a pipeline sets.
+[image_tag]
+field = "image_tag"
+fallback = { entity_var = "image_tag", description = "Image tag the container {{noun}} \"{name}\" runs (the tag your pipeline pushed)." }
+
+# The repository: the Repository field, else the registry's first, else the registry itself.
+[image_repository]
+field = "repository"
+transform = "kebab"
+fallback = { if = { relation = "attachment", target_type = "container_registry", target_field = "repositories" }, then = { func = "element", args = [ { relation = "attachment", target_type = "container_registry", field = "repositories", transform = "kebab" }, { value = 0 } ] }, else = { relation = "attachment", target_type = "container_registry", field = "name", transform = "kebab" } }
+
+# AWS: the URL of the repository itself, so a task depends on that repository alone. A
+# repository the registry does not list is reached through the registry's host.
+[ecs_image]
 if = { relation = "attachment", target_type = "container_registry" }
-then = { func = "format", args = [ { value = "%s/%s:%s" }, { relation = "attachment", target_type = "container_registry", connection = "REGISTRY" }, { field = "repository", transform = "kebab", fallback = { if = { relation = "attachment", target_type = "container_registry", target_field = "repositories" }, then = { func = "element", args = [ { relation = "attachment", target_type = "container_registry", field = "repositories", transform = "kebab" }, { value = 0 } ] }, else = { relation = "attachment", target_type = "container_registry", field = "name", transform = "kebab" } } }, { field = "image_tag", fallback = { entity_var = "image_tag", description = "Image tag the container {{noun}} \"{name}\" runs (the tag your pipeline pushed)." } } ] }
+then = { raw = "\"${@url@}:${@tag@}\"", refs = { url = { relation = "attachment", target_type = "container_registry", block = "repo", key = { field = "repository", optional = true }, attr = "repository_url", fallback = { if = { field = "repository" }, then = { raw = "\"${@registry@}/${@repository@}\"", refs = { registry = { relation = "attachment", target_type = "container_registry", connection = "REGISTRY" }, repository = { field = "repository", transform = "kebab" } } }, else = { relation = "attachment", target_type = "container_registry", attr = "repository_url" } } }, tag = { include = "container.image_tag" } } }
+else = { field = "image" }
+
+# Azure and Google Cloud: one registry, the repository a path inside it.
+[registry_image]
+if = { relation = "attachment", target_type = "container_registry" }
+then = { raw = "\"${@registry@}/${@repository@}:${@tag@}\"", refs = { registry = { relation = "attachment", target_type = "container_registry", connection = "REGISTRY" }, repository = { include = "container.image_repository" }, tag = { include = "container.image_tag" } } }
 else = { field = "image" }
 
 # ---------------------------------------------------------------- AWS
@@ -212,10 +238,11 @@ memory                   = { map = "size", table = { small = "512", medium = "10
 execution_role_arn       = { relation = "attribute_reference", target_type = "iam_role", attr = "arn", fallback = { relation = "iam_binding", attr = "arn" } }
 task_role_arn            = { relation = "iam_binding", attr = "arn" }
 
-# The container definition's environment: the rows, then what the links say.
+# The container definition's environment: the rows, then what the links say — the first
+# queue, topic, database (unless 'Database variables' is off), cache and 'Uses' bucket.
 [ecs_environment]
 func = "concat"
-args = [ { for_each_field = "env", each = { object = { name = { item = "name" }, value = { item = "value" } } } }, { list = [ { if = { relation = "sends_to", target_type = "event_queue" }, then = { object = { name = { value = "QUEUE_URL" }, value = { relation = "sends_to", target_type = "event_queue", attr = "url" } } } }, { if = { relation = "sends_to", target_type = "topic" }, then = { object = { name = { value = "TOPIC_ARN" }, value = { relation = "sends_to", target_type = "topic", attr = "arn" } } } }, { if = { relation = "attribute_reference", target_type = "relational_database" }, then = { object = { name = { value = "DB_HOST" }, value = { relation = "attribute_reference", target_type = "relational_database", connection = "HOST" } } } }, { if = { relation = "attribute_reference", target_type = "relational_database" }, then = { object = { name = { value = "DB_PORT" }, value = { func = "tostring", args = [ { relation = "attribute_reference", target_type = "relational_database", connection = "PORT" } ] } } } }, { if = { relation = "attribute_reference", target_type = "relational_database" }, then = { object = { name = { value = "DB_NAME" }, value = { relation = "attribute_reference", target_type = "relational_database", connection = "NAME" } } } }, { if = { relation = "attribute_reference", target_type = "cache" }, then = { object = { name = { value = "CACHE_HOST" }, value = { relation = "attribute_reference", target_type = "cache", connection = "HOST" } } } }, { if = { relation = "attribute_reference", target_type = "cache" }, then = { object = { name = { value = "CACHE_PORT" }, value = { func = "tostring", args = [ { relation = "attribute_reference", target_type = "cache", connection = "PORT" } ] } } } } ] } ]
+args = [ { for_each_field = "env", each = { object = { name = { item = "name" }, value = { item = "value" } } } }, { list = [ { if = { relation = "sends_to", target_type = "event_queue" }, then = { object = { name = { value = "QUEUE_URL" }, value = { relation = "sends_to", target_type = "event_queue", attr = "url" } } } }, { if = { relation = "sends_to", target_type = "topic" }, then = { object = { name = { value = "TOPIC_ARN" }, value = { relation = "sends_to", target_type = "topic", attr = "arn" } } } }, { if = { all = [ { relation = "attribute_reference", target_type = "relational_database" }, { field = "database_env" } ] }, then = { object = { name = { value = "DB_HOST" }, value = { relation = "attribute_reference", target_type = "relational_database", connection = "HOST" } } } }, { if = { all = [ { relation = "attribute_reference", target_type = "relational_database" }, { field = "database_env" } ] }, then = { object = { name = { value = "DB_PORT" }, value = { func = "tostring", args = [ { relation = "attribute_reference", target_type = "relational_database", connection = "PORT" } ] } } } }, { if = { all = [ { relation = "attribute_reference", target_type = "relational_database" }, { field = "database_env" } ] }, then = { object = { name = { value = "DB_NAME" }, value = { relation = "attribute_reference", target_type = "relational_database", connection = "NAME" } } } }, { if = { relation = "attribute_reference", target_type = "cache" }, then = { object = { name = { value = "CACHE_HOST" }, value = { relation = "attribute_reference", target_type = "cache", connection = "HOST" } } } }, { if = { relation = "attribute_reference", target_type = "cache" }, then = { object = { name = { value = "CACHE_PORT" }, value = { func = "tostring", args = [ { relation = "attribute_reference", target_type = "cache", connection = "PORT" } ] } } } }, { if = { relation = "attribute_reference", target_type = "object_storage" }, then = { object = { name = { value = "BUCKET_NAME" }, value = { relation = "attribute_reference", target_type = "object_storage", connection = "NAME" } } } }, { if = { relation = "attribute_reference", target_type = "object_storage" }, then = { object = { name = { value = "BUCKET_REGION" }, value = { var = "region" } } } } ] } ]
 
 # ECS reads each value with the execution role when the task starts: the whole secret,
 # or one key of a JSON secret (<arn>:<key>::).
@@ -334,7 +361,7 @@ infrastructure_subnet_id   = { relation = "network_membership", attr = "id" }
 
 [aca_container_args]
 name   = { field = "name", transform = "kebab" }
-image  = { include = "container.image" }
+image  = { include = "container.registry_image" }
 cpu    = { map = "size", table = { small = 0.25, medium = 0.5, large = 1.0, xlarge = 2.0 } }
 memory = { map = "size", table = { small = "0.5Gi", medium = "1Gi", large = "2Gi", xlarge = "4Gi" } }
 
@@ -366,7 +393,7 @@ value = { relation = "sends_to", target_type = "event_queue", attr = "name" }
 
 [[aca_env]]
 block = "env"
-when = { relation = "attribute_reference", target_type = "relational_database" }
+when = { all = [ { relation = "attribute_reference", target_type = "relational_database" }, { field = "database_env" } ] }
 
 [aca_env.args]
 name  = { value = "DB_HOST" }
@@ -374,7 +401,7 @@ value = { relation = "attribute_reference", target_type = "relational_database",
 
 [[aca_env]]
 block = "env"
-when = { relation = "attribute_reference", target_type = "relational_database" }
+when = { all = [ { relation = "attribute_reference", target_type = "relational_database" }, { field = "database_env" } ] }
 
 [aca_env.args]
 name  = { value = "DB_PORT" }
@@ -382,7 +409,7 @@ value = { func = "tostring", args = [ { relation = "attribute_reference", target
 
 [[aca_env]]
 block = "env"
-when = { relation = "attribute_reference", target_type = "relational_database" }
+when = { all = [ { relation = "attribute_reference", target_type = "relational_database" }, { field = "database_env" } ] }
 
 [aca_env.args]
 name  = { value = "DB_NAME" }
@@ -403,6 +430,23 @@ when = { relation = "attribute_reference", target_type = "cache" }
 [aca_env.args]
 name  = { value = "CACHE_PORT" }
 value = { func = "tostring", args = [ { relation = "attribute_reference", target_type = "cache", connection = "PORT" } ] }
+
+# An Azure 'bucket' is a container in a storage account: both are needed to reach it.
+[[aca_env]]
+block = "env"
+when = { relation = "attribute_reference", target_type = "object_storage" }
+
+[aca_env.args]
+name  = { value = "BUCKET_ACCOUNT" }
+value = { relation = "attribute_reference", target_type = "object_storage", connection = "ACCOUNT" }
+
+[[aca_env]]
+block = "env"
+when = { relation = "attribute_reference", target_type = "object_storage" }
+
+[aca_env.args]
+name  = { value = "BUCKET_CONTAINER" }
+value = { relation = "attribute_reference", target_type = "object_storage", connection = "CONTAINER" }
 
 # One secret per secret variable: a Key Vault reference, read with the execution
 # identity. Key Vault secrets hold one value, so the whole secret is the variable.
@@ -580,7 +624,7 @@ value = { relation = "sends_to", target_type = "topic", attr = "id" }
 
 [[cloud_run_env]]
 block = "env"
-when = { relation = "attribute_reference", target_type = "relational_database" }
+when = { all = [ { relation = "attribute_reference", target_type = "relational_database" }, { field = "database_env" } ] }
 
 [cloud_run_env.args]
 name  = { value = "DB_HOST" }
@@ -588,7 +632,7 @@ value = { relation = "attribute_reference", target_type = "relational_database",
 
 [[cloud_run_env]]
 block = "env"
-when = { relation = "attribute_reference", target_type = "relational_database" }
+when = { all = [ { relation = "attribute_reference", target_type = "relational_database" }, { field = "database_env" } ] }
 
 [cloud_run_env.args]
 name  = { value = "DB_PORT" }
@@ -596,7 +640,7 @@ value = { func = "tostring", args = [ { relation = "attribute_reference", target
 
 [[cloud_run_env]]
 block = "env"
-when = { relation = "attribute_reference", target_type = "relational_database" }
+when = { all = [ { relation = "attribute_reference", target_type = "relational_database" }, { field = "database_env" } ] }
 
 [cloud_run_env.args]
 name  = { value = "DB_NAME" }
@@ -617,6 +661,14 @@ when = { relation = "attribute_reference", target_type = "cache" }
 [cloud_run_env.args]
 name  = { value = "CACHE_PORT" }
 value = { func = "tostring", args = [ { relation = "attribute_reference", target_type = "cache", connection = "PORT" } ] }
+
+[[cloud_run_env]]
+block = "env"
+when = { relation = "attribute_reference", target_type = "object_storage" }
+
+[cloud_run_env.args]
+name  = { value = "BUCKET_NAME" }
+value = { relation = "attribute_reference", target_type = "object_storage", connection = "NAME" }
 
 # Subnets become direct VPC egress.
 [cloud_run_vpc]

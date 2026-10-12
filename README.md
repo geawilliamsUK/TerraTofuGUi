@@ -394,8 +394,8 @@ OpenTofu installed, so a definition change that produces invalid HCL fails the b
 - **Disposable** (*Settings ▸ Disposable*, and per environment in *Settings ▸
   Environments*): a stack that is destroyed and deployed again leaves nothing that stops
   the next apply — no final database snapshot, secrets deleted without a recovery window,
-  buckets emptied on destroy, the shortest Key Vault soft-delete period, a Cloud SQL name
-  drawn per create. Elsewhere a database's final snapshot is named per creation, so a
+  buckets emptied on destroy, ECR repositories deleted with their images, the shortest Key
+  Vault soft-delete period, a Cloud SQL name drawn per create. Elsewhere a database's final snapshot is named per creation, so a
   second destroy does not collide with the first one's.
 - **Alarms that can fire**: an alarm's threshold is checked, per environment, against
   what it watches — connections above what the database's class allows, a percentage
@@ -405,7 +405,8 @@ OpenTofu installed, so a definition change that produces invalid HCL fails the b
   number set in each `.tfvars`).
 - **Database URIs**: a Secret built from a database URL-encodes the credentials and asks
   for TLS (`sslmode=require`, MySQL `ssl-mode=REQUIRED`) when the server forces it, or as
-  its TLS mode says.
+  its TLS mode says — `no-verify` for a Node app on node-postgres, which reads `require` as
+  `verify-full`.
 
 - **Plan** (the *Plan* button of the export window, `ttg plan <project> [--environment
   prod]`, or the agent's `plan_run`). Exports, runs `init` and `plan`, and reports the

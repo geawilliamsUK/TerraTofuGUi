@@ -112,8 +112,11 @@ fn aws_apps_share_the_environment_cluster_and_keep_their_roles_apart() {
     );
     assert!(c.contains("cpu_architecture        = \"ARM64\""), "{c}");
     // The image comes from the linked registry; an unset tag is an input variable.
-    assert!(c.contains("\"shop-web\", \"1.4.2\")"), "{c}");
-    assert!(c.contains("\"shop-worker\", var.worker_image_tag)"), "{c}");
+    assert!(c.contains("images_repo_shop_web.repository_url}:1.4.2\""), "{c}");
+    assert!(
+        c.contains("images_repo_shop_worker.repository_url}:${var.worker_image_tag}\""),
+        "{c}"
+    );
     assert!(g.files["variables.tf"].contains("variable \"worker_image_tag\""));
 
     // The worker has no port mapping and no load balancer; web is behind one by IP.
@@ -132,7 +135,7 @@ fn aws_apps_share_the_environment_cluster_and_keep_their_roles_apart() {
     assert!(lb.contains("target_type          = \"ip\""), "{lb}");
     assert!(lb.contains("port                 = 8080"), "{lb}");
     assert!(lb.contains("deregistration_delay = 30"), "{lb}");
-    assert!(lb.contains("path     = \"/api/health\""), "{lb}");
+    assert!(lb.contains("path                = \"/api/health\""), "{lb}");
     assert!(
         !lb.contains("aws_lb_target_group_attachment"),
         "ECS registers the tasks: {lb}"
@@ -528,4 +531,232 @@ value = {arg}
     assert!(err.to_string().contains("is not an entity_ref"), "{err}");
     let err = rows_when(r#"{ item = "target", linked = "logs_to" }"#).expect_err("undeclared");
     assert!(err.to_string().contains("undeclared relation 'logs_to'"), "{err}");
+}
+
+#[test]
+fn a_relation_key_and_an_except_are_checked_at_load() {
+    let aws = include_str!("../../../definitions/providers/aws.toml");
+    let other = "schema_version = 2\n[resource]\ntype = \"other\"\ncategory = \"network\"\ndisplay_name = \"Other\"\n[[fields]]\nname = \"rows\"\ntype = \"string_list\"\n[providers.aws]\n[[providers.aws.blocks]]\nkey = \"main\"\nresource = \"aws_other\"\n[[providers.aws.blocks]]\nkey = \"row\"\nresource = \"aws_other_row\"\nfor_each_field = \"rows\"\n";
+    let thing = |when: &str, arg: &str| {
+        format!(
+            "schema_version = 2\n[resource]\ntype = \"thing\"\ncategory = \"network\"\ndisplay_name = \"Thing\"\n[[fields]]\nname = \"pick\"\ntype = \"string\"\n[[relations]]\nkind = \"reads\"\ntargets = [\"other\"]\ncardinality = \"many\"\n[providers.aws]\n[[providers.aws.blocks]]\nkey = \"main\"\nresource = \"aws_thing\"\n{when}\n[providers.aws.blocks.args]\nvalue = {arg}\n"
+        )
+    };
+    let load = |def: String| {
+        Catalog::from_sources(
+            [("thing.toml", def.as_str()), ("other.toml", other)].into_iter(),
+            [("aws.toml", aws)].into_iter(),
+        )
+        .map(|_| ())
+    };
+    let arg = |a: &str| load(thing("", a));
+    arg(r#"{ relation = "reads", target_type = "other", block = "row", key = { field = "pick", optional = true }, attr = "id" }"#)
+        .expect("a key into a repeated block");
+    let err = arg(r#"{ relation = "reads", target_type = "other", key = { field = "pick" }, attr = "id" }"#)
+        .unwrap_err();
+    assert!(err.to_string().contains("key needs block"), "{err}");
+    let err = arg(r#"{ relation = "reads", target_type = "other", block = "main", key = { field = "pick" }, attr = "id" }"#)
+        .unwrap_err();
+    assert!(
+        err.to_string()
+            .contains("no mapping of 'other' has a repeated block 'main'"),
+        "{err}"
+    );
+    let err = arg(r#"{ relation = "reads", target_type = "other", block = "row", key = { field = "colour" }, attr = "id" }"#)
+        .unwrap_err();
+    assert!(err.to_string().contains("undeclared field 'colour'"), "{err}");
+
+    let when = |w: &str| load(thing(&format!("when = {w}"), "{ value = 1 }"));
+    when(r#"{ relation = "reads", target_type = "other", except = { relation = "reads", target_type = "other", target_field = "rows" } }"#)
+        .expect("except");
+    let err = when(r#"{ relation = "reads", except = { relation = "reads", absent = true } }"#).unwrap_err();
+    assert!(
+        err.to_string().contains("absent and min_count do not apply"),
+        "{err}"
+    );
+    let err = when(r#"{ relation = "reads", except = { relation = "sends_to" } }"#).unwrap_err();
+    assert!(
+        err.to_string().contains("undeclared relation 'sends_to'"),
+        "{err}"
+    );
+}
+
+// ------------------------------------------------------------------ the zipOS third pass
+
+fn add(p: &mut Project, v: serde_json::Value) {
+    let n: ttg_core::Node = serde_json::from_value(v).unwrap();
+    p.nodes.insert(n.id.clone(), n);
+}
+
+fn link(p: &mut Project, source: &str, target: &str, relation: &str) {
+    let e: ttg_core::Edge =
+        serde_json::from_value(serde_json::json!({"source": source, "target": target, "relation": relation}))
+            .unwrap();
+    p.edges.push(e);
+}
+
+fn set(p: &mut Project, id: &str, field: &str, v: serde_json::Value) {
+    let v: ttg_core::Value = serde_json::from_value(v).unwrap();
+    p.nodes.get_mut(id).unwrap().config.insert(field.into(), v);
+}
+
+fn file(p: &Project, provider: &str, name: &str) -> String {
+    let g = generate(p, &Catalog::builtin(), provider, Tool::OpenTofu).unwrap();
+    g.files.get(name).cloned().unwrap_or_default()
+}
+
+/// TF-038: the image names the repository the app runs from, not every repository.
+#[test]
+fn the_image_is_the_linked_repositorys_own_url_and_its_tag() {
+    let mut p = example("containers.ttg.json");
+    let c = file(&p, "aws", "container.tf");
+    assert!(
+        c.contains("image = \"${aws_ecr_repository.images_repo_shop_web.repository_url}:1.4.2\""),
+        "{c}"
+    );
+    assert!(
+        c.contains(
+            "image = \"${aws_ecr_repository.images_repo_shop_worker.repository_url}:${var.worker_image_tag}\""
+        ),
+        "{c}"
+    );
+    assert!(!c.contains("split(\"/\""), "no task reads the registry host: {c}");
+
+    // No repository named: the registry's first.
+    p.nodes.get_mut("app-web").unwrap().config.remove("repository");
+    let c = file(&p, "aws", "container.tf");
+    assert!(
+        c.contains("\"web\", image = \"${aws_ecr_repository.images_repo_shop_web.repository_url}:1.4.2\""),
+        "{c}"
+    );
+    // One the registry does not list: the registry's host and the name.
+    set(&mut p, "app-web", "repository", serde_json::json!("legacy/web"));
+    let c = file(&p, "aws", "container.tf");
+    assert!(c.contains("[0])[0]}/legacy-web:1.4.2\""), "{c}");
+    // A registry that lists none is its own one repository.
+    set(&mut p, "reg-shop", "repositories", serde_json::json!([]));
+    p.nodes.get_mut("app-web").unwrap().config.remove("repository");
+    let c = file(&p, "aws", "container.tf");
+    assert!(
+        c.contains("image = \"${aws_ecr_repository.images.repository_url}:1.4.2\""),
+        "{c}"
+    );
+
+    // Azure and Google Cloud: the registry's host, the repository's path, the tag.
+    let p = example("containers.ttg.json");
+    let c = file(&p, "azure", "container.tf");
+    assert!(
+        c.contains("image  = \"${azurerm_container_registry.images.login_server}/shop-web:1.4.2\""),
+        "{c}"
+    );
+    let c = file(&p, "gcp", "container.tf");
+    assert!(
+        c.contains("image = \"${google_artifact_registry_repository.images.location}-docker.pkg.dev/${google_artifact_registry_repository.images.project}/${google_artifact_registry_repository.images.repository_id}/shop-worker:${var.worker_image_tag}\""),
+        "{c}"
+    );
+}
+
+/// TF-036 / TF-037: the database's variables can be left out; a used bucket is named.
+#[test]
+fn database_variables_can_be_left_out_and_a_used_bucket_is_named() {
+    let mut p = example("containers.ttg.json");
+    let c = file(&p, "aws", "container.tf");
+    assert!(
+        c.contains("{ name = \"BUCKET_NAME\", value = aws_s3_bucket.uploads.bucket }, { name = \"BUCKET_REGION\", value = var.region }"),
+        "{c}"
+    );
+    let azure = file(&p, "azure", "container.tf");
+    assert!(
+        azure.contains("name  = \"BUCKET_ACCOUNT\"\n        value = azurerm_storage_account.uploads.name"),
+        "{azure}"
+    );
+    assert!(azure.contains("name  = \"BUCKET_CONTAINER\""), "{azure}");
+    let gcp = file(&p, "gcp", "container.tf");
+    assert!(
+        gcp.contains("name  = \"BUCKET_NAME\"\n        value = google_storage_bucket.uploads.name"),
+        "{gcp}"
+    );
+
+    set(&mut p, "app-web", "database_env", serde_json::json!(false));
+    let c = file(&p, "aws", "container.tf");
+    assert!(!c.contains("DB_HOST"), "{c}");
+    assert!(
+        c.contains("{ name = \"QUEUE_URL\", value = aws_sqs_queue.jobs.url }"),
+        "the other links' variables stay: {c}"
+    );
+    for provider in ["azure", "gcp"] {
+        let c = file(&p, provider, "container.tf");
+        assert!(!c.contains("DB_HOST") && c.contains("BUCKET_"), "{provider}: {c}");
+    }
+}
+
+/// TF-036: a container that reads a Secret built from its database already has what the
+/// manual step asks for.
+#[test]
+fn no_database_step_once_the_app_reads_a_secret_built_from_that_database() {
+    let step = "Container App \"web\": Database access is not an IAM grant";
+    let mut p = example("containers.ttg.json");
+    set(&mut p, "db-shop", "iam_authentication", serde_json::json!(false));
+    assert!(file(&p, "aws", "MANUAL_STEPS.md").contains(step));
+    assert!(file(&p, "gcp", "MANUAL_STEPS.md").contains(step));
+
+    add(
+        &mut p,
+        serde_json::json!({"id": "sec-dburl", "name": "db url", "resource_type": "secret", "parent": "kv-shop"}),
+    );
+    link(&mut p, "sec-dburl", "db-shop", "reads");
+    link(&mut p, "app-web", "sec-dburl", "reads");
+    for provider in ["aws", "gcp"] {
+        let steps = file(&p, provider, "MANUAL_STEPS.md");
+        assert!(!steps.contains(step), "{provider}: {steps}");
+    }
+
+    // A second database the secret is not built from still needs saying.
+    add(
+        &mut p,
+        serde_json::json!({"id": "db-reports", "name": "reports db", "resource_type": "relational_database", "parent": "vnet-shop", "config": {"engine": "postgres", "size": "small", "storage": 32, "database_name": "reports", "admin_username": "dbadmin"}}),
+    );
+    link(&mut p, "db-reports", "sub-db-a", "network_membership");
+    link(&mut p, "db-reports", "sub-db-b", "network_membership");
+    link(&mut p, "app-web", "db-reports", "attribute_reference");
+    assert!(file(&p, "aws", "MANUAL_STEPS.md").contains(step));
+}
+
+/// TF-039: the target group asks as often and as patiently as the container's own check.
+#[test]
+fn the_target_group_takes_the_containers_health_check() {
+    let mut p = example("containers.ttg.json");
+    let lb = file(&p, "aws", "load_balancer.tf");
+    assert!(
+        lb.contains("path                = \"/api/health\"\n    interval            = 30\n    timeout             = 5\n    healthy_threshold   = 2\n    unhealthy_threshold = 3"),
+        "{lb}"
+    );
+    set(&mut p, "app-web", "health_check_retries", serde_json::json!(5));
+    set(&mut p, "app-web", "health_check_interval", serde_json::json!(10));
+    let lb = file(&p, "aws", "load_balancer.tf");
+    assert!(lb.contains("interval            = 10"), "{lb}");
+    assert!(lb.contains("unhealthy_threshold = 5"), "{lb}");
+
+    let cat = Catalog::builtin();
+    let errors = |p: &Project| -> Vec<String> {
+        ttg_codegen::diagnostics::run(p, &cat, "aws")
+            .into_iter()
+            .filter(|d| d.severity == Severity::Error)
+            .map(|d| d.message)
+            .collect()
+    };
+    set(&mut p, "app-web", "health_check_retries", serde_json::json!(1));
+    let errs = errors(&p);
+    assert!(
+        errs.iter().any(|m| m.contains("allows 1 failed health checks")),
+        "{errs:?}"
+    );
+    set(&mut p, "app-web", "health_check_retries", serde_json::json!(3));
+    set(&mut p, "app-web", "health_check_timeout", serde_json::json!(10));
+    let errs = errors(&p);
+    assert!(
+        errs.iter()
+            .any(|m| m.contains("needs one shorter than the interval (10 s)")),
+        "{errs:?}"
+    );
 }
