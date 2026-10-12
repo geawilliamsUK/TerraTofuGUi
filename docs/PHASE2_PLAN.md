@@ -943,9 +943,8 @@ AAAA record, and Azure's `cdn` was classic Microsoft CDN, which cannot carry a W
   `allowed_methods` (read_only / all), path behaviours (pattern, managed cache policy,
   managed origin-request policy, methods, compress) as `ordered_cache_behavior`, origin read
   and keep-alive timeouts, origin headers, and a generated **secret origin header**. The
-  managed policies are `data "aws_cloudfront_cache_policy"` /
-  `"aws_cloudfront_origin_request_policy"` lookups by managed name, one per policy used,
-  referenced as `…_cache["CachingOptimized"].id`. A load-balancer origin gets
+  managed policies were first `data "aws_cloudfront_cache_policy"` lookups by managed name;
+  TF-034 replaced them with the policies' fixed global IDs. A load-balancer origin gets
   **AllViewerExceptHostHeader**: CloudFront then asks the origin for the origin's own name,
   which is the one item 3 makes sure the certificate covers, so TLS to the origin always
   works. AllViewer forwards the viewer's Host, which the origin's certificate must cover as

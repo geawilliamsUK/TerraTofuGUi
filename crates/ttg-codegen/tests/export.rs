@@ -2810,7 +2810,7 @@ fn the_single_rate_limit_loads_as_one_rate_rule() {
 }
 
 /// A dynamic site: every method reaches the origin, nothing is cached by default, and each
-/// path behaviour picks its AWS managed policies by name.
+/// path behaviour picks its AWS managed policies by their fixed IDs.
 #[test]
 fn a_dynamic_site_allows_every_method_and_caches_by_path() {
     let cat = Catalog::builtin();
@@ -2823,21 +2823,19 @@ fn a_dynamic_site_allows_every_method_and_caches_by_path() {
     ), "{net}");
     assert!(
         net.contains(
-            "cache_policy_id = data.aws_cloudfront_cache_policy.app_cdn_cache[\"CachingDisabled\"].id"
+            "cache_policy_id = \"4135ea2d-6df8-44a3-9df3-4b5a84be39ad\""
         ),
         "{net}"
     );
     // 'Forward Host header' is on, and the certificate covers the custom domain.
     assert!(net.contains(
-        "origin_request_policy_id = data.aws_cloudfront_origin_request_policy.app_cdn_origin_request[\"AllViewer\"].id"
+        "origin_request_policy_id = \"216adef6-5c7f-47e4-b989-5492eafa07d3\""
     ), "{net}");
     assert!(net.contains(
-        "ordered_cache_behavior { path_pattern = \"/_next/static/*\" target_origin_id = \"origin\" viewer_protocol_policy = \"redirect-to-https\" allowed_methods = [ \"GET\", \"HEAD\", \"OPTIONS\" ] cached_methods = [ \"GET\", \"HEAD\" ] compress = true cache_policy_id = data.aws_cloudfront_cache_policy.app_cdn_cache[\"CachingOptimized\"].id }"
+        "ordered_cache_behavior { path_pattern = \"/_next/static/*\" target_origin_id = \"origin\" viewer_protocol_policy = \"redirect-to-https\" allowed_methods = [ \"GET\", \"HEAD\", \"OPTIONS\" ] cached_methods = [ \"GET\", \"HEAD\" ] compress = true cache_policy_id = \"658327ea-f89d-4fab-a63d-7e88639e58f6\" }"
     ), "{net}");
-    // One lookup per managed policy, by its managed name.
-    assert!(net.contains(
-        "data \"aws_cloudfront_cache_policy\" \"app_cdn_cache\" { for_each = toset(concat([\"CachingDisabled\"], [\"CachingOptimized\", \"UseOriginCacheControlHeaders\"])) name = format(\"Managed-%s\", each.key) }"
-    ), "{net}");
+    // The managed policies are constants, so the plan needs no cloudfront:List*Policies.
+    assert!(!net.contains("data \"aws_cloudfront"), "{net}");
     assert!(
         net.contains("origin_read_timeout = 60 origin_keepalive_timeout = 60"),
         "{net}"
@@ -2859,11 +2857,11 @@ fn a_dynamic_site_allows_every_method_and_caches_by_path() {
         .insert("forward_host_header".into(), ttg_core::Value::Bool(false));
     let net = norm(&generate(&q, &cat, "aws", Tool::OpenTofu).unwrap().files["network.tf"]);
     assert!(net.contains(
-        "origin_request_policy_id = data.aws_cloudfront_origin_request_policy.app_cdn_origin_request[\"AllViewerExceptHostHeader\"].id"
+        "origin_request_policy_id = \"b689b0a8-53d0-40ab-baf2-68738e2966ac\""
     ), "{net}");
 
-    // A bucket CDN keeps its defaults: read-only methods, CachingOptimized, no lookup of
-    // origin-request policies at all.
+    // A bucket CDN keeps its defaults: read-only methods, CachingOptimized, no
+    // origin-request policy at all.
     let edge = norm(
         &generate(&example("edge.ttg.json"), &cat, "aws", Tool::OpenTofu)
             .unwrap()
@@ -2871,9 +2869,75 @@ fn a_dynamic_site_allows_every_method_and_caches_by_path() {
     );
     assert!(edge.contains("allowed_methods = [ \"GET\", \"HEAD\", \"OPTIONS\" ]"));
     assert!(edge.contains(
-        "cache_policy_id = data.aws_cloudfront_cache_policy.assets_cdn_cache[\"CachingOptimized\"].id"
+        "cache_policy_id = \"658327ea-f89d-4fab-a63d-7e88639e58f6\""
     ));
     assert!(!edge.contains("aws_cloudfront_origin_request_policy"), "{edge}");
+}
+
+/// Every managed policy the CDN offers is written as its fixed ID (TF-034): a plan then
+/// needs no cloudfront:ListCachePolicies or ListOriginRequestPolicies. The IDs are the ones
+/// in the CloudFront developer guide ("Use managed cache policies" / "Use managed origin
+/// request policies").
+#[test]
+fn managed_cloudfront_policies_are_constant_ids() {
+    const CACHE: &[(&str, &str)] = &[
+        ("CachingOptimized", "658327ea-f89d-4fab-a63d-7e88639e58f6"),
+        ("CachingDisabled", "4135ea2d-6df8-44a3-9df3-4b5a84be39ad"),
+        ("CachingOptimizedForUncompressedObjects", "b2884449-e4de-46a7-ac36-70bc7f1ddd6d"),
+        ("UseOriginCacheControlHeaders", "83da9c7e-98b4-4e11-a168-04f0df8e2c65"),
+        ("Elemental-MediaPackage", "08627262-05a9-4f76-9ded-b50ca2e3a84f"),
+    ];
+    const ORIGIN_REQUEST: &[(&str, &str)] = &[
+        ("AllViewer", "216adef6-5c7f-47e4-b989-5492eafa07d3"),
+        ("AllViewerExceptHostHeader", "b689b0a8-53d0-40ab-baf2-68738e2966ac"),
+        ("AllViewerAndCloudFrontHeaders-2022-06", "33f36d7e-f396-46d9-90e0-52428a34d9dc"),
+        ("CORS-CustomOrigin", "59781a5b-3903-41f3-afcb-af62929ccde1"),
+        ("CORS-S3Origin", "88a5eaf4-2fd4-4709-b370-b4c650ea3fcf"),
+        ("UserAgentRefererHeaders", "acba4595-bd28-49b8-b9fe-13317c0390fa"),
+        ("Elemental-MediaTailor-PersonalizedManifests", "775133bc-15f2-49f9-abea-afb2e0bf67d2"),
+    ];
+    let cat = Catalog::builtin();
+    // The table covers every name the CDN's fields offer.
+    let def = cat.resource("cdn").unwrap();
+    let behaviors = def.fields.iter().find(|f| f.name == "behaviors").unwrap();
+    let options = |item: &str| -> Vec<String> {
+        behaviors.items.iter().find(|i| i.name == item).unwrap().options.clone()
+    };
+    for (item, table) in [("cache_policy", CACHE), ("origin_request_policy", ORIGIN_REQUEST)] {
+        for name in options(item).iter().filter(|n| *n != "None") {
+            assert!(table.iter().any(|(n, _)| n == name), "{item} {name} has no ID");
+        }
+    }
+
+    let mut p = example("edge-dynamic.ttg.json");
+    let rows = CACHE
+        .iter()
+        .flat_map(|(cache, _)| ORIGIN_REQUEST.iter().map(move |(origin, _)| (*cache, *origin)))
+        .enumerate()
+        .map(|(i, (cache, origin))| {
+            let mut row = ttg_core::Record::new();
+            row.insert("path_pattern".into(), ttg_core::Value::Str(format!("/p{i}/*")));
+            row.insert("cache_policy".into(), ttg_core::Value::Str(cache.into()));
+            row.insert("origin_request_policy".into(), ttg_core::Value::Str(origin.into()));
+            row
+        })
+        .collect();
+    p.nodes
+        .get_mut("cdn-app")
+        .unwrap()
+        .config
+        .insert("behaviors".into(), ttg_core::Value::Records(rows));
+    let g = generate(&p, &cat, "aws", Tool::OpenTofu).unwrap();
+    assert!(g.diagnostics.iter().all(|d| d.severity != Severity::Error));
+    let net = norm(&g.files["network.tf"]);
+    assert!(!net.contains("aws_cloudfront_cache_policy"), "{net}");
+    assert!(!net.contains("aws_cloudfront_origin_request_policy"), "{net}");
+    for (name, id) in CACHE {
+        assert!(net.contains(&format!("cache_policy_id = \"{id}\"")), "{name}: {net}");
+    }
+    for (name, id) in ORIGIN_REQUEST {
+        assert!(net.contains(&format!("origin_request_policy_id = \"{id}\"")), "{name}: {net}");
+    }
 }
 
 /// CloudFront reaches an https load balancer by a name its certificate covers: the DNS

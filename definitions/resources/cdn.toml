@@ -6,7 +6,9 @@
 #      origin is a custom origin reached by a name its certificate covers: a DNS Record
 #      that aliases the load balancer (origin.example.com), never the ALB's own dns_name,
 #      which no certificate can cover. Cache and origin-request policies are AWS managed
-#      policies, looked up by name. The linked certificate and Web Application Firewall each
+#      policies, written as their fixed global IDs (docs.aws.amazon.com/AmazonCloudFront/
+#      latest/DeveloperGuide/using-managed-cache-policies.html, .../using-managed-origin-
+#      request-policies.html) so a plan needs no cloudfront:List*Policies. The linked certificate and Web Application Firewall each
 #      grow a us-east-1 copy of themselves, because that is the only shape CloudFront accepts.
 #      A secret origin header is a generated value the load balancer's listener checks.
 # Azure: Front Door Standard/Premium — profile, endpoint, origin group, origin and route,
@@ -171,29 +173,6 @@ cardinality = "optional"
 [providers.aws]
 status = "partial"
 
-# AWS managed cache policies used by the default behaviour and the path behaviours, looked
-# up by name once each: data.aws_cloudfront_cache_policy.<cdn>_cache["CachingOptimized"].
-[[providers.aws.data]]
-key = "cache"
-resource = "aws_cloudfront_cache_policy"
-
-[providers.aws.data.args]
-for_each = { func = "toset", args = [ { func = "concat", args = [ { list = [ { if = { all = [ { relation = "attribute_reference", target_type = "object_storage" }, { not = { field = "dynamic_site" } } ] }, then = { value = "CachingOptimized" }, else = { value = "CachingDisabled" } } ] }, { field = "behaviors", column = "cache_policy" } ] } ] }
-name     = { func = "format", args = [ { value = "Managed-%s" }, { raw = "each.key" } ] }
-
-# The same for origin-request policies. A load balancer origin gets every viewer header,
-# cookie and query string except Host (AllViewerExceptHostHeader), so CloudFront asks the
-# origin for the origin's own name — the one its certificate covers. AllViewer (Host
-# forwarded) is the 'Forward Host header' option, checked against the certificate.
-[[providers.aws.data]]
-key = "origin_request"
-resource = "aws_cloudfront_origin_request_policy"
-when = { any = [ { relation = "attribute_reference", target_type = "load_balancer" }, { field = "behaviors" } ] }
-
-[providers.aws.data.args]
-for_each = { func = "setsubtract", args = [ { func = "toset", args = [ { func = "concat", args = [ { list = [ { if = { relation = "attribute_reference", target_type = "load_balancer" }, then = { if = { field = "forward_host_header" }, then = { value = "AllViewer" }, else = { value = "AllViewerExceptHostHeader" } } } ] }, { field = "behaviors", column = "origin_request_policy" } ] } ] }, { value = ["None"] } ] }
-name     = { func = "format", args = [ { value = "Managed-%s" }, { raw = "each.key" } ] }
-
 [[providers.aws.blocks]]
 key = "oac"
 resource = "aws_cloudfront_origin_access_control"
@@ -306,8 +285,8 @@ viewer_protocol_policy   = { value = "redirect-to-https" }
 allowed_methods          = { if = { any = [ { field = "dynamic_site" }, { field = "allowed_methods", equals = "all" } ] }, then = { value = ["DELETE", "GET", "HEAD", "OPTIONS", "PATCH", "POST", "PUT"] }, else = { value = ["GET", "HEAD", "OPTIONS"] } }
 cached_methods           = { value = ["GET", "HEAD"] }
 compress                 = { value = true }
-cache_policy_id          = { raw = "@policies@[@policy@].id", refs = { policies = { self_data = "cache", attr = "" }, policy = { if = { all = [ { relation = "attribute_reference", target_type = "object_storage" }, { not = { field = "dynamic_site" } } ] }, then = { value = "CachingOptimized" }, else = { value = "CachingDisabled" } } } }
-origin_request_policy_id = { if = { relation = "attribute_reference", target_type = "load_balancer" }, then = { raw = "@policies@[@policy@].id", refs = { policies = { self_data = "origin_request", attr = "" }, policy = { if = { field = "forward_host_header" }, then = { value = "AllViewer" }, else = { value = "AllViewerExceptHostHeader" } } } } }
+cache_policy_id          = { if = { all = [ { relation = "attribute_reference", target_type = "object_storage" }, { not = { field = "dynamic_site" } } ] }, then = { value = "658327ea-f89d-4fab-a63d-7e88639e58f6" }, else = { value = "4135ea2d-6df8-44a3-9df3-4b5a84be39ad" } }
+origin_request_policy_id = { if = { relation = "attribute_reference", target_type = "load_balancer" }, then = { if = { field = "forward_host_header" }, then = { value = "216adef6-5c7f-47e4-b989-5492eafa07d3" }, else = { value = "b689b0a8-53d0-40ab-baf2-68738e2966ac" } } }
 
 [[providers.aws.blocks.nested]]
 block = "ordered_cache_behavior"
@@ -320,8 +299,8 @@ viewer_protocol_policy   = { value = "redirect-to-https" }
 allowed_methods          = { if = { item = "allowed_methods", equals = "all" }, then = { value = ["DELETE", "GET", "HEAD", "OPTIONS", "PATCH", "POST", "PUT"] }, else = { value = ["GET", "HEAD", "OPTIONS"] } }
 cached_methods           = { value = ["GET", "HEAD"] }
 compress                 = { item = "compress" }
-cache_policy_id          = { raw = "@policies@[@policy@].id", refs = { policies = { self_data = "cache", attr = "" }, policy = { item = "cache_policy" } } }
-origin_request_policy_id = { if = { item = "origin_request_policy", not_equals = "None" }, then = { raw = "@policies@[@policy@].id", refs = { policies = { self_data = "origin_request", attr = "" }, policy = { item = "origin_request_policy" } } } }
+cache_policy_id          = { map = "cache_policy", table = { CachingOptimized = "658327ea-f89d-4fab-a63d-7e88639e58f6", CachingDisabled = "4135ea2d-6df8-44a3-9df3-4b5a84be39ad", CachingOptimizedForUncompressedObjects = "b2884449-e4de-46a7-ac36-70bc7f1ddd6d", UseOriginCacheControlHeaders = "83da9c7e-98b4-4e11-a168-04f0df8e2c65", Elemental-MediaPackage = "08627262-05a9-4f76-9ded-b50ca2e3a84f" } }
+origin_request_policy_id = { if = { item = "origin_request_policy", not_equals = "None" }, then = { map = "origin_request_policy", table = { AllViewer = "216adef6-5c7f-47e4-b989-5492eafa07d3", AllViewerExceptHostHeader = "b689b0a8-53d0-40ab-baf2-68738e2966ac", AllViewerAndCloudFrontHeaders-2022-06 = "33f36d7e-f396-46d9-90e0-52428a34d9dc", CORS-CustomOrigin = "59781a5b-3903-41f3-afcb-af62929ccde1", CORS-S3Origin = "88a5eaf4-2fd4-4709-b370-b4c650ea3fcf", UserAgentRefererHeaders = "acba4595-bd28-49b8-b9fe-13317c0390fa", Elemental-MediaTailor-PersonalizedManifests = "775133bc-15f2-49f9-abea-afb2e0bf67d2" } } }
 
 [[providers.aws.blocks.nested]]
 block = "restrictions"
