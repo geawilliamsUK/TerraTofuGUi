@@ -271,8 +271,11 @@ pub fn command_from_json(tool: &str, args: serde_json::Value) -> Result<AgentCom
             }
         }
         "view_arrange_notes" => {
-            let a: ViewNameArg = parse(args)?;
-            AgentCommand::ViewArrangeNotes { view: a.view }
+            let a: ArrangeNotesArgs = parse(args)?;
+            AgentCommand::ViewArrangeNotes {
+                view: a.view,
+                free_notes: a.free_notes.unwrap_or(true),
+            }
         }
         "layout_align" => {
             let a: AlignArgs = parse(args)?;
@@ -767,6 +770,17 @@ pub struct ViewSaveArgs {
 pub struct ViewNameArg {
     #[schemars(description = "View name; defaults to the active view")]
     pub view: Option<String>,
+}
+
+/// Arguments of `view_arrange_notes`.
+#[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
+pub struct ArrangeNotesArgs {
+    #[schemars(description = "View name; defaults to the active view")]
+    pub view: Option<String>,
+    #[schemars(
+        description = "Also move the free (unanchored) notes that overlap a resource, a box label or another note into a column to the right of the content, top down in reading order; default true. false leaves free notes where they are"
+    )]
+    pub free_notes: Option<bool>,
 }
 
 #[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
@@ -2096,10 +2110,14 @@ impl TtgServer {
     }
 
     #[tool(
-        description = "Put every anchored note of a view back beside what it explains (the first clear side: right, below, left, above), e.g. after moving things. Free notes stay put. layout_tidy with a view does this itself."
+        description = "Put every anchored note of a view back beside what it explains (the first clear side: right, below, left, above), e.g. after moving things. Free (unanchored) notes that overlap a resource, a container or box label or another note go to a column to the right of the content, top down in their reading order, clear of everything; free notes already clear stay put, and `free_notes: false` leaves them all alone. layout_tidy with a view re-places the anchored notes itself."
     )]
-    async fn view_arrange_notes(&self, Parameters(a): Parameters<ViewNameArg>) -> CallToolResult {
-        self.run(AgentCommand::ViewArrangeNotes { view: a.view }).await
+    async fn view_arrange_notes(&self, Parameters(a): Parameters<ArrangeNotesArgs>) -> CallToolResult {
+        self.run(AgentCommand::ViewArrangeNotes {
+            view: a.view,
+            free_notes: a.free_notes.unwrap_or(true),
+        })
+        .await
     }
 
     #[tool(description = "Align the current selection (2+ items).")]

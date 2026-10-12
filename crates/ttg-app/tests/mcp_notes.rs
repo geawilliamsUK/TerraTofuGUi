@@ -236,3 +236,84 @@ fn notes_keep_their_place_and_colour_and_can_be_edited() {
     let n = c.note("Fires at 69");
     assert_eq!(n["color"], json!("#336699"), "{n}");
 }
+
+/// `view_arrange_notes` also places free notes: those on top of a resource or of each
+/// other go to a column right of the content, in reading order; clear ones stay; and
+/// `free_notes: false` leaves every free note alone.
+#[test]
+fn arranging_notes_places_the_free_ones_in_the_way() {
+    let server = start("job-pipeline.ttg.json");
+    let mut c = Client::new(&server);
+    let (_, view) = c.call("view_get", json!({"name": "Data flow"}));
+    let at = |id: &str| &view["layout"]["positions"][id];
+    let (gx, gy) = (
+        at("fn-gateway")["x"].as_i64().unwrap(),
+        at("fn-gateway")["y"].as_i64().unwrap(),
+    );
+    // The right edge of what the view draws: every shown entity is a plain node here.
+    let right = view["shown"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter_map(|e| view["layout"]["positions"][e["id"].as_str().unwrap()]["x"].as_i64())
+        .max()
+        .unwrap()
+        + 176;
+    // Two free notes on the gateway (the lower one added first) and one far from anything.
+    for (title, x, y) in [
+        ("Low", gx + 10, gy + 30),
+        ("High", gx + 10, gy + 10),
+        ("Far", 9000, 9000),
+    ] {
+        let (err, added) = c.call(
+            "view_note_add",
+            json!({"view": "Data flow", "title": title, "x": x, "y": y}),
+        );
+        assert!(!err, "{added}");
+    }
+    let pos = |c: &mut Client, t: &str| {
+        let n = c.note(t);
+        (
+            n["position"]["x"].as_i64().unwrap(),
+            n["position"]["y"].as_i64().unwrap(),
+        )
+    };
+    let before = [pos(&mut c, "Low"), pos(&mut c, "High"), pos(&mut c, "Far")];
+
+    // Told to leave them alone, it does.
+    let (err, left) = c.call(
+        "view_arrange_notes",
+        json!({"view": "Data flow", "free_notes": false}),
+    );
+    assert!(!err, "{left}");
+    assert_eq!(left["free"], json!(0), "{left}");
+    assert_eq!(
+        [pos(&mut c, "Low"), pos(&mut c, "High"), pos(&mut c, "Far")],
+        before
+    );
+
+    // By default the two in the way move; the one in free space stays.
+    let (err, arranged) = c.call("view_arrange_notes", json!({"view": "Data flow"}));
+    assert!(!err, "{arranged}");
+    assert_eq!(arranged["free"], json!(2), "{arranged}");
+    assert_eq!(arranged["moved"], json!(2), "{arranged}");
+    let (low, high, far) = (pos(&mut c, "Low"), pos(&mut c, "High"), pos(&mut c, "Far"));
+    assert_eq!(far, before[2]);
+    assert!(
+        low.0 > right && high.0 > right,
+        "right of the content: {low:?} {high:?}"
+    );
+    // Reading order is kept: "High" was higher up. They do not overlap.
+    let h = c.note("High")["size"]["h"].as_i64().unwrap();
+    assert!(high.1 + h <= low.1, "{high:?} {low:?}");
+
+    // Nothing left to do, and one undo puts them back.
+    let (_, again) = c.call("view_arrange_notes", json!({"view": "Data flow"}));
+    assert_eq!(again["moved"], json!(0), "{again}");
+    let (err, _) = c.call("undo", json!({}));
+    assert!(!err);
+    assert_eq!(
+        [pos(&mut c, "Low"), pos(&mut c, "High"), pos(&mut c, "Far")],
+        before
+    );
+}

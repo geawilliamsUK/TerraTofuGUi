@@ -1320,7 +1320,7 @@ impl TtgApp {
             } => self.agent_layout_tidy(container, view, by, direction, tiers),
             // View tools: flows generated from links, notes put back beside their anchors.
             AgentCommand::ViewGenerate { view, kind, replace } => self.agent_view_generate(view, &kind, replace),
-            AgentCommand::ViewArrangeNotes { view } => self.agent_arrange_notes(view),
+            AgentCommand::ViewArrangeNotes { view, free_notes } => self.agent_arrange_notes(view, free_notes),
             AgentCommand::LayoutAlign { how } => {
                 use ttg_core::layout::Align;
                 let how = match how.as_str() {
@@ -2809,13 +2809,25 @@ impl TtgApp {
         }
     }
 
-    fn agent_arrange_notes(&mut self, view: Option<String>) -> R {
+    fn agent_arrange_notes(&mut self, view: Option<String>, free_notes: bool) -> R {
         self.with_view(view, |app| {
             app.require_view("notes")?;
             let before = app.snapshot();
-            let moved = app.arrange_view_notes_now();
+            let anchored = app.arrange_view_notes_now();
+            let free = if free_notes {
+                app.arrange_free_notes_now()
+            } else {
+                0
+            };
             app.finish(before);
-            Ok(json!({"status": format!("{moved} note(s) moved"), "view": app.view_name(), "moved": moved}))
+            let moved = anchored + free;
+            Ok(json!({
+                "status": format!("{moved} note(s) moved"),
+                "view": app.view_name(),
+                "moved": moved,
+                "anchored": anchored,
+                "free": free,
+            }))
         })
     }
 }

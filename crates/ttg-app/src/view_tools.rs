@@ -84,6 +84,21 @@ impl TtgApp {
         moved
     }
 
+    /// Move the active view's free notes that are in the way into a column beside the
+    /// content (`ttg_core::view::arrange_free_notes`), without taking a snapshot: the
+    /// caller commits it. Returns how many moved.
+    #[cfg(feature = "mcp")]
+    pub fn arrange_free_notes_now(&mut self) -> usize {
+        let Some(i) = self.active_view else { return 0 };
+        let visible = self.visible_owned();
+        let mut v = self.project.views[i].clone();
+        let moved = ttg_core::view::arrange_free_notes(&self.project, &mut v, &visible);
+        if moved > 0 {
+            self.project.views[i] = v;
+        }
+        moved
+    }
+
     /// Build (or refresh) "Where personal data goes" and switch to it. One undo step.
     pub fn build_personal_data_view(&mut self) -> Result<PersonalDataReport, String> {
         let existing = self

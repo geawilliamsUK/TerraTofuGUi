@@ -556,9 +556,12 @@ pub enum AgentCommand {
         kind: String,
         replace: bool,
     },
-    /// Put every anchored note of a view back beside what it explains.
+    /// Put every anchored note of a view back beside what it explains, and the free
+    /// notes that are in the way into a column beside the content unless `free_notes`
+    /// is off.
     ViewArrangeNotes {
         view: Option<String>,
+        free_notes: bool,
     },
     LayoutAlign {
         how: String,

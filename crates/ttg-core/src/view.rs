@@ -342,9 +342,9 @@ pub fn note_obstacles(
 }
 
 /// Put every anchored note back beside what it explains, one after another so each
-/// sees the ones already placed. Free notes stay where they are. Returns how many
-/// notes moved. Used after a layout change, when notes would otherwise hang at their
-/// old offsets on long leader lines.
+/// sees the ones already placed. Free notes stay where they are (see
+/// [`arrange_free_notes`]). Returns how many notes moved. Used after a layout change,
+/// when notes would otherwise hang at their old offsets on long leader lines.
 pub fn arrange_notes(p: &Project, v: &mut View, visible: &dyn Fn(&str) -> bool) -> usize {
     let mut moved = 0;
     for i in 0..v.notes.len() {
@@ -358,6 +358,64 @@ pub fn arrange_notes(p: &Project, v: &mut View, visible: &dyn Fn(&str) -> bool) 
             v.notes[i].position = off;
             moved += 1;
         }
+    }
+    moved
+}
+
+/// Gap between the content and the column [`arrange_free_notes`] stacks notes in: wider
+/// than the region frame's margin, so a note never sits on the frame's line.
+const STACK_GAP: f32 = 60.0;
+
+/// Move the free notes (those with no anchor) that are in the way: a note that overlaps
+/// a resource, the label of a container or grouping box, a logical node or another note
+/// goes to the first free spot of a column to the right of what the view draws, from its
+/// top down. Notes are taken in reading order — top to bottom, then left to right, as
+/// they sit now — so they keep their order in the column; a note that is already clear
+/// stays where it is. Returns how many notes moved.
+pub fn arrange_free_notes(p: &Project, v: &mut View, visible: &dyn Fn(&str) -> bool) -> usize {
+    let mut order: Vec<usize> = (0..v.notes.len())
+        .filter(|&i| v.notes[i].anchor.is_none())
+        .collect();
+    order.sort_by_key(|&i| (v.notes[i].position.y, v.notes[i].position.x, i));
+    let content = p
+        .entities()
+        .iter()
+        .filter(|e| visible(e.id))
+        .filter_map(|e| entity_rect(p, Some(v), e.id, visible))
+        .chain(v.groups.iter().map(group_rect))
+        .chain(v.logicals.iter().map(logical_rect))
+        .chain(
+            v.notes
+                .iter()
+                .filter(|n| n.anchor.is_some())
+                .map(|n| note_rect(p, v, n, visible)),
+        )
+        .reduce(Rect::union)
+        .unwrap_or(Rect {
+            x: 0.0,
+            y: 0.0,
+            w: 0.0,
+            h: 0.0,
+        });
+    let mut moved = 0;
+    for i in order {
+        let n = &v.notes[i];
+        let (w, h) = (n.size.w as f32, n.size.h as f32);
+        let taken = note_obstacles(p, v, visible, Some(&n.id));
+        if !taken.iter().any(|o| o.intersects(Rect::new(n.position, n.size))) {
+            continue;
+        }
+        let x = content.x + content.w + STACK_GAP;
+        let mut y = content.y;
+        // Past each obstacle in turn: y only grows, so this ends.
+        while let Some(o) = taken.iter().find(|o| o.intersects(Rect { x, y, w, h })) {
+            y = o.y + o.h + NOTE_GAP;
+        }
+        v.notes[i].position = Position {
+            x: x.round() as i32,
+            y: y.round() as i32,
+        };
+        moved += 1;
     }
     moved
 }
@@ -696,6 +754,57 @@ mod tests {
         // The free note is not touched, and a second run changes nothing.
         assert_eq!(v.notes[2].position, Position { x: 3000, y: 3000 });
         assert_eq!(arrange_notes(&p, &mut v, &all), 0);
+    }
+
+    #[test]
+    fn free_notes_in_the_way_stack_beside_the_content_in_order() {
+        let p = project_with_two_nodes();
+        let mut v = View::new("map", Default::default());
+        let note = |id: &str, x: i32, y: i32| Note {
+            id: id.into(),
+            title: id.into(),
+            body: String::new(),
+            position: Position { x, y },
+            size: Size { w: 200, h: 80 },
+            anchor: None,
+            color: None,
+        };
+        let a = entity_rect(&p, Some(&v), "a", &all).unwrap();
+        let b = entity_rect(&p, Some(&v), "b", &all).unwrap();
+        // Two on top of a resource (the lower one listed first) and one on top of the
+        // second of them, one clear of everything, far off.
+        v.notes.push(note("low", a.x as i32 + 10, a.y as i32 + 30));
+        v.notes.push(note("high", a.x as i32 + 10, a.y as i32 + 10));
+        v.notes.push(note("same", a.x as i32 + 10, a.y as i32 + 10));
+        v.notes.push(note("clear", 3000, 3000));
+        let clear = v.notes[3].position;
+        assert_eq!(arrange_free_notes(&p, &mut v, &all), 3);
+        let rects: Vec<Rect> = v.notes.iter().map(|n| note_rect(&p, &v, n, &all)).collect();
+        let content = a.union(b).union(entity_rect(&p, Some(&v), "net", &all).unwrap());
+        for r in &rects[..3] {
+            assert!(!r.intersects(a) && !r.intersects(b), "{r:?}");
+            assert!(
+                r.x >= content.x + content.w,
+                "right of the content: {r:?} {content:?}"
+            );
+        }
+        for (i, r) in rects[..3].iter().enumerate() {
+            for o in &rects[i + 1..3] {
+                assert!(!r.intersects(*o), "{r:?} {o:?}");
+            }
+        }
+        // Reading order is kept: "high" (listed second, higher up) first, then "same",
+        // then "low", in one column from the top of the content.
+        assert!(rects[1].y < rects[2].y && rects[2].y < rects[0].y);
+        assert_eq!(rects[1].y, content.y);
+        assert_eq!(v.notes[3].position, clear, "a clear note stays");
+        // Nothing left to do the second time.
+        assert_eq!(arrange_free_notes(&p, &mut v, &all), 0);
+        // An anchored note is not one of them.
+        v.notes[0].anchor = Some(NoteAnchor::End(FlowEnd::Entity { entity: "a".into() }));
+        let at = v.notes[0].position;
+        assert_eq!(arrange_free_notes(&p, &mut v, &all), 0);
+        assert_eq!(v.notes[0].position, at);
     }
 
     #[test]
