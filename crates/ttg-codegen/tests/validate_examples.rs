@@ -3,7 +3,8 @@
 //! and on `hardened` with each state backend and state encryption on, which is what
 //! produces the bootstrap roots, and on `three-tier` with environments that leave a
 //! resource out, a name prefix and a project variable (counts, `one()`, templates and
-//! `.tfvars`-driven variables on every provider), and on five projects in the modules
+//! `.tfvars`-driven variables on every provider), and on `containers` with two
+//! environments in one account (`shared_account`), and on five projects in the modules
 //! layout (`module_variants`). Every export must also already be
 //! formatted: `fmt -check -recursive` passes with each installed binary. Skips (passes)
 //! when neither binary is installed, so the ordinary test suite stays dependency-free; CI
@@ -134,7 +135,63 @@ fn environment_variants() -> Vec<(String, Project)> {
             _ => {}
         }
     }
-    vec![("environments".to_string(), p)]
+    vec![("environments".to_string(), p), shared_account()]
+}
+
+/// `containers` with `staging` (disposable) and `prod` in one account: names set by hand
+/// behind `${var.name_prefix}` (repositories that keep one address in both), the final
+/// snapshot's suffix and name in prod only, and a connections alarm whose threshold
+/// follows a project variable's instance class through the `.tfvars`.
+fn shared_account() -> (String, Project) {
+    use ttg_core::Value;
+    let mut p = ttg_core::project::load(
+        &Path::new(env!("CARGO_MANIFEST_DIR")).join("../../examples/containers.ttg.json"),
+    )
+    .unwrap();
+    p.settings.environments = vec!["staging".into(), "prod".into()];
+    p.settings.disposable_environments.insert("staging".into(), true);
+    p.settings.name_prefix = Some("shop-${var.environment}".into());
+    p.settings.variables.insert(
+        "db_class".into(),
+        ttg_core::ProjectVariable {
+            value: Value::Str("db.t4g.micro".into()),
+            description: String::new(),
+            environments: [("prod".to_string(), Value::Str("db.t4g.large".into()))].into(),
+        },
+    );
+    fn aws<'a>(p: &'a mut Project, id: &str) -> &'a mut ttg_core::Config {
+        p.nodes
+            .get_mut(id)
+            .unwrap()
+            .provider_config
+            .entry("aws".into())
+            .or_default()
+    }
+    aws(&mut p, "db-shop").insert("instance_class".into(), Value::Str("${var.db_class}".into()));
+    aws(&mut p, "obj-uploads").insert(
+        "bucket_name".into(),
+        Value::Str("${var.name_prefix}-uploads-x7q2".into()),
+    );
+    p.nodes.get_mut("reg-shop").unwrap().config.insert(
+        "repositories".into(),
+        Value::List(vec![
+            "${var.name_prefix}-web".into(),
+            "${var.name_prefix}-worker".into(),
+        ]),
+    );
+    p.nodes.get_mut("sec-app").unwrap().extra.insert(
+        "aws".into(),
+        serde_json::from_value(serde_json::json!({"main": {"name": "shop/${var.environment}/app"}})).unwrap(),
+    );
+    let alarm: ttg_core::Node = serde_json::from_value(serde_json::json!({
+        "id": "alm-conn", "name": "db connections", "resource_type": "alarm", "parent": "rg-shop",
+        "config": {"metric": "db_connections_pct", "threshold": 75, "comparison": "greater_than", "period_seconds": "300", "evaluation_periods": 2}
+    }))
+    .unwrap();
+    p.nodes.insert(alarm.id.clone(), alarm);
+    p.add_edge("alm-conn", "db-shop", ttg_core::Relation::AttributeReference);
+    p.add_edge("alm-conn", "topic-alerts", ttg_core::Relation::SendsTo);
+    ("environments-shared-account".to_string(), p)
 }
 
 /// The modules layout: `three-tier` (environments' variables passed to the modules),

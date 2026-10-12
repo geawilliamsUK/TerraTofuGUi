@@ -7,6 +7,7 @@
 
 pub mod fields;
 pub mod load;
+pub mod names;
 pub mod schema;
 pub mod usage;
 pub mod validate;

@@ -300,3 +300,194 @@ fn a_variable_in_a_number_field_stays_a_number() {
     );
     assert!(g.files["variables.tf"].contains("variable \"db_storage\""));
 }
+
+/// `containers` with `staging` (disposable) and `prod` sharing one account through
+/// `shop-${var.environment}`: hand-set names in the registry's repositories, the
+/// bucket's name and the secret's `extra` name, and the database classed by a project
+/// variable with a connections alarm sized from it.
+fn containers_envs() -> Project {
+    let mut p = example("containers");
+    p.settings.environments = vec!["staging".into(), "prod".into()];
+    p.settings.disposable_environments.insert("staging".into(), true);
+    p.settings.name_prefix = Some("shop-${var.environment}".into());
+    p.settings.variables.insert(
+        "db_class".into(),
+        ProjectVariable {
+            value: Value::Str("db.t4g.micro".into()),
+            description: String::new(),
+            environments: [("prod".to_string(), Value::Str("db.t4g.large".into()))].into(),
+        },
+    );
+    p.nodes
+        .get_mut("db-shop")
+        .unwrap()
+        .provider_config
+        .entry("aws".into())
+        .or_default()
+        .insert("instance_class".into(), Value::Str("${var.db_class}".into()));
+    p.nodes.get_mut("sec-app").unwrap().extra.insert(
+        "aws".into(),
+        serde_json::from_value(serde_json::json!({"main": {"name": "shop/app"}})).unwrap(),
+    );
+    let alarm: ttg_core::Node = serde_json::from_value(serde_json::json!({
+        "id": "alm-conn", "name": "db connections", "resource_type": "alarm", "parent": "rg-shop",
+        "config": {"metric": "db_connections_pct", "threshold": 75, "comparison": "greater_than", "period_seconds": "300", "evaluation_periods": 2}
+    }))
+    .unwrap();
+    p.nodes.insert(alarm.id.clone(), alarm);
+    p.add_edge("alm-conn", "db-shop", ttg_core::Relation::AttributeReference);
+    p.add_edge("alm-conn", "topic-alerts", ttg_core::Relation::SendsTo);
+    p
+}
+
+/// What the warnings say to write: every hand-set name behind the prefix.
+fn follow_the_prefix(p: &mut Project) {
+    let reg = p.nodes.get_mut("reg-shop").unwrap();
+    let Value::List(repos) = reg.config["repositories"].clone() else {
+        panic!("repositories are a list")
+    };
+    let repos = repos
+        .iter()
+        .map(|r| r.replacen("shop-", "${var.name_prefix}-", 1))
+        .collect();
+    reg.config.insert("repositories".into(), Value::List(repos));
+    p.nodes
+        .get_mut("obj-uploads")
+        .unwrap()
+        .provider_config
+        .get_mut("aws")
+        .unwrap()
+        .insert(
+            "bucket_name".into(),
+            Value::Str("${var.name_prefix}-uploads-x7q2".into()),
+        );
+    p.nodes.get_mut("sec-app").unwrap().extra.insert(
+        "aws".into(),
+        serde_json::from_value(serde_json::json!({"main": {"name": "shop/${var.environment}/app"}})).unwrap(),
+    );
+}
+
+fn shared_names(p: &Project, cat: &Catalog) -> Vec<String> {
+    ttg_codegen::diagnostics::run(p, cat, "aws")
+        .into_iter()
+        .filter(|d| d.code == Code::Environment && d.message.contains("would collide"))
+        .map(|d| d.message)
+        .collect()
+}
+
+#[test]
+fn hand_set_names_the_environments_would_share_are_reported() {
+    let cat = Catalog::builtin();
+    let mut p = containers_envs();
+    let found = shared_names(&p, &cat);
+    let about = |what: &str| {
+        found
+            .iter()
+            .find(|m| m.contains(what))
+            .unwrap_or_else(|| panic!("nothing about {what} in {found:?}"))
+            .clone()
+    };
+    let repos = about("\"Repositories\" entries");
+    assert!(
+        repos.contains("\"shop-web\", \"shop-worker\", \"shop-migrate\"")
+            && repos.contains("in staging and prod alike")
+            && repos.contains("e.g. \"${var.name_prefix}-web\""),
+        "{repos}"
+    );
+    assert!(
+        about("\"Bucket name\" is \"shop-uploads-x7q2\"").contains("\"${var.name_prefix}-uploads-x7q2\""),
+        "{found:?}"
+    );
+    assert!(about("extra argument `name` of aws_secretsmanager_secret").contains("\"shop/app\""));
+    assert_eq!(found.len(), 3, "only names: {found:?}");
+    // They are Warnings and do not hold up the export.
+    let g = generate(&p, &cat, "aws", Tool::OpenTofu).unwrap_or_else(|e| panic!("{e}"));
+    assert!(g.diagnostics.iter().any(|d| d.message.contains("would collide")));
+    // Behind the prefix, each environment has its own, and a repository keeps one
+    // address in both.
+    follow_the_prefix(&mut p);
+    assert!(shared_names(&p, &cat).is_empty(), "{:?}", shared_names(&p, &cat));
+    let g = generate(&p, &cat, "aws", Tool::OpenTofu).unwrap_or_else(|e| panic!("{e}"));
+    let all: String = g.files.values().cloned().collect();
+    assert!(
+        all.contains("resource \"aws_ecr_repository\" \"images_repo_web\" {\n  name"),
+        "{all}"
+    );
+    assert!(all.contains("\"${var.name_prefix}-web\""), "{all}");
+    let tf: String = g
+        .files
+        .iter()
+        .filter(|(k, _)| k.ends_with(".tf"))
+        .map(|(_, t)| t.as_str())
+        .collect();
+    assert!(!tf.contains("shop-prod") && !tf.contains("shop-staging"), "{tf}");
+    // A prefix that is the same everywhere means one account per environment: nothing
+    // collides.
+    let mut p = containers_envs();
+    p.settings.name_prefix = Some("shop".into());
+    assert!(shared_names(&p, &cat).is_empty());
+}
+
+#[test]
+fn a_name_only_one_environment_reads_follows_the_prefix() {
+    let cat = Catalog::builtin();
+    let mut p = containers_envs();
+    follow_the_prefix(&mut p);
+    let g = generate(&p, &cat, "aws", Tool::OpenTofu).unwrap_or_else(|e| panic!("{e}"));
+    let db = g
+        .files
+        .values()
+        .find(|t| t.contains("resource \"aws_db_instance\""))
+        .unwrap();
+    // The snapshot suffix exists in prod only (staging is disposable), but its keeper
+    // and the snapshot's name follow the environment rather than naming prod.
+    assert!(db.contains("resource \"random_id\" \"shop_db_final_id\""), "{db}");
+    // Counted on the environment: the class only prod's database has decides nothing.
+    assert!(
+        db.contains("count       = var.environment == \"prod\" ? 1 : 0"),
+        "{db}"
+    );
+    assert!(db.contains("identifier = \"${var.name_prefix}-shop-db\""), "{db}");
+    assert!(
+        db.contains("format(\"%s-final-%s\", \"${var.name_prefix}-shop-db\""),
+        "{db}"
+    );
+    assert!(!db.contains("shop-prod"), "{db}");
+}
+
+#[test]
+fn a_connections_percentage_takes_each_environments_class() {
+    let cat = Catalog::builtin();
+    let mut p = containers_envs();
+    let g = generate(&p, &cat, "aws", Tool::OpenTofu).unwrap_or_else(|e| panic!("{e}"));
+    let m = &g.files["monitoring.tf"];
+    assert!(m.contains("= var.db_connections_threshold"), "{m}");
+    // 75 % of 87 on a db.t4g.micro, of 856 on a db.t4g.large.
+    let staging = &g.files["environments/staging.tfvars"];
+    let prod = &g.files["environments/prod.tfvars"];
+    assert!(
+        staging.contains("db_connections_threshold") && staging.contains("= 65"),
+        "{staging}"
+    );
+    assert!(prod.contains("= 642"), "{prod}");
+    assert!(g.files["variables.tf"].contains("variable \"db_connections_threshold\""));
+    // A class the table does not know is refused where it is used, and only there.
+    p.settings
+        .variables
+        .get_mut("db_class")
+        .unwrap()
+        .environments
+        .insert("prod".into(), Value::Str("db.x9.large".into()));
+    let Err(GenError::Blocked(ds)) = generate(&p, &cat, "aws", Tool::OpenTofu) else {
+        panic!("an unknown class in prod blocks the export")
+    };
+    let unknown: Vec<&String> = ds
+        .iter()
+        .map(|d| &d.message)
+        .filter(|m| m.contains("not in the table of known limits"))
+        .collect();
+    assert!(
+        unknown.len() == 1 && unknown[0].starts_with("[prod] "),
+        "{unknown:?}"
+    );
+}

@@ -10,7 +10,11 @@
 //! - an argument whose value is the same everywhere stays as it is;
 //! - a value that is a project variable (`${var.db_class}`), or a string built from them
 //!   (`/zipos/${var.environment}/web`), or a name behind the name prefix, is written as
-//!   that variable or template, the variable declared once and set per environment;
+//!   that variable or template, the variable declared once and set per environment —
+//!   also where only some environments read the value (a block only prod has), so the
+//!   shared configuration never carries one environment's name;
+//! - arithmetic on numbers alone (a threshold worked out from each environment's
+//!   instance class) is the number it comes to, lifted like any plain value;
 //! - any other plain value (string, number, bool, or a list or map of them) that differs
 //!   becomes a variable of its own, named after the field when it *is* the field's value
 //!   in every environment (`db_high_availability`, shared by every argument that follows
@@ -107,8 +111,9 @@ pub struct EnvDiagnostic {
 /// cannot name a file or a variable, a name listed twice, overrides or values for an
 /// environment the project does not have, overrides of a field the type does not
 /// declare, a `${var.…}` that names no variable, a name prefix that cannot be part of a
-/// resource name. Part of every `diagnostics::run`.
-pub fn checks(p: &Project, cat: &Catalog) -> Vec<Diagnostic> {
+/// resource name, a name set by hand that two environments would share (`name_checks`).
+/// Part of every `diagnostics::run`.
+pub fn checks(p: &Project, cat: &Catalog, provider: &str) -> Vec<Diagnostic> {
     let mut out = Vec::new();
     let mut push = |entity: Option<&str>, severity, message: String| {
         out.push(Diagnostic {
@@ -273,7 +278,174 @@ pub fn checks(p: &Project, cat: &Catalog) -> Vec<Diagnostic> {
             );
         }
     }
+    out.extend(name_checks(p, cat, provider));
     out
+}
+
+/// Names set by hand that two environments share. Once the name prefix differs between
+/// environments (`zipos-${var.environment}`), so do the names it makes, and the
+/// environments can share an account; but a name written into a name field or a name
+/// argument's `extra` (`ttg_catalog::names`) is not prefixed, and where it comes out the
+/// same in two such environments they would collide on it. One Warning per field or
+/// argument, saying what to write instead. A project resolved for one environment has a
+/// single prefix, so this holds only for the project as written.
+fn name_checks(p: &Project, cat: &Catalog, provider: &str) -> Vec<Diagnostic> {
+    let envs = &p.settings.environments;
+    let prefixes: Vec<String> = envs
+        .iter()
+        .map(|e| p.variable_values(Some(e))["name_prefix"].display())
+        .collect();
+    let pairs: Vec<(usize, usize)> = (0..envs.len())
+        .flat_map(|a| (a + 1..envs.len()).map(move |b| (a, b)))
+        .filter(|(a, b)| prefixes[*a] != prefixes[*b])
+        .collect();
+    if pairs.is_empty() {
+        return Vec::new();
+    }
+    let resolved: Vec<Project> = envs.iter().map(|e| p.for_environment(e)).collect();
+    let name_args = cat.name_arguments();
+    let mut out = Vec::new();
+    for e in p.entities() {
+        let Some(m) = cat.mapping(e.resource_type, provider) else {
+            continue;
+        };
+        // What holds a name, and the names it holds in each environment (none where the
+        // entity is absent).
+        let mut held: Vec<(String, bool, Vec<Vec<String>>)> = Vec::new();
+        for f in cat.name_fields(e.resource_type, provider, &name_args) {
+            let per_env = resolved
+                .iter()
+                .map(|rp| {
+                    let Some(re) = rp.entity(e.id) else {
+                        return Vec::new();
+                    };
+                    let v = if f.provider {
+                        re.provider_field(provider, &f.field)
+                    } else {
+                        re.field(&f.field)
+                    };
+                    match (v, f.item.as_deref()) {
+                        (Some(Value::Str(s)), None) => vec![s.clone()],
+                        (Some(Value::List(l)), Some(_)) => l.clone(),
+                        (Some(Value::Records(rows)), Some(item)) => rows
+                            .iter()
+                            .filter_map(|r| r.get(item))
+                            .map(Value::display)
+                            .collect(),
+                        _ => Vec::new(),
+                    }
+                })
+                .collect();
+            held.push((format!("\"{}\"", f.label), f.item.is_some(), per_env));
+        }
+        let extras = e.extra.get(provider).into_iter().flatten();
+        for (key, args) in extras {
+            let Some(b) = m.blocks.iter().find(|b| &b.key == key) else {
+                continue;
+            };
+            let Some(names) = name_args.get(&b.resource) else {
+                continue;
+            };
+            for arg in args.keys().filter(|a| names.contains(*a)) {
+                let per_env = resolved
+                    .iter()
+                    .map(|rp| {
+                        let v = rp
+                            .entity(e.id)
+                            .and_then(|re| re.extra.get(provider)?.get(key)?.get(arg));
+                        match v {
+                            Some(serde_json::Value::String(s)) => vec![s.clone()],
+                            _ => Vec::new(),
+                        }
+                    })
+                    .collect();
+                held.push((
+                    format!("the extra argument `{arg}` of {}", b.resource),
+                    false,
+                    per_env,
+                ));
+            }
+        }
+        for (what, rows, per_env) in held {
+            let Some((a, b, shared)) = pairs.iter().find_map(|(a, b)| {
+                let shared: Vec<&String> = per_env[*a]
+                    .iter()
+                    .filter(|s| !s.trim().is_empty() && per_env[*b].contains(s))
+                    .collect();
+                (!shared.is_empty()).then_some((*a, *b, shared))
+            }) else {
+                continue;
+            };
+            let quoted: Vec<String> = shared.iter().map(|s| format!("\"{s}\"")).collect();
+            let (said, it) = if shared.len() > 1 {
+                (format!("the {what} entries {} are", quoted.join(", ")), "them")
+            } else if rows {
+                (format!("the {what} entry {} is", quoted[0]), "it")
+            } else {
+                (format!("{what} is {}", quoted[0]), "it")
+            };
+            out.push(Diagnostic {
+                entity: Some(e.id.to_string()),
+                severity: Severity::Warning,
+                code: Code::Environment,
+                message: format!(
+                    "\"{}\": {said} in {} and {} alike, but the names the prefix makes differ ({}-…, {}-…): in one account the two environments would collide on {it}. Put ${{var.name_prefix}} or ${{var.environment}} in {it}, e.g. \"{}\"",
+                    e.name,
+                    envs[a],
+                    envs[b],
+                    prefixes[a],
+                    prefixes[b],
+                    following_name(shared[0], envs, &prefixes)
+                ),
+                provider: None,
+            });
+        }
+    }
+    out
+}
+
+/// A hand-set name rewritten to follow the environment: an environment's prefix in it,
+/// or the part all the prefixes share at its start (`zipos-web` for
+/// `zipos-${var.environment}`), or else an environment's name as a word of it, replaced
+/// by its variable; failing all three, the prefix put in front.
+fn following_name(name: &str, envs: &[String], prefixes: &[String]) -> String {
+    if let Some(p) = prefixes
+        .iter()
+        .find(|p| !p.is_empty() && name.contains(p.as_str()))
+    {
+        return name.replacen(p.as_str(), "${var.name_prefix}", 1);
+    }
+    let mut stem = prefixes[0].as_str();
+    for p in prefixes {
+        let n = stem
+            .char_indices()
+            .zip(p.chars())
+            .take_while(|((_, a), b)| a == b)
+            .last()
+            .map_or(0, |((i, c), _)| i + c.len_utf8());
+        stem = &stem[..n];
+    }
+    if let Some(cut) = stem.rfind(['-', '_']) {
+        let (head, sep) = (&stem[..cut], &stem[cut..=cut]);
+        if let Some(rest) = name.strip_prefix(&stem[..=cut]).filter(|_| !head.is_empty()) {
+            return format!("${{var.name_prefix}}{sep}{rest}");
+        }
+    }
+    let word = |i: usize, len: usize| {
+        let before = name[..i].chars().next_back();
+        let after = name[i + len..].chars().next();
+        !before.is_some_and(|c| c.is_ascii_alphanumeric())
+            && !after.is_some_and(|c| c.is_ascii_alphanumeric())
+    };
+    for env in envs {
+        if let Some((i, _)) = name
+            .match_indices(env.as_str())
+            .find(|(i, _)| word(*i, env.len()))
+        {
+            return format!("{}${{var.environment}}{}", &name[..i], &name[i + env.len()..]);
+        }
+    }
+    format!("${{var.name_prefix}}-{name}")
 }
 
 /// Every string an entity carries in its fields and `extra` arguments (outside `$raw`):
@@ -368,7 +540,7 @@ pub fn other_environments(
 /// Generate one root for every environment of `p` (see the module docs).
 pub fn generate(p: &Project, cat: &Catalog, provider: &str, tool: Tool) -> Result<Generated, GenError> {
     let envs = p.settings.environments.clone();
-    let own = checks(p, cat);
+    let own = checks(p, cat, provider);
     if own.iter().any(|d| d.severity == Severity::Error) {
         return Err(GenError::Blocked(own));
     }
@@ -725,26 +897,31 @@ impl Lifter<'_> {
         if self.field_for(hint, &slots).is_some() {
             return var_ref(&self.var_for(hint, &slots));
         }
-        // A field that has one value exactly where the block exists (the WAF's mode is
-        // "count"): `var.<field> == "count"`.
-        let by_value = self.fields.iter().find_map(|f| {
-            let mut on: Option<&Expression> = None;
-            for (p, v) in present.iter().zip(&f.values) {
-                if *p == Some(true) {
-                    let v = v.as_ref()?;
-                    if on.is_some_and(|x| x != v) {
-                        return None;
+        // A choice field that has one option exactly where the block exists (the WAF's
+        // mode is "count"): `var.<field> == "count"`. A free value (an instance class
+        // only prod's database has) decides nothing, however it happens to line up.
+        let by_value = self
+            .fields
+            .iter()
+            .filter(|f| !f.options.is_empty())
+            .find_map(|f| {
+                let mut on: Option<&Expression> = None;
+                for (p, v) in present.iter().zip(&f.values) {
+                    if *p == Some(true) {
+                        let v = v.as_ref()?;
+                        if on.is_some_and(|x| x != v) {
+                            return None;
+                        }
+                        on = Some(v);
                     }
-                    on = Some(v);
                 }
-            }
-            let on = on?.clone();
-            let fits = present
-                .iter()
-                .zip(&f.values)
-                .all(|(p, v)| *p != Some(false) || v.as_ref() != Some(&on));
-            fits.then(|| (f.name.clone(), f.values.clone(), on))
-        });
+                let on = on?.clone();
+                let fits = present
+                    .iter()
+                    .zip(&f.values)
+                    .all(|(p, v)| *p != Some(false) || v.as_ref() != Some(&on));
+                fits.then(|| (f.name.clone(), f.values.clone(), on))
+            });
         if let Some((field, values, on)) = by_value {
             let slots: Vec<Slot> = values
                 .iter()
@@ -768,8 +945,10 @@ impl Lifter<'_> {
     }
 
     /// Is the value a project variable, or a string built from them or from the name
-    /// prefix, in every environment? Then that is what to write.
-    fn project_var_expr(&mut self, slots: &[Slot]) -> Option<Expression> {
+    /// prefix, in every environment? Then that is what to write. With `varying`, only a
+    /// template whose value differs between environments counts: what is the same
+    /// everywhere is as well written as it is.
+    fn project_var_expr(&mut self, slots: &[Slot], varying: bool) -> Option<Expression> {
         let concrete: Vec<(usize, &Expression)> = slots
             .iter()
             .enumerate()
@@ -787,6 +966,10 @@ impl Lifter<'_> {
                 .strip_prefix("${var.")
                 .and_then(|r| r.strip_suffix('}'))
                 .filter(|r| !r.contains('}'));
+            let inst = |vars| ttg_core::environment::substitute(&t, vars);
+            if varying && facts.vars.iter().all(|v| inst(v) == inst(&facts.vars[0])) {
+                continue;
+            }
             let fits = concrete.iter().all(|(i, v)| {
                 let inst = ttg_core::environment::substitute(&t, &facts.vars[*i]);
                 match whole {
@@ -828,7 +1011,7 @@ impl Lifter<'_> {
         // A name behind the name prefix: as it is, in snake case, or with its hyphens
         // dropped (a name that takes letters and digits only).
         let prefixes: Vec<String> = facts.vars.iter().map(|v| v["name_prefix"].display()).collect();
-        if prefixes.iter().any(|p| p.is_empty()) {
+        if prefixes.iter().any(|p| p.is_empty()) || varying && prefixes.iter().all(|p| *p == prefixes[0]) {
             return None;
         }
         let forms: [(&str, &str); 3] = [
@@ -871,12 +1054,16 @@ impl Lifter<'_> {
             return Ok(None);
         };
         if concrete.iter().all(|s| s.same(&first)) {
+            let present: Vec<bool> = slots.iter().map(|s| !matches!(s, Slot::Any)).collect();
             return Ok(match first {
+                // The same wherever it is read; where some environment never reads it,
+                // the value may still be that environment's own.
+                Slot::Val(e) if present.contains(&false) => Some(self.follow(e.clone(), &present)),
                 Slot::Val(e) => Some(e.clone()),
                 _ => None,
             });
         }
-        if let Some(x) = self.project_var_expr(slots) {
+        if let Some(x) = self.project_var_expr(slots, false) {
             return Ok(Some(x));
         }
         let vals: Vec<&Expression> = concrete
@@ -888,6 +1075,25 @@ impl Lifter<'_> {
             .collect();
         let literal = vals.iter().all(|e| is_literal(e));
         let all_set = vals.len() == concrete.len();
+        // Arithmetic on numbers alone (a threshold worked out from each environment's
+        // instance class, `floor(75 * 87 / 100)`) is lifted as the number it comes to.
+        if all_set && !literal {
+            let folded: Option<Vec<Option<Expression>>> = slots
+                .iter()
+                .map(|s| match s {
+                    Slot::Val(e) => folded_number(e).map(Some),
+                    _ => Some(None),
+                })
+                .collect();
+            if let Some(folded) = folded {
+                let slots: Vec<Slot> = folded
+                    .iter()
+                    .map(|f| f.as_ref().map(Slot::Val).unwrap_or(Slot::Any))
+                    .collect();
+                let name = self.var_for(hint, &slots);
+                return Ok(Some(var_ref(&name)));
+            }
+        }
         // Scalars are lifted whole; a list, map or call of the same shape everywhere is
         // merged part by part, so only what differs inside it becomes a variable.
         if all_set && vals.iter().all(|e| is_container(e)) {
@@ -914,6 +1120,12 @@ impl Lifter<'_> {
                 None => groups.push((v, vec![env.clone()])),
             }
         }
+        // Each branch is read only in its own environments.
+        let envs = self.envs().to_vec();
+        for (v, es) in groups.iter_mut() {
+            let present: Vec<bool> = envs.iter().map(|e| es.contains(e)).collect();
+            *v = self.follow(std::mem::replace(v, Expression::Null), &present);
+        }
         let (mut out, _) = groups.pop().expect("at least two groups");
         while let Some((v, es)) = groups.pop() {
             let refs: Vec<&str> = es.iter().map(String::as_str).collect();
@@ -921,6 +1133,40 @@ impl Lifter<'_> {
             out = Expression::Conditional(Box::new(Conditional::new(cond, v, out)));
         }
         out
+    }
+
+    /// A value read only in the environments `present` marks, as it is there. Every
+    /// string in it that is a name behind their prefix, or an instance of a template of
+    /// the entity's, where the others would make it differently, is written as that
+    /// template: else one environment's name (`"zipos-prod-db"` in a block only prod
+    /// has) is left in the configuration they all share, and stays behind when the
+    /// environments change.
+    fn follow(&mut self, e: Expression, present: &[bool]) -> Expression {
+        match e {
+            Expression::String(_) => {
+                let slots: Vec<Slot> = present
+                    .iter()
+                    .map(|p| if *p { Slot::Val(&e) } else { Slot::Any })
+                    .collect();
+                let x = self.project_var_expr(&slots, true);
+                x.unwrap_or(e)
+            }
+            Expression::Array(items) => {
+                Expression::Array(items.into_iter().map(|x| self.follow(x, present)).collect())
+            }
+            Expression::Object(o) => {
+                Expression::Object(o.into_iter().map(|(k, v)| (k, self.follow(v, present))).collect())
+            }
+            Expression::FuncCall(mut f) => {
+                f.args = std::mem::take(&mut f.args)
+                    .into_iter()
+                    .map(|x| self.follow(x, present))
+                    .collect();
+                Expression::FuncCall(f)
+            }
+            Expression::Parenthesis(x) => Expression::Parenthesis(Box::new(self.follow(*x, present))),
+            other => other,
+        }
     }
 
     /// Part-by-part merge of lists, maps and calls with the same shape everywhere.
@@ -1187,6 +1433,47 @@ fn child<'a>(
             Some(e) => pick(e).map(Slot::Val).unwrap_or(Slot::Unset),
         })
         .collect()
+}
+
+/// The number an expression of numbers, arithmetic, `floor` and `ceil` alone comes to.
+fn folded_number(e: &Expression) -> Option<Expression> {
+    use hcl::expr::{BinaryOperator as B, Operation, UnaryOperator};
+    fn eval(e: &Expression) -> Option<f64> {
+        match e {
+            Expression::Number(n) => n.as_f64(),
+            Expression::Parenthesis(x) => eval(x),
+            Expression::Operation(op) => match op.as_ref() {
+                Operation::Unary(u) if u.operator == UnaryOperator::Neg => Some(-eval(&u.expr)?),
+                Operation::Binary(b) => {
+                    let (l, r) = (eval(&b.lhs_expr)?, eval(&b.rhs_expr)?);
+                    match b.operator {
+                        B::Plus => Some(l + r),
+                        B::Minus => Some(l - r),
+                        B::Mul => Some(l * r),
+                        B::Div if r != 0.0 => Some(l / r),
+                        _ => None,
+                    }
+                }
+                _ => None,
+            },
+            Expression::FuncCall(f) if f.args.len() == 1 && f.name.namespace.is_empty() => {
+                let x = eval(&f.args[0])?;
+                match f.name.name.as_str() {
+                    "floor" => Some(x.floor()),
+                    "ceil" => Some(x.ceil()),
+                    _ => None,
+                }
+            }
+            _ => None,
+        }
+    }
+    let x = eval(e)?;
+    let n = if x.fract() == 0.0 && x.abs() < 1e15 {
+        hcl::Number::from(x as i64)
+    } else {
+        hcl::Number::from_f64(x)?
+    };
+    Some(Expression::Number(n))
 }
 
 /// The text of a plain value (`50`, `"50"`, `true`), for comparing across types.

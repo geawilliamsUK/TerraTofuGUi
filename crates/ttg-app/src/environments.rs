@@ -53,15 +53,14 @@ impl TtgApp {
     }
 
     /// Diagnostics for the shown environment, plus the checks of the environments and
-    /// overrides as written.
+    /// overrides as written (the shown project is resolved, the base values too once
+    /// anything uses a variable, so they are not among its own).
     pub fn diagnostics_for_shown(&self) -> Vec<ttg_codegen::Diagnostic> {
         let provider = &self.project.settings.target_provider;
         let mut out = ttg_codegen::diagnostics::run(&self.shown_project(), &self.catalog, provider);
-        if self.env.current.is_some() {
-            for d in ttg_codegen::environments::checks(&self.project, &self.catalog) {
-                if !out.contains(&d) {
-                    out.push(d);
-                }
+        for d in ttg_codegen::environments::checks(&self.project, &self.catalog, provider) {
+            if !out.contains(&d) {
+                out.push(d);
             }
         }
         out

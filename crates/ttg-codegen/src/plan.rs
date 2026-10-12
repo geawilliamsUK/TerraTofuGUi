@@ -11,7 +11,10 @@
 //! - a `string_list` entry by its value,
 //! - a `struct_list` row by its `for_each_key` item, else its `name` item.
 //!
-//! The key is slugified into the local name (`ecr_repo_zipos_web`). Two rows whose keys
+//! The key is slugified into the local name (`ecr_repo_zipos_web`). A key behind a name
+//! prefix that names the environment is named without it: `${var.name_prefix}-web` is
+//! `zipos-prod-web` in prod and `zipos-staging-web` in staging, and both are
+//! `ecr_repo_web`, one resource of the configuration they share. Two rows whose keys
 //! slugify alike get `_2`, `_3`, … in row order; a row with no key keeps its row index.
 //! Data sources collapse instead: rows sharing a key share one lookup.
 //!
@@ -256,7 +259,7 @@ fn plan_block(
         for (n, row) in surviving {
             let key = row_key(p, b, row);
             let mut local = match &key {
-                Some(k) => format!("{base}_{}", ttg_core::slugify(k)),
+                Some(k) => format!("{base}_{}", ttg_core::slugify(unprefixed(p, k))),
                 None => format!("{base}_{n}"),
             };
             if used.contains(&local) {
@@ -303,6 +306,21 @@ fn row_key(p: &Project, b: &BlockDef, row: &Row) -> Option<String> {
         None => "value",
     };
     r.get(item).map(|v| v.display()).filter(|s| !s.trim().is_empty())
+}
+
+/// A row key without the name prefix in front of it, when the prefix names one of the
+/// project's environments (so differs between them).
+fn unprefixed<'a>(p: &Project, key: &'a str) -> &'a str {
+    let Some(prefix) = p.settings.name_prefix.as_deref() else {
+        return key;
+    };
+    let names_env = prefix
+        .split(['-', '_'])
+        .any(|w| p.settings.environments.iter().any(|e| e == w));
+    key.strip_prefix(prefix)
+        .and_then(|r| r.strip_prefix(['-', '_']))
+        .filter(|r| names_env && !r.is_empty())
+        .unwrap_or(key)
 }
 
 /// `<slug>` for the `main` block, `<slug>_<key>` for any other.

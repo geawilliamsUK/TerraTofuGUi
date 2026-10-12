@@ -111,7 +111,7 @@ pub fn run(full: &Project, cat: &Catalog, provider: &str) -> Vec<Diagnostic> {
     // Environments, overrides and project variables are checked as written; everything
     // else on the values they resolve to (the base values: an environment's own run is
     // `run(&p.for_environment(env), …)`).
-    let mut out = crate::environments::checks(full, cat);
+    let mut out = crate::environments::checks(full, cat, provider);
     // Adopted entities some environment leaves out (read from the overrides, as written).
     out.extend(crate::adopt::environment_checks(full, cat, provider));
     let resolved = full.resolved(None);
