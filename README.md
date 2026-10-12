@@ -225,7 +225,7 @@ OpenTofu installed, so a definition change that produces invalid HCL fails the b
   certificates), public (load balancers, gateways, public subnets), application, data
   (databases, caches, buckets, queues), regional services (identity, secrets, logs,
   alarms, topics, budgets) — with one row per availability zone so subnet *a* of every
-  tier lines up (what spans zones under them, the security groups last), inside every
+  tier lines up (what spans zones in a row between them, the security groups last), inside every
   network and subnet too; a subnet's tier comes from its route table (public with a
   route to an internet gateway, otherwise application or data by what is in it, else
   by its route via NAT or none) and what is in a public subnet goes with it, a security

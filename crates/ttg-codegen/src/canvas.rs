@@ -296,14 +296,13 @@ pub fn tier_row(p: &Project, cat: &Catalog, id: &str) -> String {
     }
 }
 
-/// Row of what is in no zone or several, after the zones' own.
-const SHARED_ROW: &str = "~";
 /// Row of the security groups, last: the firewall under everything it protects.
 const FIREWALL_ROW: &str = "~~";
 
 /// Lay the project out by tiers (see [`tiers`] and `ttg_core::layout::tidy_tiers`):
 /// bands left to right, or top to bottom with `vertical`, one row per availability zone
-/// — the subnets on top, then what is shared by several zones, then the security groups.
+/// with what spans several zones in a row of its own in the middle of them, so its links
+/// fan out to the zones above and below, and the security groups last, in a grid.
 pub fn tidy_by_tiers(
     p: &mut Project,
     cat: &Catalog,
@@ -328,6 +327,19 @@ pub fn tidy_shown_by_tiers(
     vertical: bool,
 ) {
     let tier = tiers(p, cat, overrides);
+    let zones: Vec<String> = p
+        .entities()
+        .iter()
+        .map(|e| tier_row(p, cat, e.id))
+        .filter(|z| !z.is_empty())
+        .collect::<BTreeSet<_>>()
+        .into_iter()
+        .collect();
+    // The shared row sorts just after the first half of the zones.
+    let shared = match zones.len() / 2 {
+        0 => String::new(),
+        half => format!("{}~", zones[half - 1]),
+    };
     let rows: BTreeMap<Id, String> = p
         .entities()
         .iter()
@@ -335,7 +347,7 @@ pub fn tidy_shown_by_tiers(
             let row = match tier_row(p, cat, e.id) {
                 zone if !zone.is_empty() => zone,
                 _ if e.resource_type == "security_group" => FIREWALL_ROW.into(),
-                _ => SHARED_ROW.into(),
+                _ => shared.clone(),
             };
             (e.id.to_string(), row)
         })
@@ -344,6 +356,7 @@ pub fn tidy_shown_by_tiers(
         band: tier.get(id).copied().unwrap_or(Tier::App).index(),
         row: rows.get(id).cloned().unwrap_or_default(),
         first: q.entity(id).is_some_and(|e| e.resource_type == "subnet"),
+        grid: q.entity(id).is_some_and(|e| e.resource_type == "security_group"),
         hidden: !shown(id)
             || (q.containers.contains_key(id) && !ttg_core::view::has_visible_members(q, id, shown)),
     };

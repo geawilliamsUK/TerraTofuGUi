@@ -166,16 +166,19 @@ land in the view's own layout and the boxes are refitted around their members.
 `ttg_core::layout::tidy_tiers` lays a project out in tier bands (edge, public, app, data,
 regional; left to right or top to bottom) crossed by rows in name order, recursively
 inside every container and every subnet holding resources, each fitted to what it holds;
-a cell stacks at most six items before it wraps and is ordered by where its links lead
-(barycentre sweeps), and what the caller calls hidden takes no room (so a filtered view
+a cell stacks at most six items before it wraps (a `grid` cell, the security groups,
+is laid out as a square) and is ordered by where its links lead (barycentre sweeps,
+aiming into a box at the place inside it), and what the caller calls hidden takes no room (so a filtered view
 is laid out as if it were all there is). Where each entity goes is
 `ttg_codegen::canvas`'s business: the type's tier (the definition's `tier`, else its
 category's), a subnet's from its route table (`subnet_route`: public by a default route
 via an internet gateway, else app or data by what is in it, else by NAT or no route),
 which also takes what is in a public subnet, else from what is in it or linked to it, a
 security group's from what carries it, a route table's from its subnets, a container's
-from what it holds, and the row from the zones of the subnets it is in: a row per zone,
-then what spans zones, then the security groups. The same module derives what else the canvas shows without storing it:
+from what it holds, and the row from the zones of the subnets it is in: a row per zone
+with what spans zones in a row between them (halfway down the zones, so its links to
+each zone fan up and down), then the security groups. The same module derives what else
+the canvas shows without storing it:
 security-group rule rows as edges (`rule_edges`: group to group in the direction of the
 traffic, or an `Outside` peer — the internet, a CIDR, an AWS-managed prefix list),
 monitoring links (`is_monitoring_link`, any link from or to the `monitoring` category,

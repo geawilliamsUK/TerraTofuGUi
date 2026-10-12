@@ -528,8 +528,9 @@ fn subnets_take_their_tier_from_their_route_table() {
 }
 
 /// The network view reads left to right — internet gateway, public, private, isolated —
-/// with a row per availability zone across the tiers, the zones' subnets above what spans
-/// them and the security groups last, and lays out only what the view shows.
+/// with a row per availability zone across the tiers, what spans the zones in a row
+/// between them (its links fan up and down) and the security groups last, in a grid; and
+/// it lays out only what the view shows.
 #[test]
 fn the_network_view_groups_subnets_by_tier_and_zone() {
     let cat = Catalog::builtin();
@@ -556,9 +557,16 @@ fn the_network_view_groups_subnets_by_tier_and_zone() {
     assert_eq!(y("sub-app-a"), y("sub-db-a"));
     assert_eq!(y("sub-pub-b"), y("sub-db-b"));
     assert!(y("sub-pub-a") < y("sub-pub-b"));
-    // What spans zones is under their subnets, the firewall under that.
-    assert!(y("lb-shop") > y("sub-db-b") && y("rt-public") > y("sub-db-b"));
-    assert!(y("sg-lb") > y("lb-shop"));
+    // What spans the two zones is between their rows, the firewall under both.
+    for shared in ["lb-shop", "rt-public", "db-shop"] {
+        assert!(
+            y("sub-pub-a") < y(shared) && y(shared) < y("sub-pub-b"),
+            "{shared}"
+        );
+    }
+    assert!(y("sg-lb") > y("sub-db-b") && y("sg-db") > y("sub-db-b"));
+    // The groups of a tier are a grid, not a column: four take two rows of two.
+    assert_eq!(y("sg-lb"), y("sg-web"), "{:?}", [y("sg-lb"), y("sg-web")]);
     // The database is with the tier of its subnets, not the gateway's.
     assert!(x("lb-shop") < x("db-shop"));
     // Nothing is drawn on top of anything else.
