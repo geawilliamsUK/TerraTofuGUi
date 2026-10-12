@@ -49,8 +49,10 @@ impl TtgApp {
         Some(label)
     }
 
-    /// The frame's world rect: the bounds of the visible entities, padded, with room for
-    /// the label on top. `None` when the frame is off or there is nothing to frame.
+    /// The frame's world rect: the bounds of the visible entities and of the view's
+    /// grouping boxes and logical nodes, padded, with room for the label on top, so a
+    /// box in the top-left corner never sits under it. `None` when the frame is off or
+    /// there is nothing to frame.
     pub fn region_frame_rect(&self) -> Option<Rect> {
         if !self.show_region_frame {
             return None;
@@ -63,6 +65,16 @@ impl TtgApp {
             }
             if let Some(er) = self.entity_rect(e.id) {
                 r = Some(r.map_or(er, |x| x.union(er)));
+            }
+        }
+        if let Some(v) = self.active_view() {
+            let boxes = v
+                .groups
+                .iter()
+                .map(ttg_core::view::group_rect)
+                .chain(v.logicals.iter().map(ttg_core::view::logical_rect));
+            for b in boxes.map(crate::annotations::to_rect) {
+                r = Some(r.map_or(b, |x| x.union(b)));
             }
         }
         let r = r?;
@@ -96,4 +108,41 @@ pub fn draw_frame(app: &TtgApp, ui: &mut Ui, origin: Pos2) {
         FontId::proportional((13.0 * zoom).max(7.0)),
         ink,
     );
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::path::Path;
+
+    /// The label strip is above everything the frame holds, whatever the view draws
+    /// there: a grouping box placed where the label would be only pushes the frame out.
+    #[test]
+    fn the_frame_label_stays_clear_of_a_group_at_the_top_left() {
+        let mut app = TtgApp::build(&egui::Context::default(), None, None, None);
+        let example = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../examples/containers.ttg.json");
+        app.project = ttg_core::project::load(&example).unwrap();
+        app.project
+            .views
+            .push(ttg_core::View::new("v", Default::default()));
+        app.activate_view(Some(0));
+        app.show_region_frame = true;
+        let bare = app.region_frame_rect().expect("a frame around the example");
+        // A box whose label sits in the frame's top-left corner.
+        let corner = bare.min + egui::vec2(8.0, 8.0);
+        let pos = ttg_core::Position {
+            x: corner.x as i32,
+            y: corner.y as i32,
+        };
+        app.add_group("Edge", pos, ttg_core::Size { w: 300, h: 200 }, None)
+            .unwrap();
+        let frame = app.region_frame_rect().unwrap();
+        let group = app.active_view().unwrap().groups[0].clone();
+        let g = crate::annotations::to_rect(ttg_core::view::group_rect(&group));
+        assert!(frame.contains_rect(g), "{frame:?} should hold {g:?}");
+        assert!(
+            g.min.y >= frame.min.y + FRAME_LABEL && g.min.x >= frame.min.x,
+            "the label strip of {frame:?} is over the group {g:?}"
+        );
+    }
 }
