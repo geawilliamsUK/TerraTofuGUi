@@ -377,8 +377,11 @@ OpenTofu installed, so a definition change that produces invalid HCL fails the b
   and the diagnostics, reachability and cost answer for it — a check that fails only in
   prod says `[prod]`. Links can be tagged with the environments they belong to, a **name
   prefix** such as `zipos-${var.environment}` goes in front of every generated resource
-  name so environments can share an account, and **project variables** declared once
-  with a value per environment can be used in any field as `${var.db_class}`. The export
+  name so environments can share an account (a name set by hand — an `extra` name, a
+  bucket name, a registry's repositories — that two environments would share is a
+  warning saying what to write, such as `"${var.name_prefix}-alb"`), and **project
+  variables** declared once with a value per environment can be used in any field as
+  `${var.db_class}`. The export
   stays one configuration per provider: values that differ become variables set in
   `environments/<env>.tfvars`, a resource only prod has gets a `count`, and each
   environment keeps its own state (`environments/<env>.backend.hcl`); what cannot be said
@@ -395,7 +398,8 @@ OpenTofu installed, so a definition change that produces invalid HCL fails the b
   what it watches — connections above what the database's class allows, a percentage
   above 100, a value below 0, more nodes than the cluster's pools hold — and the
   `db_connections_pct` metric gives the threshold as a share of the class's connection
-  limit, worked out at export.
+  limit, worked out at export (per environment when the class differs between them, the
+  number set in each `.tfvars`).
 - **Database URIs**: a Secret built from a database URL-encodes the credentials and asks
   for TLS (`sslmode=require`, MySQL `ssl-mode=REQUIRED`) when the server forces it, or as
   its TLS mode says.

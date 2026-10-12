@@ -948,6 +948,13 @@ merges the results block by block:
   found by instantiating the entity's own `${var.…}` strings per environment), or a name
   behind the name prefix (as it is, snake-cased or with its hyphens dropped), is written
   as that variable or template, and the variable declared once (`db_class`, `name_prefix`);
+  so is such a string in a value only some environments read (a block only prod has, a
+  `var.environment == …` branch), where it is the same everywhere it is read but would be
+  another environment's own: the final snapshot's `"${var.name_prefix}-db"`, not
+  `"zipos-prod-db"`;
+- arithmetic on numbers alone (`floor(75 * 87 / 100)`, a threshold worked out from each
+  environment's instance class) is folded to the number per environment and lifted like
+  a plain value (`db_connections_threshold = 65` / `642`);
 - any other plain value that differs becomes a variable of its own, named after the field
   when it *is* that field's value in every environment (`db_high_availability`; when two
   fields fit, the one sharing words with the argument wins, and with a tie the variable is
@@ -959,7 +966,8 @@ merges the results block by block:
 - a nested block some environments leave out becomes a `dynamic` block, and a resource
   some leave out (an entity `absent` there, a repeated block with fewer rows) a `count`,
   gated by the bool field that decides it (`var.db_high_availability ? [1] : []`), by a
-  field's value (`var.waf_mode == "count"`), or else by `var.environment`; references to a
+  choice field's option (`var.waf_mode == "count"`; a free value such as an instance class
+  that happens to line up decides nothing), or else by `var.environment`; references to a
   counted resource become `one(<address>[*].<attr>)`, outputs about it are null where it
   does not exist, and `depends_on` lists are joined;
 - `outputs.tf`, `providers.tf`, `variables.tf` and `versions.tf` are merged the same way
@@ -991,7 +999,16 @@ the other providers'. The export blocks on any environment's errors, tagged the 
 
 Names: `Project::resource_name` puts the rendered prefix in front of a display name, and
 the emitter uses it wherever a mapping builds a provider name from the entity's name
-(`field = "name"`, `{name}`, a relation's `field = "name"`). Zones: a provider field
+(`field = "name"`, `{name}`, a relation's `field = "name"`). What a project names by hand
+the prefix does not reach: `ttg_catalog::names` reads from the mappings which arguments
+are names (those filled from the entity's name or from a `unique_scope` field, less the
+ones that only describe it) and which fields feed them (the bucket's `bucket_name`, the
+rows of the registry's `repositories`), and once the rendered prefix differs between
+environments `environments::checks` warns about each such field or `extra` argument that
+comes out the same in two of them, with the value to write instead
+(`"${var.name_prefix}-alb"`, `"/zipos/${var.environment}/web"`). A repeated block's row
+key behind a prefix that names the environment is named without it
+(`ecr_repo_web` for `${var.name_prefix}-web`), so the row keeps one address. Zones: a provider field
 declared with `zone_of = "region"` (MAPPING_FORMAT §2.3) writes a bare zone letter as
 `"${var.region}a"`.
 

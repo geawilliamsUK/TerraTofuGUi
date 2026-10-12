@@ -276,7 +276,15 @@ does) give the *resource name*: the display name behind the project's rendered n
 prefix (`zipos-staging-db` for `db` with the prefix `zipos-${var.environment}`), so two
 environments can share an account. HCL local names, manual steps and descriptions keep
 the display name. Write names through these sources, not as literals, and the prefix
-reaches them.
+reaches them. The same sources tell the diagnostics which arguments are names
+(`ttg_catalog::names`): an argument filled from the entity's name, or from a field with
+`unique_scope`, is one — unless it only describes the resource (`description`,
+`comment`, `display_name`) — and a field written into such an argument, or a table field
+whose rows a repeated block writes into one (`{ item = "value" }` under
+`for_each_field`), holds names. When environments share an account, a value set by hand
+in one of those, or in an `extra` argument that overrides a name argument, that two
+environments would share is reported, so a new mapping gets the check by writing its
+names this way.
 
 **Environments.** A mapping needs nothing special for named environments: the export
 generates it once per environment and turns what differs into variables, `dynamic`
